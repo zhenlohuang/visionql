@@ -2,9 +2,9 @@
 
 > 承接 [PRD](./PRD.md) v0.1,给出 VisionQL 引擎的技术架构与模块设计。以 v0.1(MVP,库态单机端到端)为详细设计范围,同时为 v0.2+(服务态、集群态)的每一处演进预留架构挂载点。
 
-- **版本**: v0.3 (Draft)
-- **日期**: 2026-07-31
-- **对应 PRD**: v0.1.1
+- **版本**: v0.3.2 (Draft)
+- **日期**: 2026-08-03
+- **对应 PRD**: v0.1.3
 - **状态**: 评审中
 
 ---
@@ -19,7 +19,7 @@
 
 - **详细设计**:PRD 第 4 节 MVP 范围内的全部能力(类型系统、批表与 `FRAMES()`、RTSP 单流 + TUMBLE、模型/函数注册、Kafka/Lance Sink、帧采样下推、库态 + shell + DataFrame API);
 - **框架设计**:PRD 3.6 所列执行层能力中超出 MVP 的部分(级联优化、`TRACK`、精确一次等),只设计**挂载点**,不展开实现;
-- **不覆盖**:服务态/集群态的部署运维细节、Web 控制台、商业化功能。
+- **不覆盖**:服务态/集群态的部署运维细节、商业化功能;Workbench(Web 工作台,PRD 3.8)为独立子项目,详见 [Workbench 设计](./workbench_design.md)——本文档仅在 §21.1 记录其对引擎的接口需求。
 
 ### 1.2 阅读路径
 
@@ -70,8 +70,7 @@
 
 1. **PRD 3.3.8 的八项 SQL 可落地性原则是本设计的验收标准**(逐条对应见附录 A);
 2. 多模态类型只使用标准列式类型组合(Struct/Binary/FixedSizeList),不要求引擎具备用户自定义类型内核;
-3. 引擎内核不内嵌 Python 解释器;Python 运行时仅在注册了 Python 函数时激活;
-4. 官方模型接入层只内置宽松许可模型的接入路径(RT-DETR 系、CLIP 等);受限许可模型(YOLO 等)走用户显式引入,引擎不分发其权重(processor 为独立实现,不含上游代码,不受权重许可约束)。
+3. 引擎内核不内嵌 Python 解释器;Python 运行时仅在注册了 Python 函数时激活。
 
 ### 2.4 反过度设计守则与"刻意不做"清单
 
@@ -87,7 +86,7 @@
 |---|---|---|
 | 独立流引擎 / actor 框架 | 长驻的向量化 pipeline 已覆盖(ADR-2) | 不再议 |
 | 运行时插件系统(dylib/WASM 加载器) | 扩展点全部是编译期 trait + cargo feature(ADR-9) | 多租户用户代码出现时(v1.0,WASM UDF) |
-| 自研存储格式 / 向量索引 | Lance/Parquet + 引擎 TopK 够用 | 不再议 / v0.2 接 Lance 索引 |
+| 自研存储格式 / 向量索引 | Lance/Parquet + 引擎 TopK 够用 | 不再议 / v0.3 接 Lance 索引(按规模触发) |
 | MVP 阶段的物化视图目录登记 | 只登记不维护是半成品;解析后明确报"v0.2 支持" | v0.2 服务态 |
 | 模型显存 LRU 换出 | MVP 模型数量少;显存不足直接报错并提示 `DROP MODEL` 或改 endpoint | v0.2 GPU 池化 |
 | GPU 前处理 / nvJPEG / 分段并行解码 | CPU SIMD 前处理与解码在基线下均有富余(§17) | 批吞吐撞到解码墙时 |
@@ -182,7 +181,7 @@ sequenceDiagram
     P->>C: 注册对象(校验 WITH 参数归属)
     U->>P: INSERT INTO … SELECT …(持续查询)
     P->>O: 重写后的查询 AST
-    O->>C: 解析 cam_entrance→流源, yolo_det→函数→模型
+    O->>C: 解析 cam_entrance→流源, detect→函数→模型
     O->>O: 推理提取(InferExec)/ 采样确认(fps=5)
     O->>E: 物理计划(无界)
     loop 持续运行
@@ -289,7 +288,7 @@ IMAGE := Struct {
 - **淘汰语义确定**:消费点解引用已被淘汰的句柄 → 该行 `IMAGE` 置 NULL(§5.3 错误行语义),`evicted_refs` 指标独立计数并 WARN。这只可能发生在 live 丢帧模式;strict 与批路径靠阻塞背压将其排除;
 - 帧缓冲区复用:释放的像素 buffer 回收进 slab 重用,避免 6MB 级分配的 malloc churn。
 
-**单消费者融合(快路径)**:批查询中若像素只有一个消费点(最常见:`yolo_det(frame)`),规划器把解码直接融合进 InferExec 的输入流水线(§10.3)——帧的生命周期完全在单算子内,连帧仓都不经过。帧仓机制只在以下两种情况启用:流源(解码发生在摄入线程,天然与消费点分离)、一次解码多处消费(如同一帧既推理又存证据)。
+**单消费者融合(快路径)**:批查询中若像素只有一个消费点(最常见:`detect(frame)`),规划器把解码直接融合进 InferExec 的输入流水线(§10.3)——帧的生命周期完全在单算子内,连帧仓都不经过。帧仓机制只在以下两种情况启用:流源(解码发生在摄入线程,天然与消费点分离)、一次解码多处消费(如同一帧既推理又存证据)。
 
 ### 5.3 NULL 与错误行
 
@@ -306,7 +305,7 @@ IMAGE := Struct {
 1. **VQL DDL**(`CREATE STREAM/MODEL/FUNCTION/SINK`、`ALTER MODEL/FUNCTION`、`SHOW …`)→ 自有 AST → 目录操作,不进入查询规划(PRD 3.3.8-1c);
 2. **查询/DML**(`SELECT`、`INSERT INTO`、`CREATE TABLE … AS`)→ 前置重写(§6.2)→ DataFusion 逻辑规划。
 
-`CREATE TABLE … USING IMAGES/VIDEOS` 属 DDL,落目录为外部表定义。`CREATE MATERIALIZED VIEW` 与 `CREATE INDEX` 在 MVP **解析但拒绝执行**,报错明确指向 v0.2(守则 2.4-1:不做只登记不生效的半成品)。
+`CREATE TABLE … USING IMAGES/VIDEOS` 属 DDL,落目录为外部表定义。`CREATE MATERIALIZED VIEW` 与 `CREATE INDEX` 在 MVP **解析但拒绝执行**,报错分别明确指向 v0.2 与 v0.3(守则 2.4-1:不做只登记不生效的半成品)。
 
 ### 6.2 查询前置重写(语法糖归一化)
 
@@ -339,7 +338,7 @@ SQLite 单文件(默认 `./.visionql/catalog.db`,可经 `VISIONQL_HOME` 重定�
 |---|---|
 | `tables` | name, kind(IMAGES/VIDEOS/LANCE/PARQUET), location, options(JSON), schema(Arrow IPC) |
 | `streams` | name, uri, format, fps, event_time_col, watermark_interval_ms, options |
-| `models` | name, type(OBJECT_DETECTION/EMBEDDING;VQA 为 v0.3 保留值), source_uri, revision, **weights_sha256**, license, processor, constraints(JSON: precision/latency_slo/…) |
+| `models` | name, type(OBJECT_DETECTION/EMBEDDING;VQA 为 v0.3 保留值), source_uri, revision, **weights_sha256**, processor, constraints(JSON: precision/latency_slo/…) |
 | `functions` | name, impl_kind(MODEL/PYTHON/SQL_MACRO), signature(Arrow IPC), model_ref, entrypoint, macro_body, bound_params(JSON) |
 | `sinks` | name, uri, format, options |
 | `meta` | catalog 格式版本(schema 迁移锚点;v0.2 加物化视图表零成本) |
@@ -429,7 +428,6 @@ trait Processor {
 | `file://` / 本地路径 | 直接加载 ONNX,记录 sha256 |
 | `endpoint://http…` | 不下载权重;健康检查后注册;OpenAI 兼容 /v1 与自定义 JSON 两种适配 |
 
-许可信息从模型卡读取写入目录,`CREATE MODEL` 回显(PRD 2.5 模型许可风险);官方文档示例以宽松许可模型为准(检测:RT-DETR;嵌入:CLIP/SigLIP)。
 
 ### 8.3 前后处理(processor 注册表)
 
@@ -438,7 +436,7 @@ trait Processor {
 | processor | 前处理 | 后处理 |
 |---|---|---|
 | `rtdetr` | resize + 归一化(family 规格) | logits → (label, conf, box),无需 NMS |
-| `yolo` | letterbox + 归一化 | 解码 + NMS(IoU/conf 阈值为语义参数,属 FUNCTION `WITH`,经 PostprocessSpec 传入,§7.3) |
+| `yolo` | letterbox + 归一化 | v5~v11:解码 + NMS(IoU/conf 阈值为语义参数,属 FUNCTION `WITH`,经 PostprocessSpec 传入,§7.3);26 系端到端输出免 NMS,后处理仅置信度过滤 |
 | `clip_image` / `clip_text` | resize/center-crop + tokenizer(text 塔) | L2 归一化向量 |
 | `raw` | 透传(配合 Python UDF 自理前后处理) | 透传 |
 
@@ -484,7 +482,7 @@ AST(已重写) → LogicalPlan
 ### 9.3 MVP 优化规则(按 P4 优先级排列)
 
 **R1 推理调用提取(必选,正确性级别)**
-把投影/过滤表达式中的 `USING MODEL` 函数调用提取为独立 `InferenceNode`,原位置替换为列引用;同一输入表达式上的相同调用**去重合并**(`yolo_det(frame)` 在 SELECT 与 WHERE 各出现一次 → 只推理一次);去重作用于后端前向调用层,键 =(模型 sha256 × 输入表达式)——绑定参数不同的函数共享同一次前向、各自应用 PostprocessSpec(§7.3)。这同时是:异步执行的前提、跨行 batching 的前提、v0.3 级联/缓存优化的挂载点、`EXPLAIN` 成本核算的挂载点。
+把投影/过滤表达式中的 `USING MODEL` 函数调用提取为独立 `InferenceNode`,原位置替换为列引用;同一输入表达式上的相同调用**去重合并**(`detect(frame)` 在 SELECT 与 WHERE 各出现一次 → 只推理一次);去重作用于后端前向调用层,键 =(模型 sha256 × 输入表达式)——绑定参数不同的函数共享同一次前向、各自应用 PostprocessSpec(§7.3)。这同时是:异步执行的前提、跨行 batching 的前提、v0.3 级联/缓存优化的挂载点、`EXPLAIN` 成本核算的挂载点。
 
 **R2 像素列裁剪(P4 第一级:不解码)**
 查询未消费 `IMAGE` 像素(仅元数据/URI)时,计划中不存在解码阶段——引用态列直通。依托 DataFusion 列裁剪 + `FramesNode` 按需输出列声明,`FramesExec` 只 demux 时间戳不触碰解码器。
@@ -544,7 +542,7 @@ DataFusion 自带的计划 sanity check 会兜底拒绝部分 pipeline-breaking 
 ### 10.4 其余批算子
 
 - `UNNEST`:DataFusion 原生(`FROM t, UNNEST(expr) AS x` 直接映射,PRD 3.3.8-3);
-- 向量检索:`ORDER BY L2_DISTANCE(…) LIMIT k` 走 DataFusion TopK(堆式,不全排序)。`CREATE INDEX … USING HNSW` 与 ANN 改写为 v0.2 挂载点:规划器在此已按"存在索引则改写"预留判定位;
+- 向量检索:`ORDER BY L2_DISTANCE(…) LIMIT k` 走 DataFusion TopK(堆式,不全排序)——百万级 512 维向量的暴力扫描在百毫秒量级,索引到来前由它承载检索能力。`CREATE INDEX … USING HNSW` 与 ANN 改写为 v0.3 挂载点(与推理结果物化配套,按数据规模触发):规划器在此已按"存在索引则改写"预留判定位;
 - 元数据/已物化结果的交互查询(NFR P95 < 1s):Lance/Parquet 统计信息谓词裁剪 + 列裁剪,走 DataFusion 常规路径,无特殊设计;
 - `CREATE TABLE … AS SELECT` 落 Lance/Parquet,复用 §12 写出路径。
 
@@ -620,7 +618,7 @@ Bounded out-of-orderness:源维护 `max_event_time`,周期性(默认 200ms)发�
 
 ### 11.7 前台运行与停止
 
-`visionql run job.sql`:顺序执行 DDL,遇持续查询(无界 `INSERT INTO`)转前台运行,打印周期性指标行。Ctrl-C:停源 → drain 在途批 → **已完结窗口正常输出,未完结窗口丢弃**(半窗数据一旦输出会污染下游聚合,宁缺毋假)→ flush sink → 退出。二次 Ctrl-C 强杀。
+`visionql run job.sql`:顺序执行 DDL,遇持续查询(无界 `INSERT INTO`)转前台运行,打印周期性指标行。**无界裸 `SELECT`(无 `INSERT INTO`)同样合法**:结果行持续流式打印到终端(shell 内行为相同)——这是流查询的第一调试路径;console sink(§12)是它"保持 `INSERT INTO` 语句形状"的变体。Ctrl-C:停源 → drain 在途批 → **已完结窗口正常输出,未完结窗口丢弃**(半窗数据一旦输出会污染下游聚合,宁缺毋假)→ flush sink → 退出。二次 Ctrl-C 强杀。
 
 ---
 
@@ -631,6 +629,7 @@ Bounded out-of-orderness:源维护 `max_event_time`,周期性(默认 200ms)发�
 | **Kafka** | rdkafka producer;`FORMAT JSON`:标量常规序列化,时间戳 ISO-8601;**`IMAGE` 列默认序列化为元数据对象** `{"uri":…,"pts_ms":…,"width":…,"height":…}`,不含像素——需要像素时显式 `TO_JPEG(frame)`(Binary 列 → base64)。理由:防止用户无意间把 6MB/帧打进消息队列;显式优于隐式 |
 | **Lance 表** | `INSERT INTO` 追加写,IMAGE 内联化(JPEG)后作为 blob 列存储;流式场景按批 commit(秒级粒度),依赖 Lance 版本化保证读一致;PRD"证据帧留存"场景的落点 |
 | **Parquet** | 批场景互换格式;流式追加以滚动文件方式实现(按时间/大小切文件) |
+| **Console(调试)** | `TO 'console://'`,`FORMAT TABLE`(默认,shell 同款表格渲染,IMAGE 列摘要显示、不带像素,同 ADR-8 口径)或 `FORMAT JSON`。定位为前台调试件:生产作业的 `INSERT INTO` 语句形状不变,只换 Sink 定义即可调试——与"换绑不改查询"同一哲学。**仅前台执行有效**(shell / `visionql run`);服务态提交含 console sink 的持续查询直接拒绝,报错导向流式 SELECT 预览(Workbench / Flight SQL)——前台工具不冒充生产 Sink |
 | Webhook / 告警 | v0.2 |
 
 `CREATE SINK` 只登记目录;schema 在首次 `INSERT INTO` 规划时与查询输出校验。
@@ -662,7 +661,7 @@ visionql (pip 包)
 
 | 命令 | 行为 |
 |---|---|
-| `visionql shell` | rustyline REPL:多行输入、历史、`\d`(列出对象)、`\timing`;结果表格渲染,IMAGE/VIDEO 列摘要显示 |
+| `visionql shell` | rustyline REPL:多行输入、历史、`\d`(列出对象)、`\timing`;结果表格渲染,IMAGE/VIDEO 列摘要显示;无界 SELECT 流式打印,Ctrl-C 仅停止当前查询 |
 | `visionql run job.sql [--server host:port]` | 多语句脚本:DDL 顺序执行 → 持续查询前台运行(§11.7);`--server` MVP 仅占位报错("服务态 v0.2"),参数形状先行固定,兑现"notebook 验证,一条命令上线"的路径承诺 |
 | `visionql explain query.sql` | 输出 §9.4 格式 |
 
@@ -743,6 +742,8 @@ visionql (pip 包)
 
 ### 19.1 Crate 布局(Cargo workspace)
 
+仓库顶层按子项目平级切分:`engine/`(本节的引擎 cargo workspace)与 `workbench/`(Web 工作台,独立子项目,不属于本 workspace、不依赖任何 `vql-*` crate,见 [Workbench 设计](./workbench_design.md) §6),`docs/` 跨子项目共享。两个子项目互不出现在对方的构建文件中(引擎根 `Cargo.toml` 无需 `exclude` 寄居的第二 workspace),工具链与 CI 按目录前缀独立切分。引擎 workspace 的 crate 布局如下:
+
 | crate | 内容 | 依赖要点 |
 |---|---|---|
 | `vql-common` | 类型定义(三态 IMAGE、BOX2D…)、`StreamMessage` 通道契约类型(§11.1)、`MediaProber` 探测契约(§10.1)、错误、配置 | arrow |
@@ -783,7 +784,7 @@ visionql (pip 包)
 | 帧仓 | 消费进度回收专项:中间 Filter 丢行/整批滤空断言不泄漏、不阻塞、不死锁;消费者取消注销后水位继续推进;live 淘汰句柄解引用置 NULL 并计数(§5.2 的设计动机即测试用例) |
 | 媒体 | 固定测试视频资产(合成生成,可重复);解码采样正确性(fps=1 时帧 PTS 间隔断言);seek 模式切换阈值 |
 | 模型 | 固定小模型 + 固定输入 → 输出数值回归(容差);processor 前后处理单测 |
-| 端到端 | MVP 验收场景脚本化:本地 RTSP mock 回放 → PRD 3.2 全查询 → 校验 Kafka 消息;同一 SQL 换 `FROM` 历史视频表回算,**断言两者结果一致(相同模型与采样率)**——直接对应 PRD 成功指标"正确性"行 |
+| 端到端 | MVP 验收两场景脚本化(PRD 第 4 节)。**场景 A**:本地 RTSP mock 回放 → PRD 3.2 全查询 → 校验 Kafka 消息;同一 SQL 换 `FROM` 历史视频表回算,**断言两者结果一致(相同模型与采样率)**——直接对应 PRD 成功指标"正确性"行。**场景 B**(零依赖首触):本地图片目录 → Python UDF 过滤 → CLIP 嵌入 → 写 Lance → 以文搜图 TopK,全程无外部服务——兼作 Python UDF(§13.2)、EMBEDDING processor(§8.3)与暴力 TopK(§10.4)的端到端覆盖,并以计时断言 PRD 成功指标"激活"行(TTFV ≤ 5 分钟) |
 | 性能 | §17.3 基准套件,CI 趋势跟踪,回归 >10% 报警 |
 
 ---
@@ -814,7 +815,7 @@ visionql (pip 包)
 |---|---|
 | 服务态 `visionqld`(v0.2) | 内核无进程假设(§3.4);Flight SQL 前端为新增宿主 crate;目录 SQLite 加并发层;持续查询从"前台进程"改挂"查询管理器"(pipeline 本身不变);`--server` 参数形状已定(§14) |
 | `TRACK` / `HOP` / `SESSION`(v0.2) | 扩展类别 5;`TRACK` 的跨帧状态复用 §11.4 状态框架 |
-| 向量索引(v0.2) | 规划器 TopK 改写判定位已留(§10.4);Lance 原生 HNSW/IVF |
+| 向量索引(v0.3,随物化配套、按规模触发) | 规划器 TopK 改写判定位已留(§10.4);Lance 原生 HNSW/IVF;此前由暴力 TopK 承载检索 |
 | 物化视图维护(v0.2) | 目录 schema 版本迁移(§7.1);持续查询框架承载维护作业 |
 | Kafka 帧源(v0.2) | 契约已定:内联态 IMAGE + 惰性解码(§11.2)、offset frontier 至少一次(§11.5);扩展类别 4 接入,执行层零改动 |
 | 模型级联(v0.3) | R1 已把推理孤立为 `InferenceNode`;级联 = 节点改写为"小模型 + Filter + 大模型"子计划,同 `TYPE` 模型集合来自目录 |
@@ -822,6 +823,7 @@ visionql (pip 包)
 | 精确一次(v1.0) | `Barrier` 已在消息模型(§11.1);Kafka 事务 sink;状态检查点接 §11.4 状态表 |
 | Python worker 进程外(v0.2)/ WASM UDF(v1.0) | 跨进程边界必内联化已是既定规则(§5.2);函数实现子句是枚举槽位,`LANGUAGE WASM` 不动语法框架 |
 | MCP 服务器(v0.2) | 服务态 Flight SQL 之上的薄适配层 |
+| Workbench Web 工作台(v0.2) | 纯 Flight SQL 客户端、独立子项目([Workbench 设计](./workbench_design.md)),不需要引擎挂载点;对引擎仅两项新增,均落在既有扩展点:结果集 `vql.result.image_mode` 会话选项(Flight SQL 前端会话层,三态模型 §5.2 皆可承载)与 `FRAME_AT` 取帧函数(内置标量函数,复用解码会话缓存 §10.3) |
 | 边缘/中心切分(v1.x) | 规划层与执行层分离 + Arrow 序列化是前提,均已成立,无预埋代码(守则 2.4) |
 
 ---
@@ -850,7 +852,7 @@ visionql (pip 包)
 2. **RTSP `capture_time` 可信度**:大量廉价摄像头 RTCP SR 缺失或时钟漂移,回退 ingest_time 的比例需在设计伙伴现场实测,决定是否需要 NTP 校正选项;
 3. **Lance 流式追加成熟度**:高频小批 commit 的版本膨胀与压实策略,需 PoC 验证,否则流式证据留存先落 Parquet 滚动文件;
 4. **ort 在边缘 ARM(含 NPU)的 EP 覆盖**:影响 v1.x 边缘形态是否需要第二后端(扩展类别 3 已为此留好 trait 边界);
-5. **`IMAGE` 在客户端协议中的表示**(PRD 开放问题 5):引用 vs 内联影响 Flight SQL schema 设计,v0.2 前需定——三态模型两者皆可承载,倾向"默认引用 + 会话选项内联";
+5. **`IMAGE` 在客户端协议中的表示**(PRD 开放问题 5):引用 vs 内联影响 Flight SQL schema 设计,v0.2 前需定——三态模型两者皆可承载,倾向"默认引用 + 会话选项内联";Workbench 作为第一个消费者已按"默认引用 + `thumbnail` 会话选项 + `FRAME_AT` 点查"先行设计([Workbench 设计](./workbench_design.md) §3.2),v0.2 Flight SQL 前端据此定稿;
 6. **DataFusion 升级节奏**:自定义节点 API 历史上有破坏性变更,首次升级时评估是否需要薄适配层;
 7. **稀疏采样 seek 策略的实测(PoC)**:§9.3-R3 的"仅关键帧 + 按帧 seek"在不同 GOP 结构、VFR、S3 range-read 下的实际收益需 PoC 验证,§17.2 的采样吞吐估算以此为前提——在对外性能承诺前完成。
 
@@ -906,10 +908,3 @@ visionql (pip 包)
 | 安全与隐私 | §16 |
 | 兼容性承诺 | §7.1(目录格式版本锚点)、§15(指标名不承诺) |
 
----
-
-## 修订记录
-
-| 版本 | 日期 | 变更 |
-|---|---|---|
-| v0.1 | 2026-07-30 | 初版,对应 PRD v0.1 |

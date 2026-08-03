@@ -2,8 +2,8 @@
 
 > 一个面向多模态数据的批流一体查询与处理引擎:用 DataFrame 与 SQL 表达对图片、视频文件与视频流的语义查询。
 
-- **版本**: v0.1.1 (Draft)
-- **日期**: 2026-07-31
+- **版本**: v0.1.3 (Draft)
+- **日期**: 2026-08-03
 - **状态**: 评审中
 
 ---
@@ -47,7 +47,7 @@
 **目标用户**(按优先级):
 
 1. **数据/算法工程师**——今天负责手写视觉管道的人,核心用户,从库态(pip 包)进入;
-2. **数据分析师**——会 SQL 不会 PyTorch,声明式接口释放的新增用户,经服务态 + BI 直连进入(v0.2);
+2. **数据分析师**——会 SQL 不会 PyTorch,声明式接口释放的新增用户,经服务态 + Workbench/BI 直连进入(v0.2);
 3. **平台团队**——把视觉分析做成内部平台,需要多租户、治理与成本控制,企业版的买单方(v1.0);
 4. **AI 应用 / Agent 开发者**——把 VisionQL 当作智能体的"眼睛":Agent 以 SQL(或 MCP 工具)查询摄像头与视频库来回答问题、触发动作。SQL 是 LLM 生成成功率最高的目标语言,text-to-SQL 生态可直接复用。
 
@@ -78,19 +78,18 @@
    这些优化在黑盒 UDF 架构里根本做不了——**这是声明式引擎相对于胶水脚本的结构性优势,也是本产品最深的护城河**。
 3. **批流一体,一份逻辑**。同一查询在历史视频上回放验证,再原样上线到实时流,消除两套代码的维护与语义漂移。
 4. **视频从成本中心变成数据资产**。模型、数据源、查询结果都是目录中的一等公民:血缘可追、权限可管;推理结果物化后"一次推理、永久可查",新问题优先查物化结果而非重跑模型——视频资产的查询价值随使用复利增长。
-5. **合规内建**。"数据不出域"是架构默认而非部署选项;就地脱敏(打码/匿名化函数)、审计与血缘让敏感视频的每次使用可证明合规——在安防、零售等受个保法/GDPR 约束的场景,这是采购前提而非加分项,也是相对云视觉 API 的结构性差异。
+5. **合规内建**。"数据不出域"是架构默认而非部署选项(v0.1 起即成立);审计与血缘(v1.0 企业能力)让敏感视频的每次使用可证明合规——在安防、零售等受个保法/GDPR 约束的场景,这是采购前提而非加分项,也是相对云视觉 API 的结构性差异。
 6. **AI 时代的接口红利**。SQL 是 LLM 生成成功率最高的目标语言——把视觉世界暴露为可查询的表,等于给 Agent 一双稳定、可审计、可限权的眼睛(自然语言 → SQL → 画面答案)。"物理世界的查询引擎"因此也是 Agent 生态里的视觉感知层。
 
 ### 2.5 风险与挑战(诚实评估)
 
 | 风险 | 说明 | 缓解 |
 |---|---|---|
-| **推理成本仍然昂贵** | 即使优化 10x,大规模视频全量分析依然烧 GPU | 把"省钱"做成产品能力:成本预估(EXPLAIN 出预估 GPU 时长)、采样率显式可控、级联默认开启 |
-| **结果是概率性的** | 检测有漏检误检,COUNT(*) 不再是精确语义 | 置信度作为一等语义(阈值显式出现在查询中);提供 `WITH CONFIDENCE` 类原语;文档诚实说明 |
+| **推理成本仍然昂贵** | 即使优化 10x,大规模视频全量分析依然烧 GPU | 把"省钱"做成产品能力:成本预估(EXPLAIN 出预估 GPU 时长)、采样率显式可控、模型级联(开启策略以结果等效可解释为前提,随 v0.3 设计定) |
+| **结果是概率性的** | 检测有漏检误检,COUNT(*) 不再是精确语义 | 置信度作为一等语义(阈值显式出现在查询中);聚合层是否需要一等原语见开放问题 3;文档诚实说明 |
 | **SQL 表达力边界** | 复杂 CV 逻辑(标定、多目标关联规则)塞不进 SQL | 不追求 100% SQL 化:UDF/UDM(用户自定义模型)机制作为逃生舱,DataFrame API 承接复杂逻辑 |
 | **生态冷启动** | 引擎类产品依赖连接器与模型生态 | 首发聚焦"检测/跟踪/嵌入/VLM 问答"四类高频算子 + RTSP/S3/Kafka 三类连接器,做深一个场景(安防或审核)再横向扩 |
 | **与大厂产品线撞车** | Databricks/云厂商可能补齐多模态能力 | 以批流一体 + 视觉原生优化器建立差异;开源引擎聚拢社区 |
-| **模型许可合规** | 常用检测模型的许可证并不宽松(如 YOLO 系列为 AGPL-3.0),官方模型库若默认收录,商用分发有传染风险 | 官方模型库只收录宽松许可模型(Apache-2.0/MIT,如 RT-DETR 系);许可证写入目录元数据并在 `CREATE MODEL` 时展示;受限许可模型由用户显式引入、责任自担 |
 
 ---
 
@@ -102,7 +101,7 @@ VisionQL 的世界观:**一切视觉数据最终都是"帧的关系表"**。
 
 | 抽象 | 说明 |
 |---|---|
-| **多模态类型系统** | 在标准 SQL 类型之外新增:`IMAGE`、`VIDEO`、`AUDIO`、`BOX2D`(检测框)、`MASK`、`VECTOR(n)`(嵌入向量)、`STRUCT`/`ARRAY` 嵌套类型。v1 聚焦视觉模态;`AUDIO` 为预留类型,首个目标场景是直播审核的音画同判 |
+| **多模态类型系统** | 在标准 SQL 类型之外新增:`IMAGE`、`VIDEO`、`AUDIO`、`BOX2D`(检测框)、`MASK`、`VECTOR(n)`(嵌入向量)、`STRUCT`/`ARRAY` 嵌套类型。v1 聚焦视觉模态;`AUDIO`/`MASK` 为预留类型,`AUDIO` 的首个目标场景是直播审核的音画同判 |
 | **Table(表)** | 有界数据集。一个图片目录是一张表(每行一张图);一个视频文件目录也是一张表(每行一个视频,可展开为帧) |
 | **Stream(流)** | 无界数据集。一路 RTSP/摄像头/Kafka 帧流,schema 天然是帧表:`(ts TIMESTAMP, frame IMAGE, ...)`,自带事件时间与水位线 |
 | **Model(模型)** | 资源层对象:只持有影响成本/延迟的定义——权重来源、版本、任务类型、资源约束(精度、SLO);GPU 放置、副本数、动态 batching 由引擎运行时决策。只出现在资源调度中,不出现在查询里 |
@@ -127,11 +126,12 @@ CREATE STREAM cam_entrance
 FROM 'rtsp://10.0.0.15:554/main'
 WITH (fps = 5, event_time = 'capture_time', watermark = INTERVAL '2' SECOND);
 
--- ② 注册模型,并同时派生查询函数 yolo_det(1:1 语法糖,详见 3.3.2)
+-- ② 注册模型,并同时派生查询函数 detect(1:1 语法糖,详见 3.3.2)
+-- 函数按能力命名而非按模型命名——换绑模型时查询一行不改(见 3.3.3)
 CREATE MODEL yolo
 TYPE OBJECT_DETECTION
-FROM 'hf://ultralytics/yolov11n'
-FUNCTION yolo_det;
+FROM 'hf://ultralytics/yolo26n'
+FUNCTION detect;
 
 -- ③ 声明输出
 CREATE SINK people_per_minute
@@ -145,14 +145,16 @@ SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        MAX(person_cnt) AS peak_people
 FROM (
   SELECT ts,
-         COUNT_OBJECTS(yolo_det(frame), 'person', 0.6) AS person_cnt
+         COUNT_OBJECTS(detect(frame), 'person', 0.6) AS person_cnt
   FROM cam_entrance
 )
 GROUP BY 1;
 -- COUNT_OBJECTS(检测结果, 标签, 置信度阈值) 是内置数组函数,见 3.3.8 设计原则
 ```
 
-四步,约 20 行,零 Python、零部署脚本。交互模式下持续查询在前台运行,适合开发调试;生产化的常驻部署形态见 3.5。以下分主题展开 SQL 设计。
+四步,约 20 行,零 Python、零部署脚本。交互模式下持续查询在前台运行,适合开发调试;生产化的常驻部署形态见 3.5。
+
+手边没有摄像头和 Kafka 时,第一次接触不需要它们:`FROM` 换本地视频/图片目录表、Sink 换 console,同一旅程纯本地走通——"零外部依赖出首个结果"是 MVP 的验收场景之一(第 4 节场景 B)与激活指标(第 7 节 TTFV)。以下分主题展开 SQL 设计。
 
 ### 3.3 SQL 设计详解
 
@@ -197,7 +199,7 @@ WITH (event_time = 'ts', watermark = INTERVAL '5' SECOND);
 -- 只声明"是什么",放哪块 GPU、batch 多大等部署决策由引擎运行时负责,默认零配置
 CREATE MODEL yolo
 TYPE OBJECT_DETECTION
-FROM 'hf://ultralytics/yolov11n';
+FROM 'hf://ultralytics/yolo26n';
 
 -- 嵌入模型与远程端点同样是模型
 CREATE MODEL clip TYPE EMBEDDING FROM 'hf://openai/clip-vit-base-patch32';
@@ -205,10 +207,10 @@ CREATE MODEL qwen_vl TYPE VQA FROM 'endpoint://http://vlm-serving:8000';
 
 -- 语法糖(渐进披露):1:1 场景一条语句同时注册模型与派生函数。
 -- 入门用户只需理解 FUNCTION 一个概念,MODEL 在需要一对多/换绑/资源治理时才浮现
-CREATE MODEL yolo_nano
+CREATE MODEL yolo_l
 TYPE OBJECT_DETECTION
-FROM 'hf://ultralytics/yolo11n'
-FUNCTION nano_det;
+FROM 'hf://ultralytics/yolo26l'
+FUNCTION detect_l;
 ```
 
 **模型定义与部署解耦**:`CREATE MODEL` 不接受物理部署参数(设备、副本数、batch 大小)——那是运行时调度器的职责,随负载动态调整。`WITH` 子句只接受声明式约束与元信息,引擎在约束内自行决策,例如 `precision = 'fp16'`(精度)、`latency_slo = '50ms'`(延迟目标)、`resource_group = 'gpu-pool-a'`(多租户资源池)。物理钉死仅作为运维逃生舱经 `ALTER MODEL` 使用,不出现在建模语句里。
@@ -222,7 +224,7 @@ FUNCTION nano_det;
 ```sql
 -- TYPE 蕴含标准签名,签名与 RETURNS 可省略
 -- (OBJECT_DETECTION 标准签名: (IMAGE) -> ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>)
-CREATE FUNCTION yolo_det USING MODEL yolo;
+CREATE FUNCTION detect USING MODEL yolo;
 
 -- 同一模型派生带绑定参数的函数(WITH 只收影响结果的语义参数)
 CREATE FUNCTION person_det USING MODEL yolo
@@ -254,7 +256,7 @@ CREATE [OR REPLACE] FUNCTION name [(param type, ...)] [RETURNS type]
 
 ```sql
 -- 三种实现形状,同一个 FUNCTION 概念
-CREATE FUNCTION yolo_det USING MODEL yolo;              -- 资源引用型:引擎托管推理
+CREATE FUNCTION detect USING MODEL yolo;                -- 资源引用型:引擎托管推理
 
 CREATE FUNCTION blur_score(img IMAGE) RETURNS FLOAT
 LANGUAGE PYTHON AS 'myops.quality:blur_score';          -- 代码型:逃生舱
@@ -267,9 +269,9 @@ AS (b.w * b.h > 0.25);                                  -- SQL 宏:纯表达式�
 
 这个分层买到三样东西:
 
-1. **生命周期解耦**:`ALTER MODEL` 升级版本、换设备,不触碰接口层;`ALTER FUNCTION person_det SET MODEL yolo_v12` 换绑模型,查询一行不改(灰度/回滚的基础);
+1. **生命周期解耦**:`ALTER MODEL` 升级版本、换设备,不触碰接口层;`ALTER FUNCTION person_det SET MODEL yolo_l` 换绑模型,查询一行不改(灰度/回滚的基础)——函数按能力命名(`detect`)而非按模型命名,正是为了让换绑不产生命名残留;
 2. **一对多复用**:CLIP 图文双入口、一个 VLM 端点派生多个 prompt 模板函数,权重只加载一份;
-3. **优化器抓手**:模型级联的自然表达就是两个同 `TYPE` 的模型(如 `yolo_nano` 过滤 + `yolo` 确认),优化器在函数背后自动换绑;`EXPLAIN` 的 GPU 成本预估挂在模型对象的代价画像上。
+3. **优化器抓手**:模型级联的自然表达就是两个同 `TYPE` 的模型(如 `yolo`(26n)过滤 + `yolo_l`(26l)确认),优化器在函数背后自动换绑;`EXPLAIN` 的 GPU 成本预估挂在模型对象的代价画像上。
 
 #### 3.3.4 查询一:视频/流中"人的位置"
 
@@ -281,7 +283,7 @@ SELECT ts,
        det.box,           -- BOX2D: (x, y, w, h),可取 .center 中心点
        det.confidence
 FROM cam_entrance,
-     UNNEST(yolo_det(frame)) AS det
+     UNNEST(detect(frame)) AS det
 WHERE det.label = 'person'
   AND det.confidence > 0.6;
 ```
@@ -291,7 +293,7 @@ WHERE det.label = 'person'
 -- FRAMES() 是"表进表出"的表值函数:输入视频表,输出帧表(原表各列透传),fps 参数即采样下推
 SELECT f.uri, f.ts, det.box
 FROM FRAMES(TABLE traffic_videos, fps => 1) AS f,
-     UNNEST(yolo_det(f.frame)) AS det
+     UNNEST(detect(f.frame)) AS det
 WHERE det.label = 'person';
 ```
 
@@ -300,7 +302,7 @@ WHERE det.label = 'person';
 ```sql
 -- 出现在禁区多边形内的人 → 告警
 SELECT ts, det.box
-FROM cam_entrance, UNNEST(yolo_det(frame)) AS det
+FROM cam_entrance, UNNEST(detect(frame)) AS det
 WHERE det.label = 'person'
   AND ST_CONTAINS(POLYGON('(0.6,0.1),(0.95,0.1),(0.95,0.8),(0.6,0.8)'),
                   det.box.center);
@@ -318,7 +320,7 @@ SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        MAX(person_cnt) AS peak_people
 FROM (
   SELECT ts,
-         COUNT_OBJECTS(yolo_det(frame), 'person', 0.6) AS person_cnt
+         COUNT_OBJECTS(detect(frame), 'person', 0.6) AS person_cnt
   FROM cam_entrance
 )
 GROUP BY 1;
@@ -330,7 +332,7 @@ GROUP BY 1;
 SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        COUNT(DISTINCT track_id) AS unique_people
 FROM TRACK(TABLE cam_entrance,
-           DETECTOR => yolo_det,
+           DETECTOR => detect,
            CLASS    => 'person')          -- 表进表出,输出: (ts, track_id, box, confidence)
 GROUP BY 1;
 ```
@@ -363,7 +365,7 @@ INSERT INTO people_per_minute SELECT ...;
 
 -- 物化视图:持续维护、可被再次查询,推理结果自动复用
 CREATE MATERIALIZED VIEW entrance_tracks AS
-SELECT * FROM TRACK(TABLE cam_entrance, DETECTOR => yolo_det, CLASS => 'person');
+SELECT * FROM TRACK(TABLE cam_entrance, DETECTOR => detect, CLASS => 'person');
 
 -- 下游多个查询共享同一份跟踪结果,不再重复推理
 SELECT ... FROM entrance_tracks GROUP BY TUMBLE(ts, INTERVAL '1' MINUTE);
@@ -371,7 +373,7 @@ SELECT ... FROM entrance_tracks GROUP BY TUMBLE(ts, INTERVAL '1' MINUTE);
 -- 事件帧留存:告警同时把证据帧存下来
 INSERT INTO evidence  -- Lance/Parquet 表,IMAGE 列原生存储
 SELECT ts, frame, det.box
-FROM cam_entrance, UNNEST(yolo_det(frame)) AS det
+FROM cam_entrance, UNNEST(detect(frame)) AS det
 WHERE det.label = 'person' AND det.confidence > 0.9;
 ```
 
@@ -380,7 +382,7 @@ WHERE det.label = 'person' AND det.confidence > 0.9;
 上述语法不是随意发明的,而是刻意约束在成熟列式查询引擎可扩展的范围内,保证每一条扩展语法都能降解到标准扩展机制,而不需要魔改引擎内核:
 
 1. **一切扩展降解为三类机制**:
-   - **标量函数**(含异步远程调用)——模型推理(`yolo_det`、`vlm`)、数组处理(`COUNT_OBJECTS`)、空间/向量谓词(`ST_CONTAINS`、`L2_DISTANCE`)。逐批(RecordBatch)向量化执行天然提供推理 batching。SQL 宏(`AS (<表达式>)`)在解析期内联展开,不产生运行时实体;函数的三种形状(标量/聚合/表值)各有对应的引擎扩展点;
+   - **标量函数**(含异步远程调用)——模型推理(`detect`、`vlm`)、数组处理(`COUNT_OBJECTS`)、空间/向量谓词(`ST_CONTAINS`、`L2_DISTANCE`)。逐批(RecordBatch)向量化执行天然提供推理 batching。SQL 宏(`AS (<表达式>)`)在解析期内联展开,不产生运行时实体;函数的三种形状(标量/聚合/表值)各有对应的引擎扩展点;
    - **表值算子(表进表出)**——`FRAMES`、`TRACK`、`HOP`/`SESSION`,由 SQL 层解析后降解为自定义逻辑计划节点 + 自定义物理算子,不依赖按行关联(correlated lateral)的表函数;
    - **DDL → 目录操作**——`CREATE STREAM/MODEL/FUNCTION/SINK/MATERIALIZED VIEW` 由自有 SQL 方言层解析,落到目录(Catalog)与运行时,不进入查询计划。函数注册进查询引擎的函数注册表;模型只存在于目录与模型运行时,查询计划里看不到它。
 2. **不引入 lambda / 高阶函数**。数组处理一律使用命名内置函数(如 `COUNT_OBJECTS(dets, label, min_conf)`),保持表达式系统一阶——这是谓词分析与下推优化可行的前提。
@@ -401,7 +403,7 @@ sess = vq.connect()
 # 与 3.3.5 语义 B 等价
 counts = (
     sess.stream("cam_entrance")
-        .track(detector="yolo_det", cls="person")          # (ts, track_id, box, ...)
+        .track(detector="detect", cls="person")            # (ts, track_id, box, ...)
         .window(vq.tumble("1 minute"))
         .agg(unique_people=vq.count_distinct("track_id"))
 )
@@ -410,7 +412,7 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 # 批:图片目录打标后存表
 (
     sess.table("product_photos")
-        .with_column("tags", vq.fn("yolo_det")(vq.col("image")))
+        .with_column("tags", vq.fn("detect")(vq.col("image")))
         .with_column("embedding", vq.fn("embed_image")(vq.col("image")))
         .write.lance("s3://bucket/photo_index/")
 )
@@ -442,7 +444,7 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 2. **持续查询是一等对象**:归服务态管理,有名字、有状态、可观测(`SHOW QUERIES` / `PAUSE` / `RESUME`、每查询的推理量与延迟指标);
 3. **客户端走标准列式协议**(Arrow Flight SQL / ADBC / JDBC):Python SDK、BI 工具、第三方应用直连,不发明私有协议;
 4. **零外部依赖起步**:服务态单二进制自足(目录、模型运行时内嵌),Kafka / 对象存储 / K8s 都是可选外设而非前置条件;
-5. **Web 控制台随服务态提供**(v0.2+):查询编辑、流与持续查询监控、GPU 成本面板——2.5 中"把省钱做成产品能力"的落点。
+5. **Workbench(Web 工作台)随服务态提供**(v0.2+):独立的轻量子项目,经 Arrow Flight SQL 连接 `visionqld`——既是约定 3"标准列式协议"的直接受益者,也是它的持续验证者。能力与边界见 3.8。
 
 ### 3.6 执行层关键设计(简述)
 
@@ -466,6 +468,33 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 | **安全与隐私** | "数据不出域"是默认架构(引擎去数据旁,而非数据上云);模型来源哈希固定、防篡改;服务态:TLS + 认证(v0.2),表/流级权限(v0.2),审计日志(v1.0);用户代码隔离:Python UDF 于服务态进程外执行(v0.2),多租户场景以 WASM 沙箱承接(v1.0) |
 | **兼容性承诺** | SQL 方言与目录格式自 v1.0 起遵循语义化版本;`EXPLAIN` 输出与内部指标名不作为稳定接口 |
 
+### 3.8 Workbench(Web 工作台)
+
+Workbench 是随服务态提供的 Web 图形界面(v0.2),一个**独立的轻量子项目**:自带后端的单页 Web 服务,后端作为标准 Arrow Flight SQL 客户端连接 `visionqld`——它与引擎之间只有公开客户端协议,没有任何私有 API。
+
+**存在理由**:通用 SQL 客户端(DBeaver 等)经 JDBC/ADBC 也能连上 `visionqld`,但它们把 `IMAGE` 显示成一串二进制、把检测结果显示成结构体文本——**视觉查询的结果需要被"看见"才可调试**。Workbench 的差异化就是多模态结果的富预览与视觉查询的调试/运维体验,不与 BI 工具竞争。
+
+**目标用户**:数据分析师(2.3 用户 2 的主入口——浏览器打开即查,零安装)、工程师(调试 SQL 与模型效果)、平台运维(持续查询与成本监控)。
+
+**核心能力**:
+
+| 能力 | 说明 | 阶段 |
+|---|---|---|
+| SQL 编辑与执行 | VQL 语法高亮与目录感知补全、多语句脚本执行、查询历史;交互查询默认限制取回行数(取数截断而非改写 SQL,不改变查询语义) | v0.2 |
+| 结果预览 | 表格分页;`IMAGE` 缩略图内联显示、点击取原图;检测结果(`BOX2D`)叠加绘制在对应帧上,置信度滑杆前端过滤(调阈值不重跑查询);`VECTOR` 折叠显示 | v0.2 |
+| 流结果实时预览 | 无界 SELECT 的结果实时滚动(最近 N 行),关闭页面即取消查询——流查询"所见即所查"的调试体验 | v0.2 |
+| 目录浏览 | 表/流/模型/函数/Sink 五类对象列表、schema 与 DDL 回显 | v0.2 |
+| 持续查询运维 | `SHOW QUERIES` 的界面化:状态、推理量、延迟、丢帧/断流指标,`PAUSE`/`RESUME`/`STOP` 操作 | v0.2 |
+| 成本面板 | 每查询 GPU 时长与推理次数(实测口径,来自 `SHOW METRICS`)——2.5"把省钱做成产品能力"的界面落点 | v0.2 实测;v0.3 叠加 `EXPLAIN` 预估可视化 |
+
+**产品原则**:
+
+1. **一切能力降解为 SQL**:目录浏览是 `SHOW` 语句、运维操作是 `PAUSE`/`RESUME`、指标是 `SHOW METRICS`——Workbench 不要求引擎提供私有管理 API,引擎能力长在 SQL 上,Workbench 只是它的一层界面;
+2. **无状态薄服务**:Workbench 自身不持久化业务数据(认证透传引擎、保存的查询存浏览器本地),可随起随灭;
+3. **独立演进**:独立版本与发布节奏,引擎不依赖 Workbench;Workbench 对引擎的兼容跟随 SQL 方言与 Flight SQL 协议的稳定性承诺(3.7)。
+
+技术设计见 [Workbench 设计文档](./workbench_design.md)。
+
 ---
 
 ## 4. 产品边界与 MVP 范围
@@ -482,25 +511,30 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 - 批:图片/视频目录表、`FRAMES()`、`UNNEST`
 - 流:RTSP 单流摄入、TUMBLE 窗口;投递语义:RTSP 为不可重放 live 源,尽力而为(断流/丢帧缺口如实反映)——至少一次随可重放源(Kafka 帧源,v0.2)生效
 - `CREATE MODEL` + `CREATE FUNCTION ... USING MODEL`(OBJECT_DETECTION / EMBEDDING 两类,含 1:1 语法糖)+ Python UDF
-- Sink:Kafka、Parquet/Lance
+- Sink:Kafka、Parquet/Lance、Console(前台调试用,`INSERT INTO` 形状不变只换 Sink;服务态拒绝)
 - 产品形态:库态(pip 包)+ SQL shell + Python DataFrame API;持续查询以前台进程运行(`visionql run job.sql`)
 - 优化:帧采样下推(最容易兑现且收益直观)
 
 **不做**(明确推迟):
 
-- 服务态守护进程(`visionqld`)与 Web 控制台、边缘部署、分布式执行、精确一次、`TRACK` 算子、VLM 谓词、向量索引、多租户治理——留待 v0.2+ 按场景反馈排序(服务态是 v0.2 的头号项,流查询的生产化依赖它)。
+- 服务态守护进程(`visionqld`)与 Workbench(Web 工作台)、边缘部署、分布式执行、精确一次、`TRACK` 算子、VLM 谓词、向量索引、多租户治理——留待 v0.2+ 按场景反馈排序(服务态是 v0.2 的头号项,流查询的生产化依赖它)。
 
-**MVP 验收场景**:用一条 SQL 完成 3.2 的"每分钟人数入 Kafka",并在同一逻辑下跑通历史视频回算。
+**MVP 验收场景**(两条合并覆盖 MVP 全部组件——2.4 守则"MVP 组件必须被验收场景直接使用"的闭环):
+
+- **场景 A(批流一体主线)**:用一条 SQL 完成 3.2 的"每分钟人数入 Kafka",并在同一逻辑下跑通历史视频回算,断言两者结果一致(相同模型与采样率);调试阶段以 console sink 查看 `UNNEST` 展开的检测明细;
+- **场景 B(零依赖首触)**:纯本地、不依赖任何外部服务——本地图片目录建表,Python UDF 过滤模糊图,CLIP 嵌入写入 Lance,以文搜图取 Top-20;从 `pip install` 到首个检索结果 ≤ 5 分钟。场景 A 展示能力上限,场景 B 保证第一次接触的激活体验(3.5 "零运维起步"的可验收化)。
 
 ## 5. 路线图
 
 | 阶段 | 主题 | 关键交付 |
 |---|---|---|
 | **v0.1(MVP)** | 单机端到端可用 | 库态 + SQL/DataFrame、批表 + RTSP 单流、检测/嵌入两类模型、帧采样下推;验收场景见第 4 节 |
-| **v0.2** | 流查询生产化 | 服务态 `visionqld`(持续查询管理与恢复)、`TRACK` 算子、Web 控制台与成本面板、TLS/认证与表流级权限、Kafka 帧源(可重放源,至少一次投递语义生效)、向量索引、MCP 服务器(Agent 工具接入) |
-| **v0.3** | 智能降本 | 模型级联优化器、推理结果物化与跨查询复用、VLM 谓词、`EXPLAIN` 成本预估 |
+| **v0.2** | 流查询生产化 | 服务态 `visionqld`(持续查询管理与恢复)、`TRACK` 算子、Workbench(Web 工作台,含实测口径成本面板,见 3.8)、TLS/认证与表流级权限、Kafka 帧源(可重放源,至少一次投递语义生效)、MCP 服务器(Agent 工具接入) |
+| **v0.3** | 智能降本 | 模型级联优化器、推理结果物化与跨查询复用、向量索引(随物化配套,按规模触发;暴力 TopK 检索自 v0.1 可用)、VLM 谓词、`EXPLAIN` 成本预估 |
 | **v1.0** | 规模化 | 集群态、精确一次、多租户治理与审计、WASM UDF(用户代码沙箱与边缘分发);SQL 方言与目录格式的稳定性承诺生效 |
-| **v1.x+** | 边缘协同 | 边缘盒部署、同一条查询的边缘/中心执行段自动切分 |
+| **v1.x+** | 边缘协同 | 同一条查询的边缘/中心执行段自动切分、边缘节点车队管理;手动的边缘盒部署随 v0.2 服务态即可用(同一二进制,含 ARM,见 3.5) |
+
+本表为产品级概要;跨子项目(engine / workbench)的完整交付清单、验收口径与依赖关系展开维护于 [Roadmap](./roadmap.md)。
 
 ## 6. 商业化路径
 
@@ -518,6 +552,7 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 
 | 维度 | 指标 |
 |---|---|
+| 激活 | 首次价值时间(TTFV):`pip install` 到第一个查询结果 < 5 分钟,全程零外部服务(第 4 节场景 B 口径) |
 | 效率 | 典型任务(每分钟人数统计)代码量 < 30 行;从零到上线 < 30 分钟 |
 | 成本 | 相对逐帧全量推理基线,优化器默认配置下 GPU 时长下降 ≥ 5x |
 | 正确性 | 窗口聚合结果与手写基线管道一致(给定相同模型与采样率) |
@@ -532,7 +567,8 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 2. **SQL 方言基准**:对齐 PostgreSQL 习惯到什么程度(类型名、函数命名、错误码),影响生态工具兼容成本;
 3. **置信度传播语义**:聚合层是否需要一等原语(如输出区间估计),还是长期保持"阈值显式"的朴素方案;
 4. **跨流 JOIN 范围**:跨摄像头轨迹(ReID JOIN)落 v0.3 还是 v1.x——技术难度高,但安防场景需求强度也高;
-5. **`IMAGE` 列在客户端协议中的表示**:Arrow Flight 传引用还是内联字节——影响 BI 工具直连体验与带宽占用。
+5. **`IMAGE` 列在客户端协议中的表示**:Arrow Flight 传引用还是内联字节——影响 BI 工具直连体验与带宽占用。Workbench 是该问题的第一个消费者,已按"默认引用 + `thumbnail` 会话选项内联 + `FRAME_AT` 按需取帧"先行设计(见 [Workbench 设计](./workbench_design.md) §3.2),v0.2 Flight SQL 前端据此定稿;
+6. **历史回填与实时接续**:当前"批流一体"承诺的是同一条 SQL 可分别运行于表与流;更进一层的形态是同一查询先回扫历史(录像/已物化结果)再无缝接续 live 流——物化视图建立时是否补算历史即其典型场景。涉及历史/实时时间线拼接与去重语义,倾向 v1.x,随设计伙伴需求强度决定。
 
 ---
 
@@ -556,10 +592,5 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 | `ST_CONTAINS / POLYGON / .center` | 空间 | 区域事件 |
 | `<->`(等价 `L2_DISTANCE`) | 向量 | 跨模态相似检索 |
 | `SHOW QUERIES / PAUSE / RESUME` | 运维 | 持续查询管理(服务态) |
+| `FRAME_AT(uri, pts_ms)` | 内置函数 | 按引用取帧,客户端原图点查(v0.2 随 Flight SQL 前端,见 3.8) |
 | `EXPLAIN` | 运维 | 展示查询计划与预估 GPU 成本 |
-
-## 修订记录
-
-| 版本 | 日期 | 变更 |
-|---|---|---|
-| v0.1 | 2026-07-30 | 初版 |
