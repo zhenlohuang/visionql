@@ -2,8 +2,8 @@
 
 > VisionQL 是一个面向多模态数据的批流一体查询与处理引擎。用户可以通过 SQL 或 DataFrame API 查询和处理图片、视频文件及实时视频流。
 
-- **版本**：v0.1.3（Draft）
-- **日期**：2026-08-03
+- **版本**：v0.1.4（Draft）
+- **日期**：2026-08-05
 - **状态**：评审中
 
 ---
@@ -105,8 +105,8 @@ VisionQL 采用一个统一抽象：**视觉数据最终都可以表示为由帧
 | **多模态类型系统** | 在标准 SQL 类型之外增加 `IMAGE`、`VIDEO`、`AUDIO`、`BOX2D`（检测框）、`MASK`、`VECTOR(n)`（嵌入向量）以及 `STRUCT`/`ARRAY` 嵌套类型。v1 重点支持视觉模态；`AUDIO` 和 `MASK` 暂时只保留类型定义。`AUDIO` 的首个目标场景是直播审核中的音画联合判断 |
 | **Table（表）** | 有界数据集。图片目录可以作为一张表，每行一张图片；视频目录也可以作为一张表，每行一个视频，并可进一步展开为帧 |
 | **Stream（流）** | 无界数据集。RTSP、摄像头或 Kafka 帧流都表示为帧表，例如 `(ts TIMESTAMP, frame IMAGE, ...)`，并带有事件时间和水位线 |
-| **Model（模型）** | 资源层对象，只保存权重来源、版本、任务类型、精度和 SLO 等影响成本或延迟的定义。GPU 放置、副本数和动态 batching 由运行时决定。模型参与资源调度，但不会直接出现在查询中 |
-| **Function（函数）** | 查询中唯一可以调用的接口，保存签名、绑定参数和实现引用等影响结果的定义。实现可以是 `USING MODEL`、`LANGUAGE PYTHON` 或 SQL 宏。一个模型可以派生多个函数，优化器也可以在不修改查询的情况下调整函数绑定的模型 |
+| **Model（模型）** | 资源实现对象。不可变 revision 固定权重内容、processor、精度、后端和输出 schema 等可能影响结果的定义；GPU 放置、副本数和动态 batching 属于独立部署配置。模型不直接出现在 SQL 中，但规划后的查询会固定具体 revision |
+| **Function（函数）** | 查询中唯一可以调用的接口，保存签名、绑定参数、确定性和稳定 `model_id` 或代码入口。实现可以是 `USING MODEL`、`LANGUAGE PYTHON` 或 SQL 宏；一个模型可以派生多个函数 |
 | **窗口** | 流数据的聚合单位。`TUMBLE` 是时间分桶标量函数，可以直接用于 `GROUP BY`；在批模式下，它就是普通的时间分桶聚合。`HOP` 和 `SESSION` 涉及行复制和跨行状态，因此使用表值函数表示 |
 | **Sink / 物化视图** | 查询结果的输出位置，例如 Kafka、Parquet/Lance、告警 Webhook，或持续更新的物化视图 |
 
@@ -194,7 +194,7 @@ WITH (event_time = 'ts', watermark = INTERVAL '5' SECOND);
 
 #### 3.3.2 模型注册
 
-**MODEL 是资源层对象**，用于声明权重来源、版本、任务类型和资源约束。它只保存影响成本、延迟或部署方式的信息，并参与资源调度，不直接出现在查询计划中。可以把它类比为 Postgres FDW 的 `SERVER`，或表背后的 Parquet 文件。
+**MODEL 是资源实现对象**，用于声明任务类型和可复现的模型实现。每个不可变 revision 固定 artifact revision/hash、processor、输出 schema、precision 和 backend 等可能改变结果的内容；查询不直接调用 Model，但规划器会把 Function 当时指向的 Model head 解析为具体 revision 并写入计划。
 
 ```sql
 -- 只声明"是什么",放哪块 GPU、batch 多大等部署决策由引擎运行时负责,默认零配置
@@ -214,7 +214,7 @@ FROM 'hf://ultralytics/yolo26l'
 FUNCTION detect_l;
 ```
 
-**模型定义与部署相互独立**。`CREATE MODEL` 不接受设备、副本数和 batch 大小等物理部署参数，这些参数由运行时根据负载动态决定。`WITH` 子句只接受声明式约束和元信息，例如 `precision = 'fp16'`（精度）、`latency_slo = '50ms'`（延迟目标）和 `resource_group = 'gpu-pool-a'`（多租户资源池）。确实需要固定部署方式时，可以通过 `ALTER MODEL` 进行运维配置，但不会把这些细节写进建模语句。
+**模型定义与部署相互独立**。`CREATE MODEL` 不接受 device、副本数和动态 batch 大小等物理部署参数，这些参数由运行时根据负载决定。`WITH` 子句接受 Model revision 的声明，例如 `precision = 'fp16'` 和 `latency_slo = '50ms'`；改变 artifact、processor、precision、backend 或输出 schema 的 `ALTER MODEL` 会创建新 revision，而不是原地修改。多租户 `resource_group` 到 v1.0 才支持，早期版本必须返回明确的版本错误。
 
 模型下载、版本固定、GPU 放置、动态 batching 和失败重试均由引擎负责。
 
@@ -222,7 +222,15 @@ FUNCTION detect_l;
 
 **FUNCTION 是查询中唯一可以调用的接口**，查询只调用函数，不直接引用模型。可以把它类比为 FDW 中的 `FOREIGN TABLE`。
 
-MODEL 和 FUNCTION 的职责按以下规则划分：**影响查询结果的内容属于 FUNCTION，例如签名、绑定参数和实现引用；只影响成本、延迟或部署的内容属于 MODEL，例如权重、版本、精度和 SLO。** `WITH` 子句会按这一规则校验参数。资源参数写在函数上，或结果语义参数写在模型上，都会直接报错并提示正确位置。
+MODEL、FUNCTION 和运行时部署按三层划分：
+
+- **Function revision** 保存查询接口语义：签名、稳定 `model_id`、类别/阈值/prompt 等绑定参数和确定性；
+- **Model revision** 保存模型实现语义：固定 artifact、processor、label/schema、precision、backend 与 SLO。权重、版本和精度可能改变结果，必须进入定义快照，不能只当作成本参数；
+- **Deployment** 只管理 device、副本数、动态 batching 和队列权重，不能悄悄改变 precision、processor 或 backend kind。
+
+`WITH` 子句按这三层校验参数，写错层级时直接报错并提示正确位置。
+
+规划器将 Function revision、解析后的 Model revision 和 Model semantic fingerprint 一起固定到查询；fingerprint 至少包含 artifact hash 或声明的 immutable endpoint revision/config hash、processor 版本、precision、backend kind/版本和输出 schema。固定 artifact 的本地模型可声明为 deterministic；没有不可变服务 revision 的远程 endpoint 默认是 volatile，不能做公共表达式消除或结果缓存。只有经过能力声明和回归测试的 endpoint 才能标记为 `stable_within_query`，且只允许在单次查询内去重。
 
 ```sql
 -- TYPE 蕴含标准签名,签名与 RETURNS 可省略
@@ -272,9 +280,11 @@ AS (b.w * b.h > 0.25);                                  -- SQL 宏:纯表达式�
 
 这种分层带来三个直接收益：
 
-1. **生命周期相互独立**：可以通过 `ALTER MODEL` 升级版本或更换设备，而不修改函数接口；也可以通过 `ALTER FUNCTION person_det SET MODEL yolo_l` 切换模型，现有查询不需要改动。这为灰度发布和回滚提供了基础。因此，函数应按能力命名，例如 `detect`，而不是按具体模型命名。
+1. **接口与实现可独立演进**：Function revision 绑定稳定 `model_id`。`ALTER MODEL` 创建新 Model revision 并推进该 ID 的 head，`ALTER FUNCTION person_det SET MODEL yolo_l` 则创建新 Function revision 并改绑另一个 ID。两者都只影响之后新规划的查询；已 prepare 或运行中的查询继续使用计划内固定的 revision。函数因此应按能力命名，例如 `detect`，而不是按具体模型命名。
 2. **一份模型可以复用到多个函数**：CLIP 可以同时提供图片和文本入口，一个 VLM 端点也可以派生多个使用不同 prompt 模板的函数，而权重只需加载一次。
-3. **优化器可以明确识别模型成本**：模型级联可以表示为两个相同 `TYPE` 的模型，例如先用 `yolo`（26n）过滤，再用 `yolo_l`（26l）确认。优化器可以在函数接口不变的情况下选择执行策略；`EXPLAIN` 则从模型对象读取 GPU 成本信息。
+3. **优化器可以明确识别模型成本而不改结果契约**：v0.1 可以对同一固定 revision 做 batching、融合和确定性公共表达式消除；`EXPLAIN` 从模型对象读取 GPU 成本信息。v0.3 的模型级联必须是显式、可解释且可关闭的优化，不能把任意“同 TYPE”模型当成语义等价替换。
+
+`ALTER MODEL` 推进 head 前必须验证新 revision 与所有当前 Function head 的任务类型、输入模态、输出 schema/向量维度和绑定参数 schema 兼容；不兼容升级使用新的 Model ID 和显式 Function revision，不能让原函数在下一次规划时突然失效。
 
 #### 3.3.4 查询一：视频或流中人的位置
 
@@ -445,8 +455,8 @@ VisionQL 需要同时满足三类不同的使用条件：
 
 **形态间的关键约定**:
 
-1. **在 notebook 中验证，再用同一条命令运行**。库态中调试完成的 SQL 可以直接通过 `visionql run job.sql` 执行。未指定服务端时，任务在本地前台运行；通过 `--server` 或配置指定 `visionqld` 后，v0.1 通过 Flight SQL 远程执行并保持客户端附着，v0.2 可以把无界 Sink 查询提交为脱离客户端运行的持久作业。批处理和流处理不仅共享语言，也共享从开发到生产的使用路径。
-2. **持续查询逐步交给服务态管理**。v0.1 服务端支持附着客户端的持续查询和取消；v0.2 为持久作业增加名称、状态、`SHOW QUERIES`、`PAUSE`、`RESUME`、恢复以及查询级指标。
+1. **在 notebook 中验证，再用同一条命令运行**。库态中调试完成的 SQL 可以直接通过 `visionql run job.sql` 执行。未指定服务端时，任务在本地前台运行；通过 `--server` 或配置指定 `visionqld` 后，普通无界 SQL 在 v0.1 和 v0.2 都保持客户端附着。v0.2 只有显式 `SUBMIT QUERY <name> AS INSERT INTO ...`，或 CLI 的 `--detach --name <job>` 包装脚本中唯一一条无界 Sink 语句时，才创建脱离客户端的持久作业。升级版本不会悄悄改变同一条 SQL 的生命周期。
+2. **持续查询逐步交给服务态管理**。v0.1 服务端支持附着客户端的持续查询和取消；v0.2 为显式提交的持久作业增加名称、状态、`SHOW/DESCRIBE QUERY`、依赖查询、`PAUSE`、`RESUME`、`STOP`、恢复以及查询级指标。
 3. **客户端使用标准列式协议**。服务态从 v0.1 起使用 Arrow Flight SQL；Python SDK、BI 工具和第三方应用通过 Flight SQL、ADBC 或 JDBC 连接，不增加私有协议。
 4. **首次运行不要求外部依赖**。服务态二进制内置目录和模型运行时；Kafka、对象存储和 Kubernetes 都是可选集成，不是启动前提。
 5. **Workbench 在 v0.2 接入已有服务态**。Workbench 是独立的轻量子项目，通过 Arrow Flight SQL 连接 `visionqld`。它既使用公开协议，也用于持续验证协议是否覆盖完整的客户端需求。能力和边界见 3.8。
@@ -455,7 +465,7 @@ VisionQL 需要同时满足三类不同的使用条件：
 
 以下内容不在 PRD 中展开实现细节，但它们是上述用户体验成立的前提，也为后续技术设计提供约束：
 
-1. **优化器**:帧采样下推(聚合粒度反推所需 fps)、解码裁剪(时间/空间 ROI)、模型级联(小模型过滤 + 大模型确认)、公共推理子表达式消除、推理结果缓存(以模型版本 + 帧指纹为键);
+1. **优化器**：v0.1 只实现用户显式 fps/time range 的采样与解码下推，以及对 deterministic 或 `stable_within_query` 模型调用的查询内公共表达式消除；v0.3 再引入可解释且可关闭的自动采样/ROI、模型级联和跨查询结果缓存。缓存键必须包含 Model semantic fingerprint 与媒体版本/帧指纹；
 2. **帧数据通路**：解码后的帧占用大量内存，1080p RGB 约为 6MB/帧，5fps 单流约为 30MB/s。`IMAGE` 列在查询计划中尽量使用引用或压缩表示并减少复制，解码延迟到推理或落盘前。
 3. **GPU 感知调度**:模型自动 batching、算子与模型的共置、背压;
 4. **流语义**:事件时间 + 水位线、断流重连;投递语义按源分档——可重放源(Kafka 帧流)至少一次(随 v0.2 Kafka 源生效)→ 精确一次(GA);不可重放 live 源(RTSP)为尽力而为,断流/丢帧缺口如实反映在结果里,不伪造;
@@ -485,16 +495,16 @@ Workbench 是 v0.2 面向生产服务态提供的 Web 图形界面，也是位�
 
 | 能力 | 说明 | 阶段 |
 |---|---|---|
-| SQL 编辑与执行 | VQL 语法高亮、目录感知补全、多语句脚本执行和查询历史。交互查询会在传输端限制返回行数，不改写 SQL，也不改变查询语义 | v0.2 |
+| SQL 编辑与执行 | VQL 语法高亮、目录感知补全、多语句脚本执行和查询历史。客户端通过 prepared schema metadata 识别语句类型和有界性；交互查询会在传输端限制返回行数，不改写 SQL，也不改变查询语义 | v0.2 |
 | 结果预览 | 表格分页;`IMAGE` 缩略图内联显示、点击取原图;检测结果(`BOX2D`)叠加绘制在对应帧上,置信度滑杆前端过滤(调阈值不重跑查询);`VECTOR` 折叠显示 | v0.2 |
 | 流结果实时预览 | 实时滚动显示无界 SELECT 的最近 N 行结果；关闭页面时自动取消预览查询 | v0.2 |
 | 目录浏览 | 浏览表、流、模型、函数和 Sink，并查看 schema 与 DDL | v0.2 |
-| 持续查询运维 | 展示查询状态、推理量、延迟、丢帧和断流指标，并提供 `PAUSE`、`RESUME`、`STOP` 操作 | v0.2 |
+| 持续查询运维 | 通过公开 SQL 显式提交持久作业，展示名称、定义 revision、依赖、状态、推理量、延迟、丢帧和断流指标，并提供 `PAUSE`、`RESUME`、`STOP` 操作 | v0.2 |
 | 成本面板 | v0.2 根据 `SHOW METRICS` 展示每个查询的实际 GPU 时长和推理次数；v0.3 再加入基于 `EXPLAIN` 的成本预估 | v0.2 实测；v0.3 增加预估 |
 
 **产品原则**:
 
-1. **所有功能都通过 SQL 或标准协议完成**：目录浏览使用 `SHOW`，运维使用 `PAUSE`/`RESUME`，指标使用 `SHOW METRICS`。Workbench 不要求引擎提供私有管理 API，只负责将这些能力呈现在界面中。
+1. **所有功能都通过 SQL 或标准协议完成**：目录浏览使用 `SHOW`，持久提交使用 `SUBMIT QUERY`，详情和依赖使用 `DESCRIBE QUERY` / `SHOW QUERY DEPENDENCIES`，运维使用 `PAUSE`/`RESUME`/`STOP`，指标使用 `SHOW METRICS`。Workbench 读取版本化 capability、statement metadata 和结构化错误，不要求引擎提供私有管理 API。
 2. **保持无状态**：Workbench 不持久化业务数据。认证由引擎处理，保存的查询放在浏览器本地，因此 Workbench 进程可以随时重启或扩容。
 3. **独立发布**：Workbench 有自己的版本号和发布节奏，引擎不依赖 Workbench。两者的兼容范围跟随 SQL 方言和 Flight SQL 协议的稳定性承诺（3.7）。
 
@@ -514,7 +524,7 @@ Workbench 是 v0.2 面向生产服务态提供的 Web 图形界面，也是位�
 
 - 类型系统 + IMAGE/VIDEO/BOX2D/VECTOR
 - 批:图片/视频目录表、`FRAMES()`、`UNNEST`
-- 流:RTSP 单流摄入、TUMBLE 窗口;投递语义:RTSP 为不可重放 live 源,尽力而为(断流/丢帧缺口如实反映)——至少一次随可重放源(Kafka 帧源,v0.2)生效
+- 流:RTSP 单流摄入、TUMBLE 窗口；流式窗口聚合白名单为 `COUNT/SUM/AVG/MIN/MAX` 的可持久化标量类型；投递语义:RTSP 为不可重放 live 源,尽力而为(断流/丢帧缺口如实反映)——至少一次随可重放源(Kafka 帧源,v0.2)生效
 - `CREATE MODEL` + `CREATE FUNCTION ... USING MODEL`(OBJECT_DETECTION / EMBEDDING 两类,含 1:1 语法糖)+ 库态 Python UDF；v0.1 服务态遇到 Python UDF 返回明确的能力错误
 - Sink:Kafka、Parquet/Lance、Console(前台调试用,`INSERT INTO` 形状不变只换 Sink;服务态拒绝)
 - 产品形态:库态(pip 包)+ SQL shell + Python DataFrame API + 基础服务态;`vql-server` 构建 `visionqld`,以单可信主体、默认监听回环地址的方式提供 Flight SQL 查询、元数据、流式结果和取消
@@ -535,7 +545,7 @@ Workbench 是 v0.2 面向生产服务态提供的 Web 图形界面，也是位�
 | 阶段 | 主题 | 关键交付 |
 |---|---|---|
 | **v0.1(MVP)** | 单机端到端可用 | 库态 + SQL/DataFrame、基础服务态 `visionqld` + Flight SQL、批表 + RTSP 单流、检测/嵌入两类模型、帧采样下推;验收场景见第 4 节 |
-| **v0.2** | 流查询生产化 | 将 `visionqld` 增强为持久查询管理与恢复服务、`TRACK` 算子、Workbench(Web 工作台,含实测口径成本面板,见 3.8)、TLS/认证与表流级权限、Kafka 帧源(可重放源,至少一次投递语义生效)、MCP 服务器(Agent 工具接入) |
+| **v0.2** | 流查询生产化 | 将 `visionqld` 增强为显式 `SUBMIT QUERY` 的持久查询管理与恢复服务、`TRACK` 算子、Workbench(Web 工作台,含实测口径成本面板,见 3.8)、TLS/认证与表流级权限、Kafka 帧源(可重放源,至少一次投递语义生效)、MCP 服务器(Agent 工具接入) |
 | **v0.3** | 智能降本 | 模型级联优化器、推理结果物化与跨查询复用、向量索引(随物化配套,按规模触发;暴力 TopK 检索自 v0.1 可用)、VLM 谓词、`EXPLAIN` 成本预估 |
 | **v1.0** | 规模化 | 集群态、精确一次、多租户治理与审计、WASM UDF(用户代码沙箱与边缘分发);SQL 方言与目录格式的稳定性承诺生效 |
 | **v1.x+** | 边缘协同 | 同一条查询的边缘/中心执行段自动切分、边缘节点车队管理;手动的边缘盒部署随 v0.1 基础服务态即可用(同一二进制,含 ARM,见 3.5)，生产级远程访问与恢复从 v0.2 起提供 |
@@ -573,7 +583,7 @@ VisionQL 通过开源引擎建立用户和生态，商业化能力主要围绕�
 2. **SQL 方言兼容范围**：类型名、函数命名和错误码需要在多大程度上遵循 PostgreSQL 习惯？这会直接影响现有生态工具的兼容成本。
 3. **置信度在聚合中的语义**：是否需要提供区间估计等专用原语，还是长期保持由用户在查询中明确指定阈值？
 4. **跨流 JOIN 的版本安排**：跨摄像头轨迹（ReID JOIN）放在 v0.3 还是 v1.x？实现难度较高，但安防场景的需求也较强。
-5. **客户端协议中的 `IMAGE` 表示**：Arrow Flight 应返回引用还是内联字节？这会影响 BI 工具的使用体验和网络带宽。Workbench 已按“默认引用、`thumbnail` 会话选项返回缩略图、`FRAME_AT` 按需取帧”的方案设计，详见 [Workbench 设计](./workbench.md) §3.2。v0.2 Flight SQL 前端定稿前仍需确认。
+5. **客户端协议中的 `IMAGE` 传输策略**：默认引用、`thumbnail` 会话选项和 `FRAME_AT` 按需取帧的方向已确定；引用必须同时包含只展示的脱敏 `uri` 和绑定 source revision/media version 的不透明 `locator`，读取只接受 locator 并重新授权。v0.2 Flight schema 冻结前仍需用 Workbench、Python 和 BI 客户端确认缩略图尺寸、内联字节上限与 locator TTL，详见 [Workbench 设计](./workbench.md) §3.2。
 6. **历史回填后接入实时流**：当前的批流一体表示同一条 SQL 可以分别用于表和流。更进一步的能力，是让同一查询先回扫录像或物化结果，再无缝接入实时流。这个能力需要定义历史与实时时间线的拼接和去重语义，初步安排在 v1.x，最终取决于设计伙伴的需求。
 
 ---
@@ -586,7 +596,8 @@ VisionQL 通过开源引擎建立用户和生态，商业化能力主要围绕�
 | `CREATE TABLE ... USING IMAGES/VIDEOS` | DDL | 目录即表 |
 | `CREATE MODEL ... TYPE ... FROM ...` | DDL | 注册模型(资源层);可带 `FUNCTION` 子句顺带派生函数 |
 | `CREATE FUNCTION ... USING MODEL / LANGUAGE <lang> AS '<入口>' / AS (<表达式>)` | DDL | 注册函数(接口层):资源引用型 / 代码型 / SQL 宏 |
-| `ALTER FUNCTION ... SET MODEL` | DDL | 换绑模型,查询不变(灰度/回滚) |
+| `ALTER MODEL ...` | DDL | 创建新的不可变 Model revision；只影响之后新规划的查询 |
+| `ALTER FUNCTION ... SET MODEL` | DDL | 创建新 Function revision 并换绑稳定 model ID；只影响之后新规划的查询 |
 | `CREATE SINK / MATERIALIZED VIEW` | DDL | 输出与物化 |
 | `CREATE INDEX ... USING HNSW` | DDL | 向量索引,`ORDER BY <-> LIMIT` 自动改写为 ANN |
 | `FRAMES(TABLE t, fps => n)` | 表值函数(表进表出) | 视频表展开为帧表,采样可下推 |
@@ -597,6 +608,7 @@ VisionQL 通过开源引擎建立用户和生态，商业化能力主要围绕�
 | `COUNT_OBJECTS(dets, label, conf)` | 内置数组函数 | 按标签/置信度计数,免 lambda |
 | `ST_CONTAINS / POLYGON / .center` | 空间 | 区域事件 |
 | `<->`(等价 `L2_DISTANCE`) | 向量 | 跨模态相似检索 |
-| `SHOW QUERIES / PAUSE / RESUME` | 运维 | 持续查询管理(服务态) |
-| `FRAME_AT(uri, pts_ms)` | 内置函数 | 按引用取帧,客户端原图点查(v0.2 随 Flight SQL 前端,见 3.8) |
+| `SUBMIT QUERY name AS INSERT INTO ...` | 运维 | v0.2 显式创建持久 Sink 作业；普通无界 SQL 仍附着客户端 |
+| `SHOW/DESCRIBE QUERY / SHOW QUERY DEPENDENCIES / PAUSE / RESUME / STOP` | 运维 | 持久查询详情、依赖与状态管理(服务态) |
+| `FRAME_AT(locator [, pts_ms])` | 内置函数 | 按版本化 locator 重新授权取帧,客户端原图点查(v0.2 随 Flight SQL 前端,见 3.8) |
 | `EXPLAIN` | 运维 | 展示查询计划与预估 GPU 成本 |

@@ -2,10 +2,10 @@
 
 > 本文根据 [VisionQL PRD](./prd.md) 3.8 和 [引擎设计](./engine.md) 重新设计 Workbench。Workbench 是 v0.2 面向 `visionqld` 生产能力交付的多模态 SQL 客户端；`visionqld` 的基础服务和 Flight SQL 从 v0.1 起存在。Workbench 负责查询、结果预览和持续查询运维，不拥有业务数据，也不依赖引擎私有接口。
 
-- **设计版本**：v0.2.0（Draft）
-- **日期**：2026-08-04
-- **对应 PRD**：v0.1.3
-- **对应引擎设计**：v0.4.0
+- **设计版本**：v0.2.1（Draft）
+- **日期**：2026-08-05
+- **对应 PRD**：v0.1.4
+- **对应引擎设计**：v0.4.1
 - **状态**：评审中
 
 ---
@@ -68,10 +68,11 @@ v0.3 才增加 `EXPLAIN` 成本预估和候选的视频时间轴；v1.0 才增�
 
 **任务 C：维护持续查询**
 
-1. 在查询列表中按状态、名称或来源筛选；
-2. 查看定义修订、事件时间、投递语义、延迟、丢帧和推理成本；
-3. 执行 `PAUSE`、`RESUME` 或 `STOP`；
-4. 等待引擎返回新状态，失败时显示稳定错误码和下一步建议。
+1. 在 Query 页用显式 `SUBMIT QUERY <name> AS INSERT INTO ...` 创建持久作业；
+2. 在查询列表中按状态、名称或来源筛选；
+3. 查看定义修订、对象依赖、事件时间、投递语义、延迟、丢帧和推理成本；
+4. 执行 `PAUSE`、`RESUME` 或 `STOP`；
+5. 等待引擎返回新状态，失败时显示稳定错误码和下一步建议。
 
 ### 2.2 页面结构
 
@@ -152,7 +153,7 @@ Workbench 包含浏览器 SPA 和一个轻量 BFF。BFF 的必要性不是增加
 
 ### 3.2 客户端中的 `IMAGE` 表示
 
-Workbench 采用 PRD 开放问题 5 的当前方案：引擎协议默认返回引用；Workbench 的 Flight 会话设置 `image_mode=thumbnail`，让结果同时带小尺寸预览；用户点击时再通过公开的 `FRAME_AT(uri, pts_ms)` 读取原图。文件与对象存储引用可以重读，实时 RTSP 帧只在引擎受限的压缩 GOP 环形缓存中可用，过期后保留缩略图并明确提示。完整传输契约和权限流程见 §4.3～§4.4。
+Workbench 采用 PRD 开放问题 5 的当前方案：引擎协议默认返回引用；Workbench 的 Flight 会话设置 `image_mode=thumbnail`，让结果同时带小尺寸预览。`IMAGE.uri` 只用于展示，用户点击时通过公开的 `FRAME_AT(locator [, pts_ms])` 读取原图；locator 绑定来源 revision 与媒体版本，服务端每次重新授权。文件与对象存储引用可以重读，实时 RTSP 帧只在引擎受限的压缩 GOP 环形缓存中可用，过期后保留缩略图并明确提示。完整传输契约和权限流程见 §4.3～§4.4。
 
 ### 3.3 状态所有权
 
@@ -163,7 +164,7 @@ Workbench 采用 PRD 开放问题 5 的当前方案：引擎协议默认返回�
 | 身份、权限 | `visionqld` / 外部 IdP | Workbench 不保存 |
 | Workbench 登录会话 | BFF 内存 | 否；重启后重新登录 |
 | 交互查询与实时预览 | BFF 内存 + 引擎执行上下文 | 否；连接丢失后取消 |
-| 缩略图与媒体引用 | BFF 会话 LRU | 否；TTL 到期清理 |
+| 缩略图与媒体 locator | BFF 会话 LRU | 否；TTL 到期清理 |
 | 编辑器草稿和查询历史 | 浏览器 IndexedDB | 仅当前浏览器 |
 | 长期指标 | Prometheus 等外部系统 | Workbench 不负责 |
 
@@ -190,35 +191,37 @@ Workbench 采用 PRD 开放问题 5 的当前方案：引擎协议默认返回�
 
 | Workbench 功能 | 引擎公开能力 |
 |---|---|
-| 登录与会话 | Flight Handshake / auth middleware，TLS |
-| 查询与 DDL | statement query/update；参数化媒体查询使用 prepared statement |
+| 登录与会话 | Flight Handshake / auth middleware，TLS；Handshake token 随后在每个 RPC 携带并逐请求验证 |
+| 查询与 DDL | statement query/update；prepared result schema metadata 提供语句类型、有界性和副作用；参数化媒体查询使用 prepared statement |
 | 结果 schema | `GetSchema` 和 `DoGet` 返回 Arrow schema/batch |
+| 查询身份 | `FlightInfo.app_metadata` 中的 `VisionqlFlightInfoV1` 提供 query ID、statement kind 和 mode |
 | 长查询与取消 | `PollFlightInfo`、`CancelFlightInfo`；连接断开也传播 cancellation token |
 | 表目录 | `GetCatalogs`、`GetDbSchemas`、`GetTables`、`GetTableTypes` |
 | 其他目录对象 | `SHOW STREAMS/MODELS/FUNCTIONS/SINKS`、`DESCRIBE`、`SHOW CREATE` |
-| 持续查询 | `SHOW QUERIES`、`PAUSE`、`RESUME`、`STOP` |
+| 持续查询 | `SUBMIT QUERY`、`SHOW/DESCRIBE QUERY`、`SHOW QUERY DEPENDENCIES`、`PAUSE`、`RESUME`、`STOP` |
 | 指标 | `SHOW METRICS FOR QUERY ...` |
-| 兼容协商 | `GetSqlInfo` vendor 字段：引擎、方言、IMAGE 扩展版本和 capability |
+| 错误 | 标准 gRPC status + `visionql-error-bin` trailing metadata |
+| 兼容协商 | 固定 vendor `GetSqlInfo` ID：协议、方言、IMAGE 扩展版本和 capability |
 
 Workbench 不直接访问 SQLite Catalog、Prometheus 内部存储或引擎进程文件。
 
 ### 4.2 版本协商
 
-登录成功后，BFF 先读取：
+登录成功后，BFF 读取固定的 vendor SqlInfo：
 
 ```text
-server_version
-sql_dialect_version
-flight_sql_version
-visionql_image_version
-capabilities = {
+10000 visionql_protocol_version : string
+10001 sql_dialect_version       : string
+10002 visionql_image_version    : string
+10003 capabilities              : list<string> {
   unbounded_do_get,
   poll_flight_info,
   cancel_flight_info,
+  statement_info_v1,
   image_thumbnail_mode,
-  frame_at,
-  query_control,
-  query_metrics,
+  frame_at_v1,
+  query_control_v1,
+  query_metrics_v1,
   explain_cost,
   ...
 }
@@ -228,6 +231,17 @@ capabilities = {
 - 单项 capability 缺失时只关闭对应 UI，并解释需要的引擎版本；
 - v1.0 前允许新增列和 capability，BFF 必须忽略未知字段；
 - Workbench 不根据版本号猜功能，版本号只用于诊断，行为以 capability 为准。
+
+`statement_info_v1` 存在时，BFF 从 prepare 返回的 result schema metadata 读取：
+
+```text
+visionql.statement_info.version = 1
+visionql.statement.kind = query | update | ddl | persistent_submission
+visionql.query.mode = bounded | unbounded | not_applicable
+visionql.statement.side_effect = read_only | write
+```
+
+Workbench 不用本地 parser 推断这些语义。`statement_info_v1` 是 v0.2 Query 工作区的必需 capability；缺失时保留连接诊断和只读目录浏览，但阻止 SQL 执行，不用猜测结果生命周期。
 
 ### 4.3 `IMAGE` 传输契约
 
@@ -239,9 +253,9 @@ SET vql.result.thumbnail_max_edge = 256;
 SET vql.result.thumbnail_quality = 75;
 ```
 
-返回列仍是标准 Arrow Struct，并带 `ARROW:extension:name=visionql.image`。BFF 读取：
+返回列仍是标准 Arrow Struct，并带 `ARROW:extension:name=visionql.image` 和 `ARROW:extension:metadata={"version":1}`；它必须与 SqlInfo `visionql_image_version="1"` 一致。BFF 读取：
 
-- `uri`、`pts_ms`、`frame_id`、宽高等引用信息；
+- `uri` 作为脱敏展示值，`locator` 作为不透明定位值，以及 `pts_ms`、`frame_id`、宽高等引用信息；
 - `encoded` 中的 JPEG/PNG 缩略图；
 - 字段元数据中的 `content_kind=thumbnail`，避免把缩略图误认为原图。
 
@@ -249,7 +263,7 @@ SET vql.result.thumbnail_quality = 75;
 
 ### 4.4 原图点查
 
-浏览器不能把任意 URI 直接交给引擎。BFF 在转换结果时为每个 IMAGE 生成会话内 `media_ref`，其中关联引擎返回的 URI、PTS、query ID 和权限会话。用户点击原图时：
+浏览器不能把任意 URI 或 locator 直接交给引擎。BFF 在转换结果时为每个 IMAGE 生成会话内 `media_ref`，其中关联引擎返回的 locator、可选目标 PTS、query ID 和登录会话；浏览器只取得脱敏 URI 与 `media_ref`。用户点击原图时：
 
 ```mermaid
 sequenceDiagram
@@ -259,25 +273,39 @@ sequenceDiagram
 
     U->>W: POST /api/v1/media:open {media_ref}
     W->>W: 校验 media_ref 属于当前会话且未过期
-    W->>V: prepared SELECT TO_JPEG(FRAME_AT($1,$2),90)
-    V->>V: 再次执行来源权限和 SSRF 校验
+    W->>V: prepared FRAME_AT(locator [, pts]) query
+    V->>V: 解析 locator，按 source revision 再授权并校验范围
     V-->>W: image/jpeg 或稳定错误码
     W-->>U: 同源图片响应
 ```
 
 - 文件或对象存储引用可以重新读取；
 - RTSP live 帧只在引擎环形缓存未过期时可读；过期后 UI 保留缩略图并显示“原帧已过期”，不自动重跑查询；
-- BFF 不把底层 URI 返回给独立图片 URL，也不允许客户端修改 URI；
+- `FRAME_AT` 的 `$1` 只能取自 BFF 保存的 locator；`$2` 省略时使用 locator 自带 PTS，指定时也只能在同一个已授权视频对象内选点；
+- BFF 不把 locator 返回给独立图片 URL，也不允许客户端修改 locator 或 PTS；
+- `INVALID_MEDIA_LOCATOR`、`MEDIA_LOCATOR_EXPIRED`、`PERMISSION_DENIED`、`SOURCE_REVISION_UNAVAILABLE` 和 `FRAME_NOT_AVAILABLE` 分别显示对应状态，不合并成“图片加载失败”；
 - blob 和 media_ref 都绑定登录会话，登出时立即清理。
 
 ### 4.5 系统 SQL 输出
 
-Jobs 页面只依赖 [引擎设计](./engine.md) §11.6 固定的最小列。Workbench 对状态和错误码使用枚举映射：
+Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象依赖使用 `SHOW QUERY DEPENDENCIES <id>`，并只依赖 [引擎设计](./engine.md) §11.6 固定的最小列。Workbench 对状态和错误码使用枚举映射：
 
 - 未知状态按原字符串显示，不把页面渲染失败；
 - 指标必须使用引擎返回的 `unit`；
 - `STOP` 后仍可查看历史定义和最终错误；
 - 操作成功指引擎确认并且下一次 `SHOW QUERIES` 观察到目标状态，不以 HTTP 200 代替最终状态。
+
+### 4.6 结构化错误
+
+引擎用标准 gRPC status 表示错误大类，并在 `visionql-error-bin` trailing metadata 中按 [引擎设计](./engine.md) §11.4 的 Protobuf `VisionqlErrorV1` 返回版本化字段：
+
+```text
+version, code, message, hint,
+source_start, source_end,
+query_id, retryable
+```
+
+BFF 只从该 envelope 读取稳定 `code`、source span、`query_id` 和 `retryable`，不从 `message` 匹配错误类型；多语句脚本的 `statement_index` 由 BFF 根据当前顺序附加。缺少或无法解析扩展时保留标准 gRPC code，并显示“服务端未返回结构化详情”，不能把原始 metadata 暴露给浏览器。
 
 ---
 
@@ -297,6 +325,7 @@ Workbench 自己的 HTTP API 只服务同源 SPA。它不是引擎 API，也不�
 | `DELETE /api/v1/executions/{id}` | 取消 Flight 查询 |
 | `GET /api/v1/catalog` | 读取并缓存目录数据 |
 | `GET /api/v1/jobs` | 转换 `SHOW QUERIES` 结果 |
+| `GET /api/v1/jobs/{id}` | 合并 `DESCRIBE QUERY` 与 `SHOW QUERY DEPENDENCIES` |
 | `POST /api/v1/jobs/{id}/actions` | 将 pause/resume/stop 映射为公开 SQL |
 | `GET /api/v1/jobs/{id}/metrics` | 转换 `SHOW METRICS` 结果 |
 | `GET /api/v1/blobs/{id}` | 获取当前会话缩略图 |
@@ -310,7 +339,7 @@ Workbench 自己的 HTTP API 只服务同源 SPA。它不是引擎 API，也不�
 
 ```text
 execution_started
-statement_started     { index, kind }
+statement_started     { index, kind, mode, side_effect }
 schema                { fields[] }
 batch                 { rows[], blobs[], sequence }
 statement_progress    { rows, bytes, elapsed_ms }
@@ -357,16 +386,19 @@ v0.2 提供：
 
 ### 6.2 多语句脚本
 
-BFF 使用独立的词法切分器识别分号、字符串、引用标识符和行/块注释，不复制完整 VQL parser。语句按顺序发送给 Flight SQL：
+BFF 使用独立的词法切分器识别分号、字符串、引用标识符和行/块注释，不复制完整 VQL parser。它只负责确定语句边界；每条语句都按顺序 prepare，并以 §4.2 的 schema metadata 作为类型、有界性与副作用的唯一判断：
 
 - 每条语句有独立结果 tab；
 - 第一条错误会停止后续语句，v0.2 不提供“错误后继续”；
 - 有界 SELECT 达到显示上限后被取消并标记为截断，随后脚本可以继续；
-- 无界 SELECT 永远不会自然完成，因此必须是脚本最后一条语句，否则执行前提示用户拆开；
-- 无界 `INSERT INTO ... SELECT ...` 由服务态提交为持久作业并立即返回 query ID；结果 tab 显示“已提交”以及 Jobs 详情链接，不把它当作 live 结果 stream；
-- 脚本不是隐式事务。需要原子性的 DDL 必须由单条引擎语句自身保证。
+- 普通无界 `SELECT` 和 `INSERT INTO ... SELECT ...` 都是附着执行，不会自然完成，因此必须是脚本最后一条语句；若当前 prepare 后发现它不是最后一句，BFF 在执行当前语句前停止并提示拆分，不能自动转成后台作业；
+- 显式 `SUBMIT QUERY <name> AS INSERT INTO ... SELECT ...` 的 kind 为 `persistent_submission`，执行后立即返回 query ID、名称、状态和定义 revision，可以继续执行后续语句；结果 tab 显示“已提交”以及 Jobs 详情链接；
+- 普通无界 `INSERT` 的附着式 DoGet 显示引擎固定的状态流；取消、页面离开或 session 过期都会终止 Sink 查询，不创建持久作业；
+- 脚本不是隐式事务。后续语句可能依赖前面的 DDL，因此不能在开始前完成全局语义预检；如果执行到中途才发现后续无界语句位置不合法，之前成功的语句不会回滚；需要原子性的 DDL 必须由单条引擎语句自身保证。
 
-完整脚本切分需要与引擎 parser 共享金样用例。两者输出不一致时，Workbench 阻止“运行全部”，但用户仍可手动选中单条语句执行。
+完整脚本切分需要与引擎 parser 共享金样用例，覆盖字符串、注释、引用标识符和 VQL DDL；任何不一致都必须在协议契约测试中阻止发布。运行时的语义分类仍只信任引擎 metadata。
+
+Query 页提供“提交为持久作业”动作时，必须要求用户填写名称，生成并展示完整 `SUBMIT QUERY ... AS ...` SQL，用户确认后再通过同一执行接口发送。Workbench 不在后台静默改写普通 `INSERT` 的生命周期。
 
 ### 6.3 传输限制
 
@@ -497,7 +529,7 @@ STARTING → LIVE ⇄ RECONNECTING → CANCELLED
 - schema、逻辑类型和 nullable；
 - 来源种类、脱敏位置、事件时间与 watermark；
 - Model type、固定 revision/hash 摘要和约束；
-- Function 签名、绑定模型修订和结果语义参数；
+- Function revision、签名、稳定 `model_id` 和结果语义参数；Model 当前 head revision 作为单独字段展示；
 - Sink format 和脱敏目标；
 - 可复制的脱敏 DDL。
 
@@ -511,22 +543,24 @@ v0.2 不在详情页编辑对象。变更通过生成 SQL 回到 Query 页执行
 
 列表至少展示：
 
-- 名称和 query ID；
+- `attached` / `persistent` lifecycle、名称和 query ID；持久作业有名称，附着查询名称为 NULL；
 - `STARTING / RUNNING / PAUSED / RECOVERING / FAILED / STOPPED`；
 - batch / stream 模式、源种类、source health 和投递语义；查询可以在 `RUNNING` 时同时标记源 `DISCONNECTED`；
 - 运行时长、最近更新时间和定义修订；
 - 最近错误码摘要；
 - 当前输入 fps、推理 fps、P95 延迟和丢帧数。
 
-默认按非终态优先、最近更新倒序。筛选和排序只作用于已从引擎取得的列表；数据量超过一次结果限制时，使用引擎提供的公开分页参数或过滤 SQL，不能在 BFF 内假装拿到了全量。
+Jobs 页默认只展示持久作业，并允许切换查看当前 principal 可见的附着查询；附着查询仍由创建它的 Query execution 取消，不显示 `PAUSE/RESUME`。列表默认按非终态优先、最近更新倒序。筛选和排序只作用于已从引擎取得的列表；数据量超过一次结果限制时，使用引擎提供的公开分页参数或过滤 SQL，不能在 BFF 内假装拿到了全量。
 
 列表指标通过一次不带 `FOR QUERY` 的 `SHOW METRICS` 快照按 query ID 合并，不能为每行发起一条查询。详情页才使用带 query ID 的过滤形式。
 
 ### 10.2 详情页
 
+页面先执行 `DESCRIBE QUERY '<query_id>'` 取得定义与状态，再执行 `SHOW QUERY DEPENDENCIES '<query_id>'` 取得固定的 Function、Model、source 和 Sink revision/semantic fingerprint；不能从保存的 SQL 文本猜依赖。
+
 详情分为四块：
 
-1. **定义**：只读 SQL、定义快照、模型与函数修订；
+1. **定义**：名称、lifecycle、只读 SQL、定义快照、模型与函数修订及完整对象依赖；
 2. **运行状态**：最后事件时间、水位线、epoch、检查点（如适用）、Kafka lag；
 3. **质量**：解码错误、推理错误、迟到行、丢帧原因和断流缺口；
 4. **实际成本**：处理帧、推理次数、实际 batch、GPU seconds、P50/P95 推理延迟。
@@ -536,7 +570,7 @@ v0.2 不在详情页编辑对象。变更通过生成 SQL 回到 Query 页执行
 ### 10.3 运维动作
 
 - `PAUSE`：二次确认中说明 RTSP 暂停会产生不可恢复缺口；
-- `RESUME`：显示将继续使用现有 definition snapshot；如果目录已有新修订，提示需要重启/重新提交才能采用；
+- `RESUME`：显示将继续使用现有 definition snapshot；如果目录已有新修订，提示必须停止旧作业并显式 `SUBMIT` 新作业才能采用，新作业会获得新的 query ID；
 - `STOP`：高风险终态操作，要求输入查询名或明确确认；
 - 操作发送后按钮进入 pending，直到 `SHOW QUERIES` 观察到目标状态或引擎返回失败；
 - Workbench 不做乐观状态修改，不在超时时把动作标成成功；
@@ -567,7 +601,7 @@ Workbench 不在 v0.2 把 GPU seconds 换算为货币；价格和计费属于部
 
 - v0.2 的引擎 endpoint 由部署配置并在登录页只读显示；登录页只收集引擎支持的凭证，BFF 立即通过 Flight 验证，浏览器不能指定任意后端地址；
 - BFF 只在内存中保存凭证或短期引擎 token，不写日志、磁盘、IndexedDB 或 cookie；
-- 每个登录会话对应一个独立的 Flight SQL 逻辑 session，`image_mode` 等 `SET` 选项不能跨用户复用；底层 gRPC channel 可以安全共享；
+- 每个登录会话对应一个独立的 Flight SQL 逻辑 session，`image_mode` 等 `SET` 选项不能跨用户复用；BFF 必须在每个 Flight RPC 上携带该会话的 token，服务端逐请求验证后才选择 Session。满足这一条件时底层 gRPC channel 才可以共享；
 - 浏览器 cookie 只包含高熵会话 ID，使用 `HttpOnly`、`Secure`、`SameSite=Strict`；需要外部 IdP 回跳时才按部署要求改为 `Lax`；
 - 会话默认 30 分钟无操作过期。活动 live 预览算作操作，但部署可以设置绝对最长时长；
 - 登出先取消活动交互查询，再清理媒体缓存和凭证。
@@ -579,13 +613,13 @@ Workbench 不在 v0.2 把 GPU seconds 换算为货币；价格和计费属于部
 - CSP 默认禁止内联脚本和第三方脚本，`frame-ancestors 'none'`；
 - React 文本渲染保持转义，SQL、错误、标签和 URI 不进入 `dangerouslySetInnerHTML`；
 - blob URL 不可猜、绑定会话、有 TTL，并返回 `nosniff` 与正确 MIME；
-- 媒体点查使用服务端保存的 media_ref，不接受浏览器提供的新 URI；
+- 媒体点查使用服务端保存的 media_ref，不接受浏览器提供的新 URI、locator 或 PTS；
 - 错误、审计字段和请求日志统一脱敏 Authorization、cookie、URI userinfo 和签名 query；
 - BFF 对登录、媒体点查、执行创建和查询操作设置速率限制与并发上限。
 
 ### 11.3 权限模型
 
-Workbench 不缓存“允许/拒绝”决定。每次查询、`FRAME_AT` 和作业动作都由引擎按当前身份重新授权。目录不可见不等于无法访问，因此安全测试必须直接尝试越权 SQL 和伪造 media_ref。
+Workbench 不缓存“允许/拒绝”决定。每次查询、`FRAME_AT` 和作业动作都由引擎按当前身份重新授权。目录不可见不等于无法访问，因此安全测试必须直接尝试越权 SQL，以及伪造、跨会话复用、撤权后复用和过期的 media_ref/locator。
 
 ### 11.4 多副本
 
@@ -604,16 +638,19 @@ v0.2 多副本需要负载均衡器按 session cookie 做粘滞：
 错误面板按稳定字段显示：
 
 ```text
+version
 code
 message
 hint
 statement_index
-source_span
+source_start
+source_end
 query_id
 retryable
 ```
 
-- 有 source span 时定位编辑器；
+- 除 `statement_index` 外，字段来自 §4.6 的 `visionql-error-bin`；BFF 不解析 message/hint 推断类型；
+- source span 是当前 statement UTF-8 文本的半开字节区间；BFF 先换算到完整脚本位置和浏览器字符串索引，再定位编辑器；
 - 行级错误通过结果 NULL 和指标展示，不弹出“查询失败”；
 - 权限、能力缺失、资源不足、媒体过期和客户端过慢使用不同 UI；
 - “重试”只用于 `retryable=true` 的只读交互查询。Workbench 不自动重试 DDL、DML 或运维动作。
@@ -704,25 +741,25 @@ vql-workbench/
 |---|---|
 | 前端单元 | 类型渲染、BOX2D 坐标、置信度过滤、ring、状态机、错误映射 |
 | 前端可访问性 | 键盘、焦点、文本检测列表、对比度、reduced motion |
-| BFF 单元 | 脚本词法切分、结果限制、Arrow→JSON、blob TTL、media_ref、防注入 |
-| 协议契约 | `GetSqlInfo`、metadata、statement、prepared、cancel、IMAGE schema、系统 SQL |
-| 集成 | mock Flight server 的慢客户端、断线、取消、错误和 capability 降级 |
+| BFF 单元 | 脚本词法切分、顺序 prepare、结果限制、Arrow→JSON、blob TTL、media_ref、防注入 |
+| 协议契约 | 固定 SqlInfo ID/capability、全部 metadata RPC、`statement_info_v1`、FlightInfo app metadata、附着 Sink 状态流、prepared、cancel、逐 RPC session token、Protobuf 错误、IMAGE schema/version、系统 SQL |
+| 集成 | mock Flight server 的慢客户端、断线、取消、trailing metadata 错误、未知 capability/字段降级 |
 | 真实引擎 E2E | 登录、DDL、批查询、多模态显示、live preview、Jobs 操作、权限拒绝 |
-| 安全 | CSRF、XSS 字符串、伪造 blob/media_ref、SSRF、日志脱敏、跨用户缓存隔离 |
+| 安全 | CSRF、XSS 字符串、伪造/过期/撤权 locator 与 media_ref、SSRF、日志脱敏、跨用户缓存和 Flight session 隔离 |
 | 稳定性 | live 预览 1 小时、BFF 重启、多副本粘滞失败、无孤儿查询 |
 
 ### 14.2 PRD 验收映射
 
 | PRD 3.8 能力 | 验收场景 |
 |---|---|
-| SQL 编辑与执行 | 分别运行选区、当前语句和多语句脚本；错误定位；历史仅保存在本地 |
+| SQL 编辑与执行 | 分别运行选区、当前语句和多语句脚本；验证 statement metadata 分类、显式 `SUBMIT`、普通无界 INSERT 保持附着、错误定位；历史仅保存在本地 |
 | 传输端限制 | 聚合 SQL 不被改写；超过行/字节限制后显示原因并确认引擎查询已取消 |
 | IMAGE / BOX2D | 缩略图、原图、检测数组和 UNNEST 形态均正确；live 原图过期有清晰降级 |
 | 置信度滑杆 | 调整后无网络查询，UI 明确标记只过滤当前预览 |
 | VECTOR | 默认折叠，展开不影响其他行性能 |
 | 实时预览 | 最近 500 行；关闭 tab、断网超时、登出都会取消 Flight 查询 |
 | 目录 | 五类对象可见、schema/DDL 正确脱敏，DDL 后缓存失效 |
-| 运维 | Running 查询可 Pause/Resume/Stop；RTSP pause 显示缺口警告；最终状态来自引擎 |
+| 运维 | `SUBMIT QUERY` 返回名称/query ID；详情显示定义和依赖；Running 作业可 Pause/Resume/Stop；RTSP pause 显示缺口警告；最终状态来自引擎 |
 | 成本面板 | v0.2 只展示带单位的实测指标；没有数据不显示为 0 |
 | 独立性 | Workbench 构建图中不存在根 workspace 引擎 crate 依赖；全部 E2E 只使用公开协议 |
 
@@ -733,7 +770,7 @@ v0.2 Workbench 发布前必须满足：
 1. 通过真实 `visionqld` 的协议契约套件；
 2. 端到端完成“无需本地安装的查询 → 图片和框预览 → live 取消 → 持续查询运维”；
 3. 浏览器关闭后没有遗留交互查询；
-4. 越权 `FRAME_AT`、伪造 media_ref 和任意 URL 读取均被拒绝；
+4. 越权 `FRAME_AT`、伪造/过期/撤权 locator 与 media_ref 和任意 URL 读取均被拒绝；
 5. 前后端单元、E2E、可访问性和依赖漏洞检查全部通过；
 6. 独立构建、镜像启动和反向代理部署文档经过验证。
 
@@ -758,7 +795,7 @@ v0.2 Workbench 发布前必须满足：
 
 | 问题 | 当前倾向 | 决策时间 |
 |---|---|---|
-| `IMAGE` Flight 默认形态 | 引擎默认 reference；Workbench 会话使用 thumbnail | v0.2 Flight schema 冻结前 |
+| `IMAGE` 缩略图参数 | 引擎默认 reference；`uri` 只展示、locator 负责读取已固定；Workbench 会话使用 thumbnail，待确定尺寸/字节上限和 locator TTL | v0.2 Flight schema 冻结前 |
 | live 原图缓存时长 | 引擎短期环形缓存；过期保留缩略图 | 真实 8 路负载测试后 |
 | Jobs 列表大规模分页 | 优先定义公开 SQL 过滤/分页，不在 BFF 全量拉取 | v0.2 生产规模测试前 |
 | 外部 IdP 登录 | 首发先支持引擎 token/basic 能力；OIDC 由部署层或引擎统一 | v0.2 认证方案冻结前 |
@@ -778,7 +815,9 @@ v0.2 Workbench 发布前必须满足：
 | 查看缩略图 | 会话 blob cache | 查询结果的 IMAGE thumbnail |
 | 打开原图 | 校验 media_ref | prepared `TO_JPEG(FRAME_AT(...))` |
 | 实时预览 | Flight→SSE，维护短事件 ring | 无界 DoGet |
+| 显式提交持久作业 | 展示生成 SQL 并经 execution 发送 | SUBMIT QUERY name AS INSERT INTO ... |
 | 查看 Jobs | 类型化 JSON | SHOW QUERIES |
+| 查看 Job 详情 | 合并定义、状态与依赖 | DESCRIBE QUERY + SHOW QUERY DEPENDENCIES |
 | Pause / Resume / Stop | 校验 ID，执行公开 SQL | 作业状态机 |
 | 查看实际成本 | 转换带单位指标 | SHOW METRICS |
 | 查看成本估算 v0.3 | 展示 plan estimate | EXPLAIN capability |
