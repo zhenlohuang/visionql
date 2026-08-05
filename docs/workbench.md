@@ -1,11 +1,11 @@
 # VisionQL Workbench 设计
 
-> 本文根据 [VisionQL PRD](./prd.md) 3.8 和 [引擎设计](./engine.md) 重新设计 Workbench。Workbench 是 v0.2 面向 `visionqld` 生产能力交付的多模态 SQL 客户端；`visionqld` 的基础服务和 Flight SQL 从 v0.1 起存在。Workbench 负责查询、结果预览和持续查询运维，不拥有业务数据，也不依赖引擎私有接口。
+> 本文根据 [VisionQL PRD](./prd.md) 3.8 和 [引擎设计](./engine.md) 设计 Workbench。Workbench 是与 `vqld` 服务态在 v0.2 同期交付的多模态 SQL 客户端，负责查询、结果预览和持续查询运维，不拥有业务数据，也不依赖引擎私有接口。
 
-- **设计版本**：v0.2.1（Draft）
+- **设计版本**：v0.3.0（Draft）
 - **日期**：2026-08-05
-- **对应 PRD**：v0.1.4
-- **对应引擎设计**：v0.4.1
+- **对应 PRD**：v0.1.6
+- **对应引擎设计**：v0.5.0
 - **状态**：评审中
 
 ---
@@ -24,22 +24,12 @@ Workbench 不是 notebook、通用 BI、VMS、标注平台或独立的用户管�
 
 ### 1.2 v0.2 交付范围
 
-| 能力 | v0.2 交付 |
-|---|---|
-| SQL | VQL 高亮、目录补全、多语句脚本、选中执行、历史记录、取消 |
-| 有界结果 | 类型化表格、客户端分页、截断提示、行详情 |
-| 多模态 | IMAGE 缩略图与原图、BOX2D/检测数组叠加、置信度前端过滤、VECTOR 折叠 |
-| 无界结果 | 最近 N 行实时预览、断线提示、离开页面自动取消 |
-| 目录 | Table、Stream、Model、Function、Sink 的列表、schema 和 DDL |
-| 持续查询 | 列表、详情、`PAUSE`、`RESUME`、`STOP` |
-| 成本 | 从 `SHOW METRICS` 展示实际帧数、推理次数、GPU 时间和延迟 |
-
-v0.3 才增加 `EXPLAIN` 成本预估和候选的视频时间轴；v1.0 才增加权限/审计展示、服务端保存查询和团队共享。
+能力清单以 [PRD](./prd.md) 3.8 为准：SQL 编辑与执行、多模态结果预览、流结果实时预览、目录浏览、持续查询运维和成本面板，全部随 v0.2 交付；各能力的实现口径见本文 §6～§10。`EXPLAIN` 成本预估、视频时间轴、权限/审计展示、服务端保存查询和团队共享均未排期，待真实反馈后再评估。
 
 ### 1.3 设计原则
 
 1. **引擎接口只有公开协议。** 查询、目录、运维和指标都走 Arrow Flight SQL 或公开 SQL；不增加 Workbench 专用引擎 RPC。
-2. **不持久化业务状态。** Workbench 只有内存中的登录会话、活动预览、缩略图和短期指标；进程重启最多要求重新登录并重跑交互查询，不影响 `visionqld` 中的持续作业。
+2. **不持久化业务状态。** Workbench 只有内存中的登录会话、活动预览、缩略图和短期指标；进程重启最多要求重新登录并重跑交互查询，不影响 `vqld` 中的持续作业。
 3. **不改变 SQL 语义。** 结果限制发生在传输端，Workbench 不自动向用户 SQL 注入 `LIMIT`、过滤或采样。
 4. **默认少传像素。** 查询先返回引用和缩略图，原图按需读取；大结果导出由引擎直接写 Sink。
 5. **错误和能力由引擎决定。** Workbench 使用稳定错误码和 capability 信息，不解析自然语言错误，也不维护第二套权限模型。
@@ -130,7 +120,7 @@ flowchart LR
         FSQL[Flight SQL Client]
     end
 
-    ENGINE[visionqld<br/>Flight SQL + public SQL]
+    ENGINE[vqld<br/>Flight SQL + public SQL + /metrics]
     PROM[Prometheus / Grafana<br/>长期指标，可选]
 
     SPA <--> HTTP
@@ -153,15 +143,15 @@ Workbench 包含浏览器 SPA 和一个轻量 BFF。BFF 的必要性不是增加
 
 ### 3.2 客户端中的 `IMAGE` 表示
 
-Workbench 采用 PRD 开放问题 5 的当前方案：引擎协议默认返回引用；Workbench 的 Flight 会话设置 `image_mode=thumbnail`，让结果同时带小尺寸预览。`IMAGE.uri` 只用于展示，用户点击时通过公开的 `FRAME_AT(locator [, pts_ms])` 读取原图；locator 绑定来源 revision 与媒体版本，服务端每次重新授权。文件与对象存储引用可以重读，实时 RTSP 帧只在引擎受限的压缩 GOP 环形缓存中可用，过期后保留缩略图并明确提示。完整传输契约和权限流程见 §4.3～§4.4。
+Workbench 采用 PRD 开放问题 4 的当前方案：引擎协议默认返回引用；Workbench 的 Flight 会话设置 `image_mode=thumbnail`，让结果同时带小尺寸预览。`IMAGE.uri` 只用于展示，用户点击时通过公开的 `FRAME_AT(locator [, pts_ms])` 读取原图；locator 绑定来源 revision 与媒体版本，服务端每次重新授权。文件与对象存储引用可以重读，实时 RTSP 帧只在引擎受限的压缩 GOP 环形缓存中可用，过期后保留缩略图并明确提示。完整传输契约和权限流程见 §4.3～§4.4。
 
 ### 3.3 状态所有权
 
 | 状态 | 所有者 | 持久化 |
 |---|---|---|
-| 表、流、模型、函数、Sink | `visionqld` Catalog | 是 |
-| 持续查询定义、状态与检查点 | `visionqld` | 是 |
-| 身份、权限 | `visionqld` / 外部 IdP | Workbench 不保存 |
+| 表、流、模型、函数、Sink | `vqld` Catalog | 是 |
+| 持续查询定义、状态与检查点 | `vqld` | 是 |
+| 身份、权限 | `vqld` / 外部 IdP | Workbench 不保存 |
 | Workbench 登录会话 | BFF 内存 | 否；重启后重新登录 |
 | 交互查询与实时预览 | BFF 内存 + 引擎执行上下文 | 否；连接丢失后取消 |
 | 缩略图与媒体 locator | BFF 会话 LRU | 否；TTL 到期清理 |
@@ -199,11 +189,11 @@ Workbench 采用 PRD 开放问题 5 的当前方案：引擎协议默认返回�
 | 表目录 | `GetCatalogs`、`GetDbSchemas`、`GetTables`、`GetTableTypes` |
 | 其他目录对象 | `SHOW STREAMS/MODELS/FUNCTIONS/SINKS`、`DESCRIBE`、`SHOW CREATE` |
 | 持续查询 | `SUBMIT QUERY`、`SHOW/DESCRIBE QUERY`、`SHOW QUERY DEPENDENCIES`、`PAUSE`、`RESUME`、`STOP` |
-| 指标 | `SHOW METRICS FOR QUERY ...` |
+| 指标 | 引擎 Prometheus 指标端点，BFF 按 `query_id` 等标签筛选；端点地址来自部署配置 |
 | 错误 | 标准 gRPC status + `visionql-error-bin` trailing metadata |
 | 兼容协商 | 固定 vendor `GetSqlInfo` ID：协议、方言、IMAGE 扩展版本和 capability |
 
-Workbench 不直接访问 SQLite Catalog、Prometheus 内部存储或引擎进程文件。
+Workbench 不直接访问 SQLite Catalog 或引擎进程文件；指标只读引擎公开的 Prometheus 格式端点，长期指标存储由外部 Prometheus/Grafana 承担。
 
 ### 4.2 版本协商
 
@@ -221,8 +211,6 @@ Workbench 不直接访问 SQLite Catalog、Prometheus 内部存储或引擎进�
   image_thumbnail_mode,
   frame_at_v1,
   query_control_v1,
-  query_metrics_v1,
-  explain_cost,
   ...
 }
 ```
@@ -269,7 +257,7 @@ SET vql.result.thumbnail_quality = 75;
 sequenceDiagram
     participant U as 浏览器
     participant W as Workbench BFF
-    participant V as visionqld
+    participant V as vqld
 
     U->>W: POST /api/v1/media:open {media_ref}
     W->>W: 校验 media_ref 属于当前会话且未过期
@@ -291,7 +279,7 @@ sequenceDiagram
 Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象依赖使用 `SHOW QUERY DEPENDENCIES <id>`，并只依赖 [引擎设计](./engine.md) §11.6 固定的最小列。Workbench 对状态和错误码使用枚举映射：
 
 - 未知状态按原字符串显示，不把页面渲染失败；
-- 指标必须使用引擎返回的 `unit`；
+- 指标单位以引擎 Prometheus 指标名后缀与 HELP 元数据为准，BFF 不自行猜测；
 - `STOP` 后仍可查看历史定义和最终错误；
 - 操作成功指引擎确认并且下一次 `SHOW QUERIES` 观察到目标状态，不以 HTTP 200 代替最终状态。
 
@@ -327,7 +315,7 @@ Workbench 自己的 HTTP API 只服务同源 SPA。它不是引擎 API，也不�
 | `GET /api/v1/jobs` | 转换 `SHOW QUERIES` 结果 |
 | `GET /api/v1/jobs/{id}` | 合并 `DESCRIBE QUERY` 与 `SHOW QUERY DEPENDENCIES` |
 | `POST /api/v1/jobs/{id}/actions` | 将 pause/resume/stop 映射为公开 SQL |
-| `GET /api/v1/jobs/{id}/metrics` | 转换 `SHOW METRICS` 结果 |
+| `GET /api/v1/jobs/{id}/metrics` | 抓取引擎指标端点并按 `query_id` 标签筛选转换 |
 | `GET /api/v1/blobs/{id}` | 获取当前会话缩略图 |
 | `POST /api/v1/media:open` | 按当前会话 media_ref 读取原图 |
 
@@ -413,7 +401,7 @@ Query 页提供“提交为持久作业”动作时，必须要求用户填写�
 
 这些值可以由部署配置收紧，但不能由页面无限放大。Workbench 不改写 SQL，因而聚合、排序和模型调用仍按原查询完整语义执行；有界限制只决定多少结果被传到浏览器，无界限制只约束预览资源。
 
-大结果不经 BFF 导出。导出向导只生成并展示 `INSERT INTO` 或 CTAS SQL，用户确认后由 `visionqld` 直接写入 Lance/Parquet/Sink。
+大结果不经 BFF 导出。导出向导只生成并展示 `INSERT INTO` 或 CTAS SQL，用户确认后由 `vqld` 直接写入 Lance/Parquet/Sink。
 
 ### 6.4 查询历史与草稿
 
@@ -491,7 +479,7 @@ STARTING → LIVE ⇄ RECONNECTING → CANCELLED
 
 ### 8.2 指标与数据分离
 
-结果 batch 经当前 Flight DoGet 到达。该预览的引擎指标由独立的低频 `SHOW METRICS` 请求获得，默认每 2 秒一次：
+结果 batch 经当前 Flight DoGet 到达。该预览的引擎指标由 BFF 低频抓取引擎 Prometheus 指标端点获得，默认每 2 秒一次：
 
 - 指标请求失败不终止结果预览；
 - 结果 DoGet 失败也不伪造指标为 0；
@@ -552,7 +540,7 @@ v0.2 不在详情页编辑对象。变更通过生成 SQL 回到 Query 页执行
 
 Jobs 页默认只展示持久作业，并允许切换查看当前 principal 可见的附着查询；附着查询仍由创建它的 Query execution 取消，不显示 `PAUSE/RESUME`。列表默认按非终态优先、最近更新倒序。筛选和排序只作用于已从引擎取得的列表；数据量超过一次结果限制时，使用引擎提供的公开分页参数或过滤 SQL，不能在 BFF 内假装拿到了全量。
 
-列表指标通过一次不带 `FOR QUERY` 的 `SHOW METRICS` 快照按 query ID 合并，不能为每行发起一条查询。详情页才使用带 query ID 的过滤形式。
+列表指标通过一次指标端点抓取按 `query_id` 标签合并，不能为每行发起一次请求；详情页复用同一抓取结果的对应子集。
 
 ### 10.2 详情页
 
@@ -561,7 +549,7 @@ Jobs 页默认只展示持久作业，并允许切换查看当前 principal 可�
 详情分为四块：
 
 1. **定义**：名称、lifecycle、只读 SQL、定义快照、模型与函数修订及完整对象依赖；
-2. **运行状态**：最后事件时间、水位线、epoch、检查点（如适用）、Kafka lag；
+2. **运行状态**：最后事件时间、水位线、epoch、检查点（如适用）；
 3. **质量**：解码错误、推理错误、迟到行、丢帧原因和断流缺口；
 4. **实际成本**：处理帧、推理次数、实际 batch、GPU seconds、P50/P95 推理延迟。
 
@@ -589,9 +577,9 @@ average_batch_size
 queue_wait_ms
 ```
 
-v0.3 在 capability `explain_cost` 存在时增加计划估算，并并排显示“估算”和“实际”。两者必须标明时间范围、模型修订和采样率，不能合并成一个看似精确的数字。
+计划估算（`EXPLAIN` 成本预估）属于未排期的“优化器降本”方向；届时以新增 capability 引入，并并排显示“估算”和“实际”，两者标明时间范围、模型修订和采样率，不合并成一个看似精确的数字。
 
-Workbench 不在 v0.2 把 GPU seconds 换算为货币；价格和计费属于部署/商业配置。
+Workbench 不把 GPU seconds 换算为货币；价格和计费属于部署/商业配置。
 
 ---
 
@@ -608,7 +596,7 @@ Workbench 不在 v0.2 把 GPU seconds 换算为货币；价格和计费属于部
 
 ### 11.2 Web 安全基线
 
-- 浏览器到 BFF 和 BFF 到 `visionqld` 都使用 TLS；
+- 浏览器到 BFF 和 BFF 到 `vqld` 都使用 TLS；
 - 所有写操作使用 CSRF token，API 只允许同源 CORS；
 - CSP 默认禁止内联脚本和第三方脚本，`frame-ancestors 'none'`；
 - React 文本渲染保持转义，SQL、错误、标签和 URI 不进入 `dangerouslySetInnerHTML`；
@@ -690,12 +678,12 @@ Workbench 自身暴露：
 
 ```bash
 visionql-workbench \
-  --server grpc+tls://visionqld.example.com:32010 \
+  --server grpc+tls://vqld.example.com:32010 \
   --listen 0.0.0.0:8080
 ```
 
 - 前端构建产物嵌入 BFF 单二进制，同时提供容器镜像；
-- 默认只配置一个 `visionqld` endpoint。v0.2 不在一个会话中切换多端点；
+- 默认只配置一个 `vqld` endpoint。v0.2 不在一个会话中切换多端点；
 - Workbench 部署在中心或管理网络，不部署到每个边缘节点；
 - 浏览器 TLS 可以由 Workbench 或反向代理终止，部署文档必须说明信任头和 secure cookie 配置；
 - readiness 要同时检查 BFF 可用和引擎连接配置合法，但引擎暂时不可达时进程仍可启动并显示诊断页。
@@ -726,7 +714,7 @@ vql-workbench/
 
 硬约束：
 
-- `vql-workbench/server` 不依赖根 workspace 中的 `vql-core`、`vql-server` 或其他引擎 crate；
+- `vql-workbench/server` 不依赖根 workspace 中的 `vql-core`、`vql-daemon` 或其他引擎 crate；
 - 协议测试从 Flight SQL schema 和公开 SQL 生成 fixtures，不复制 Catalog Rust struct；
 - 前后端 API 类型在 Workbench 内生成，不能从引擎内部类型生成；
 - 引擎和 Workbench 使用独立版本与 CI，可按目录分别发布。
@@ -760,14 +748,14 @@ vql-workbench/
 | 实时预览 | 最近 500 行；关闭 tab、断网超时、登出都会取消 Flight 查询 |
 | 目录 | 五类对象可见、schema/DDL 正确脱敏，DDL 后缓存失效 |
 | 运维 | `SUBMIT QUERY` 返回名称/query ID；详情显示定义和依赖；Running 作业可 Pause/Resume/Stop；RTSP pause 显示缺口警告；最终状态来自引擎 |
-| 成本面板 | v0.2 只展示带单位的实测指标；没有数据不显示为 0 |
+| 成本面板 | 只展示来自引擎 Prometheus 指标端点的实测数据；没有数据不显示为 0 |
 | 独立性 | Workbench 构建图中不存在根 workspace 引擎 crate 依赖；全部 E2E 只使用公开协议 |
 
 ### 14.3 发布门槛
 
 v0.2 Workbench 发布前必须满足：
 
-1. 通过真实 `visionqld` 的协议契约套件；
+1. 通过真实 `vqld` 的协议契约套件；
 2. 端到端完成“无需本地安装的查询 → 图片和框预览 → live 取消 → 持续查询运维”；
 3. 浏览器关闭后没有遗留交互查询；
 4. 越权 `FRAME_AT`、伪造/过期/撤权 locator 与 media_ref 和任意 URL 读取均被拒绝；
@@ -778,16 +766,7 @@ v0.2 Workbench 发布前必须满足：
 
 ## 15. 明确不做的能力
 
-| 能力 | 原因 | 重新评估 |
-|---|---|---|
-| BI 图表和仪表盘编排 | Workbench 聚焦多模态调试和运维；通用 BI 使用 Flight SQL/JDBC | 暂不计划 |
-| Workbench 用户与权限数据库 | 身份和授权必须只有引擎一份真相 | 暂不计划 |
-| 服务端保存查询和团队共享 | 需要归属、权限、版本和持久化模型 | v1.0 |
-| 指标长期存储 | 由 Prometheus/Grafana 承担 | 引擎提供稳定系统时序表后再评估 |
-| 浏览器直连 Flight SQL | JS 客户端和凭证边界尚不成熟 | 生态成熟后 |
-| notebook 多 cell | 会扩大状态、依赖和执行模型 | 根据真实用户反馈 |
-| 视频播放器、标注、时间轴 | 超出首发调试闭环 | v0.3 先评估只读时间轴 |
-| 多 endpoint / 边缘车队管理 | 属于规模化和边缘治理 | v1.0 / v1.x |
+§1.1 与 PRD 3.8 已界定 Workbench 不是 notebook、通用 BI、VMS、标注平台或独立的用户管理系统。补充两条设计层边界：身份与授权只有引擎一份真相，Workbench 不建自己的用户/权限数据库；长期指标存储由 Prometheus/Grafana 承担。浏览器直连 Flight SQL、notebook 多 cell、服务端保存查询与团队共享、视频播放器/时间轴、多 endpoint 与边缘车队管理均未排期，按真实反馈重新评估。
 
 ---
 
@@ -800,13 +779,13 @@ v0.2 Workbench 发布前必须满足：
 | Jobs 列表大规模分页 | 优先定义公开 SQL 过滤/分页，不在 BFF 全量拉取 | v0.2 生产规模测试前 |
 | 外部 IdP 登录 | 首发先支持引擎 token/basic 能力；OIDC 由部署层或引擎统一 | v0.2 认证方案冻结前 |
 | 大结果导出 UX | 生成明确 SQL 并由用户确认，不经 BFF 下载 | v0.2 可用性测试后 |
-| v0.3 视频时间轴 | 先测 `FRAME_AT` 并发、缓存命中和对象存储费用 | v0.3 规划期 |
+| 视频时间轴（未排期） | 先测 `FRAME_AT` 并发、缓存命中和对象存储费用 | 排期前 |
 
 ---
 
 ## 附录 A：界面动作到引擎协议的映射
 
-| 界面动作 | Workbench BFF | `visionqld` |
+| 界面动作 | Workbench BFF | `vqld` |
 |---|---|---|
 | 登录 | 创建内存 session | Flight auth handshake |
 | 执行 SQL | 创建 execution，转发结果 | statement query/update + DoGet |
@@ -819,8 +798,7 @@ v0.2 Workbench 发布前必须满足：
 | 查看 Jobs | 类型化 JSON | SHOW QUERIES |
 | 查看 Job 详情 | 合并定义、状态与依赖 | DESCRIBE QUERY + SHOW QUERY DEPENDENCIES |
 | Pause / Resume / Stop | 校验 ID，执行公开 SQL | 作业状态机 |
-| 查看实际成本 | 转换带单位指标 | SHOW METRICS |
-| 查看成本估算 v0.3 | 展示 plan estimate | EXPLAIN capability |
+| 查看实际成本 | 抓取指标端点并按 `query_id` 筛选 | Prometheus 格式 /metrics 端点 |
 
 ---
 
