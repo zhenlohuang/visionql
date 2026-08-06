@@ -47,7 +47,7 @@
 **目标用户**（按优先级）：
 
 1. **数据和算法工程师**：目前负责开发视觉处理管道的用户，也是首个版本的核心用户，主要通过 pip 包使用库态能力。
-2. **数据分析师**：熟悉 SQL，但不熟悉 PyTorch。v0.2 起可以通过 Workbench 或 BI 工具连接 `vqld`，使用具备认证和权限控制的服务，无需本地安装。
+2. **数据分析师**：熟悉 SQL，但不熟悉 PyTorch。v0.3 起可以通过 Workbench 或 BI 工具连接 `vqld`，使用具备认证和权限控制的服务，无需本地安装。
 3. **平台团队**：希望将视觉分析建设成内部平台，需要多租户、治理和成本控制能力，也是未来企业版的主要购买方。
 4. **AI 应用和 Agent 开发者**：把 VisionQL 作为 Agent 的视觉查询工具，通过 SQL 查询摄像头与视频库，用于回答问题或触发后续操作。现有 text-to-SQL 能力也可以直接复用。
 
@@ -87,7 +87,7 @@
 | **推理成本仍然较高** | 即使性能提升 10 倍，全量分析大规模视频仍会消耗大量 GPU | 允许用户通过采样率明确控制推理量（帧采样下推）；更多降本优化待后续规划 |
 | **查询结果具有概率性** | 检测模型可能漏检或误检，因此 `COUNT(*)` 不再表示绝对准确的事实 | 将置信度和阈值明确写入查询；聚合层是否需要专用的置信度语义，见开放问题 3 |
 | **SQL 的表达能力有限** | 标定和复杂的多目标关联规则不适合全部放进 SQL | 不追求所有逻辑都用 SQL 表达。UDF、用户自定义模型和 DataFrame API 用于承载复杂逻辑 |
-| **连接器和模型生态需要时间建设** | 引擎的实用性依赖数据源、模型和场景模板 | 首发聚焦检测这一最高频能力，以及 RTSP、对象存储和 Kafka Sink 三类连接器；嵌入检索随 v0.3 加入。先做好安防或审核中的一个场景，再逐步扩展 |
+| **连接器和模型生态需要时间建设** | 引擎的实用性依赖数据源、模型和场景模板 | 首发聚焦检测这一最高频能力，以及 RTSP、对象存储和 Kafka Sink 三类连接器；嵌入检索随 v0.4 加入。先做好安防或审核中的一个场景，再逐步扩展 |
 | **大型平台可能补齐类似能力** | Databricks 或云厂商可能继续扩展多模态处理能力 | 重点做好批流一体和视觉原生优化，并通过开源建立用户和生态 |
 
 ---
@@ -100,7 +100,7 @@ VisionQL 采用一个统一抽象：**视觉数据最终都可以表示为由帧
 
 | 抽象 | 说明 |
 |---|---|
-| **多模态类型系统** | 在标准 SQL 类型之外增加 `IMAGE`、`VIDEO`、`BOX2D`（检测框）、`VECTOR(n)`（嵌入向量，v0.3 启用）以及 `STRUCT`/`ARRAY` 嵌套类型 |
+| **多模态类型系统** | 在标准 SQL 类型之外增加 `IMAGE`、`VIDEO`、`BOX2D`（检测框）、`VECTOR(n)`（嵌入向量，v0.4 启用）以及 `STRUCT`/`ARRAY` 嵌套类型 |
 | **Table（表）** | 有界数据集。图片目录是一张表，每行一张图片；视频目录也是一张表，建表时按声明的采样率展开为帧，每行一帧。两者都是帧粒度的关系表 |
 | **Stream（流）** | 无界数据集。RTSP 摄像头流表示为帧表，例如 `(ts TIMESTAMP, frame IMAGE, ...)`，并带有事件时间和水位线 |
 | **Model（模型）** | 资源实现对象。不可变 revision 固定权重内容、processor、精度、后端和输出 schema 等可能影响结果的定义；GPU 放置、副本数和动态 batching 属于独立部署配置。模型不直接出现在 SQL 中，但规划后的查询会固定具体 revision |
@@ -114,7 +114,7 @@ VisionQL 采用一个统一抽象：**视觉数据最终都可以表示为由帧
 
 ```bash
 pip install visionql
-visionql shell          # 交互式 SQL,或在 Python 中 import visionql
+vql shell               # 交互式 SQL,或在 Python 中 import visionql
 ```
 
 下面用一个完整任务说明基本流程：统计一段门口监控录像中每分钟的平均人数。全程只需要本地视频文件，不依赖摄像头、Kafka 等任何外部服务。
@@ -146,9 +146,9 @@ GROUP BY 1;
 -- COUNT_OBJECTS(检测结果, 标签, 置信度阈值) 是内置数组函数,见 3.3.7 设计原则
 ```
 
-整个任务分为三步，约 15 行 SQL，不需要编写 Python 或部署脚本。从 `pip install` 到看到第一个结果不超过 5 分钟，这也是第 7 节 TTFV 指标的口径（与第 4 节场景 B 同口径）。
+整个任务分为三步，约 15 行 SQL，不需要编写 Python 或部署脚本。从 `pip install` 到看到第一个结果不超过 5 分钟，这也是第 7 节 TTFV 指标的口径（与第 4 节场景 A 同口径）。
 
-同一条查询逻辑可以原样切换到实时流：把 `FROM` 换成 `CREATE STREAM` 注册的 RTSP 流（3.3.1），再通过 `CREATE SINK` + `INSERT INTO` 把结果持续写入 Kafka（3.3.6），就得到一条上线即运行的持续查询。这正是批流一体的含义，也是 MVP 验收场景 A 的内容（第 4 节）。交互模式下，持续查询在前台运行，适合开发和调试；生产环境中的常驻运行方式见 3.5。下面按主题说明 SQL 设计。
+同一条查询逻辑可以原样切换到实时流：把 `FROM` 换成 `CREATE STREAM` 注册的 RTSP 流（3.3.1），再通过 `CREATE SINK` + `INSERT INTO` 把结果持续写入 Kafka（3.3.6），就得到一条上线即运行的持续查询。这正是批流一体的含义，也是 MVP 验收场景 B 的内容（第 4 节）。交互模式下，持续查询在前台运行，适合开发和调试；生产环境中的常驻运行方式见 3.5。下面按主题说明 SQL 设计。
 
 ### 3.3 SQL 设计详解
 
@@ -192,7 +192,7 @@ CREATE MODEL yolo
 TYPE OBJECT_DETECTION
 FROM 'hf://ultralytics/yolo26n';
 
--- 嵌入模型同样是模型(EMBEDDING 类型随 v0.3 启用)
+-- 嵌入模型同样是模型(EMBEDDING 类型随 v0.4 启用)
 CREATE MODEL clip TYPE EMBEDDING FROM 'hf://openai/clip-vit-base-patch32';
 
 -- 简写语法：在 1:1 场景中，一条语句同时注册模型并创建对应函数。
@@ -260,7 +260,7 @@ AS (b.w * b.h > 0.25);                                  -- SQL 宏:纯表达式�
 2. **一份模型可以复用到多个函数**：CLIP 可以同时提供图片和文本两个入口，而权重只需加载一次。
 3. **优化器可以明确识别模型成本而不改结果契约**：可以对模型调用做 batching、融合和确定性公共表达式消除。
 
-**变更以新版本生效**：`ALTER MODEL` 和 `ALTER FUNCTION` 都创建新版本，只影响之后新规划的查询；运行中的查询继续使用规划时固定的模型版本，结果可复现。版本与部署机制的完整设计见[引擎设计文档](./engine.md)。
+**变更以新版本生效**：`ALTER MODEL` 和 `ALTER FUNCTION` 都创建新版本，只影响之后新规划的查询；运行中的查询继续使用规划时固定的模型版本，结果可复现。版本与部署机制的完整设计见[系统设计](./design.md)。
 
 #### 3.3.4 查询一：视频或流中人的位置
 
@@ -287,7 +287,7 @@ WHERE det.label = 'person';
 
 #### 3.3.5 查询二：跨模态语义检索（以批处理为主）
 
-> 本节对应的嵌入与向量检索能力安排在 v0.3 交付（见第 5 节），这里先行定义 SQL 语义。
+> 本节对应的嵌入与向量检索能力安排在 v0.4 交付（见第 5 节），这里先行定义 SQL 语义。
 
 ```sql
 -- 以文搜图:找出最像"戴红色安全帽的工人"的 20 张图
@@ -307,7 +307,7 @@ LIMIT 20;
 INSERT INTO people_per_minute SELECT ...;
 
 -- 事件帧留存:告警同时把证据帧存下来
-INSERT INTO evidence  -- Lance/Parquet 表,IMAGE 列原生存储(Parquet 随 v0.2、Lance 随 v0.3)
+INSERT INTO evidence  -- Lance/Parquet 表,IMAGE 列原生存储(Parquet 与 Lance 随 v0.4)
 SELECT ts, frame, det.box
 FROM cam_entrance, UNNEST(detect(frame)) AS det
 WHERE det.label = 'person' AND det.confidence > 0.9;
@@ -328,9 +328,13 @@ WHERE det.label = 'person' AND det.confidence > 0.9;
 5. **自定义算子皆有函数等价形式**。`<->` 等运算符经表达式规划扩展映射为函数调用,方言不兼容时用户总有退路。
 6. **多模态类型建立在标准列式类型之上**:`IMAGE`/`VIDEO` 为带元数据的二进制/结构列,`BOX2D` 为结构体,`VECTOR(n)` 为定长浮点列表——类型名只存在于 DDL 与文档层,不要求引擎具备用户自定义类型内核。
 
-### 3.4 DataFrame API（Python）
+### 3.4 DataFrame API（Python，v0.3）
 
-SQL 之下是同一套逻辑计划,DataFrame 面向工程师,适合复杂管道与编程式组装:
+SQL 之下是同一套逻辑计划,DataFrame 面向工程师,适合复杂管道与编程式组装。
+
+v0.1 的 Python 库只提供 `sess.sql()`、Arrow 结果交换、notebook 富显示和 Python UDF 注册——足以支撑 3.2 的首用路径。完整的链式 DataFrame 随 v0.3 交付：它直接构造引擎的逻辑计划，等于把内部表示固化为公共契约，需要等逻辑计划在 v0.1 的真实查询中稳定下来。
+
+下面的示例展示 API 的目标形态，其中 `embed_image` 和 Lance 写出属于 v0.4 能力:
 
 ```python
 import visionql as vq
@@ -370,15 +374,15 @@ VisionQL 需要同时满足三类不同的使用条件：
 
 | 形态 | 载体 | 覆盖场景 | 阶段 |
 |---|---|---|---|
-| **库态** `visionql` | pip 包，像 DuckDB 一样嵌入进程 | notebook 探索、批任务、CI 回归；开发阶段也可在前台运行流查询 | v0.1（MVP） |
-| **服务态** `vqld` | 由 `vql-daemon` crate 构建的单机守护进程；目录、模型运行时和流运行时都包含在一个二进制中 | 常驻流查询、持久作业与恢复、多客户端共享，以及分析师和 BI 工具通过标准协议接入 | v0.2 |
+| **库态** `visionql` | pip 包，像 DuckDB 一样嵌入进程 | notebook 探索、批任务、CI 回归；开发阶段也可在前台运行流查询（随 v0.2） | v0.1（MVP） |
+| **服务态** `vqld` | 由 `vql-server` crate 构建的单机守护进程；目录、模型运行时和流运行时都包含在一个二进制中 | 常驻流查询、持久作业与恢复、多客户端共享，以及分析师和 BI 工具通过标准协议接入 | v0.3 |
 
-CLI 同时安装 `vql` 作为 `visionql` 的等价别名（`vql shell`、`vql run` 等），与守护进程 `vqld` 形成命名配对；pip 包名保持 `visionql`。
+CLI 的可执行文件名是 `vql`（`vql shell`、`vql run` 等），与守护进程 `vqld` 形成命名配对；pip 包名和 Python import 名保持 `visionql`。
 
 **形态间的关键约定**:
 
-1. **在 notebook 中验证，再用同一条命令运行**。`run` 与 `submit` 是一对含义明确的动词：`visionql run job.sql` 前台附着执行，v0.1 起可用，任务随客户端进程结束；`visionql submit job.sql [--name <job>]` 随 v0.2 服务态提供，将脚本中的 DDL 逐条执行，并把其中唯一一条无界 Sink 语句包装为 `SUBMIT QUERY` 提交为脱离客户端的持久作业，作业名默认取文件名。`SUBMIT QUERY <name> AS INSERT INTO ...` 是协议层的公共提交语句，CLI 和 Workbench 都经由它提交，引擎不提供私有提交通道。普通无界 SQL 始终保持客户端附着，升级版本不会悄悄改变同一条 SQL 的生命周期。
-2. **持续查询在 v0.2 交给服务态管理**。v0.1 的持续查询在客户端前台运行，随进程结束；v0.2 服务态为显式提交的持久作业提供名称、状态、`SHOW/DESCRIBE QUERY`、`PAUSE`、`RESUME`、`STOP`、恢复以及查询级指标。作业依赖的目录对象在 `DESCRIBE QUERY` 返回的定义中可见；删除被运行中作业引用的对象时，引擎拒绝并在结构化错误中列出依赖它的作业。
+1. **在 notebook 中验证，再用同一条命令运行**。`run` 与 `submit` 是一对含义明确的动词：`vql run job.sql` 前台附着执行，v0.1 起可用于批脚本、v0.2 起可用于持续查询，任务随客户端进程结束；`vql submit job.sql [--name <job>]` 随 v0.3 服务态提供，将脚本中的 DDL 逐条执行，并把其中唯一一条无界 Sink 语句包装为 `SUBMIT QUERY` 提交为脱离客户端的持久作业，作业名默认取文件名。`SUBMIT QUERY <name> AS INSERT INTO ...` 是协议层的公共提交语句，CLI 和 Workbench 都经由它提交，引擎不提供私有提交通道。普通无界 SQL 始终保持客户端附着，升级版本不会悄悄改变同一条 SQL 的生命周期。
+2. **持续查询在 v0.3 交给服务态管理**。v0.2 的持续查询在客户端前台运行，随进程结束；v0.3 服务态为显式提交的持久作业提供名称、状态、`SHOW/DESCRIBE QUERY`、`PAUSE`、`RESUME`、`STOP`、恢复以及查询级指标。作业依赖的目录对象在 `DESCRIBE QUERY` 返回的定义中可见；删除被运行中作业引用的对象时，引擎拒绝并在结构化错误中列出依赖它的作业。
 3. **客户端使用标准列式协议**。服务态使用 Arrow Flight SQL；Python SDK、BI 工具和第三方应用通过 Flight SQL、ADBC 或 JDBC 连接，不增加私有协议。
 4. **首次运行不要求外部依赖**。服务态二进制内置目录和模型运行时；Kafka、对象存储和 Kubernetes 都是可选集成，不是启动前提。
 5. **Workbench 与服务态同期交付**。Workbench 是独立的轻量子项目，通过 Arrow Flight SQL 连接 `vqld`。它既使用公开协议，也用于持续验证协议是否覆盖完整的客户端需求。能力和边界见 3.8。
@@ -391,23 +395,23 @@ CLI 同时安装 `vql` 作为 `visionql` 的等价别名（`vql shell`、`vql ru
 2. **帧数据通路**：解码后的帧占用大量内存，1080p RGB 约为 6MB/帧，5fps 单流约为 30MB/s。`IMAGE` 列在查询计划中尽量使用引用或压缩表示并减少复制，解码延迟到推理或落盘前。
 3. **GPU 感知调度**:模型自动 batching、算子与模型的共置、背压;
 4. **流语义**:事件时间 + 水位线、断流重连;RTSP 为不可重放 live 源,投递语义尽力而为,断流/丢帧缺口如实反映在结果里,不伪造;
-5. **存储**:列式多模态格式(Parquet 随 v0.2、Lance 随 v0.3 + 视频引用);
-6. **可观测**:每查询的推理次数、延迟等指标,v0.2 起经 Prometheus 指标端点暴露并支撑 Workbench 成本面板;
-7. **代码型函数执行**：计算量大的模型推理使用 `USING MODEL`，由引擎管理 GPU；代码型函数主要用于轻量的数据处理。Python UDF 根据产品形态采用不同的执行方式：库态在宿主 Python 进程中调用，通过 Arrow 批传递数据，并利用批处理和原生库降低 GIL 影响；v0.2 服务态使用进程外 Python worker，通过 Arrow IPC 通信，按函数隔离依赖，避免 worker 崩溃影响引擎，也可以通过多个 worker 提高并发。引擎内核不嵌入 Python 解释器，只有注册 Python 函数时才需要 Python 运行时。
+5. **存储**:列式多模态格式(Parquet 与 Lance 随 v0.4 + 视频引用);
+6. **可观测**:每查询的推理次数、延迟等指标,v0.3 起经 Prometheus 指标端点暴露并支撑 Workbench 成本面板;
+7. **代码型函数执行**：计算量大的模型推理使用 `USING MODEL`，由引擎管理 GPU；代码型函数主要用于轻量的数据处理。Python UDF 根据产品形态采用不同的执行方式：库态在宿主 Python 进程中调用，通过 Arrow 批传递数据，并利用批处理和原生库降低 GIL 影响；v0.3 服务态使用进程外 Python worker，通过 Arrow IPC 通信，按函数隔离依赖，避免 worker 崩溃影响引擎，也可以通过多个 worker 提高并发。引擎内核不嵌入 Python 解释器，只有注册 Python 函数时才需要 Python 运行时。
 
 ### 3.7 非功能需求（NFR）
 
 | 类别 | 要求 |
 |---|---|
 | **性能(MVP 基线)** | 单机 1×消费级 GPU:≥ 8 路 1080p@5fps 并发流上运行轻量检测 + 窗口聚合;批扫描吞吐以解码为瓶颈打满硬件;元数据/已落盘结果的交互查询 P95 < 1s |
-| **容错** | RTSP 为不可重放 live 源,投递语义尽力而为,缺口如实反映、不伪造;断流自动重连;v0.2 起服务态重启后持久查询自动恢复,不丢目录状态 |
+| **容错** | RTSP 为不可重放 live 源,投递语义尽力而为,缺口如实反映、不伪造;断流自动重连;v0.3 起服务态重启后持久查询自动恢复,不丢目录状态 |
 | **错误语义** | 单帧解码/推理失败默认不中断查询:该行结果置 NULL 并计入每查询的错误指标,失败率超阈值告警;严格模式 `on_error = 'fail'` 可选。模型输出的概率性(漏检/误检)不属于错误,由置信度阈值显式管理(见 2.5) |
-| **安全与隐私** | "数据不出域"是默认架构(引擎去数据旁,而非数据上云);模型来源哈希固定、防篡改;服务态(v0.2):TLS + 认证、表/流级权限,Python UDF 于进程外执行 |
-| **兼容性承诺** | SQL 方言与目录格式在 1.0 正式版之前不作兼容性承诺;`EXPLAIN` 输出与内部指标名不作为稳定接口 |
+| **安全与隐私** | "数据不出域"是默认架构(引擎去数据旁,而非数据上云);模型来源哈希固定、防篡改;服务态(v0.3):TLS + 认证、表/流级权限,Python UDF 于进程外执行 |
+| **兼容性承诺** | SQL 方言与目录格式在 1.0 正式版之前不作稳定性承诺;`EXPLAIN` 输出与内部指标名不作为稳定接口。格式可变,但升级必须提供自动迁移:已有目录能被新版本直接打开,迁移失败可回滚,任何版本都不要求用户重建目录 |
 
 ### 3.8 Workbench（Web 工作台）
 
-Workbench 是 v0.2 与 `vqld` 服务态一同交付的 Web 图形界面，也是位于 `vql-workbench/` 的独立轻量子项目。它包含单页应用和配套后端，后端作为标准 Arrow Flight SQL 客户端连接 `vqld`。Workbench 与引擎之间只使用公开客户端协议，不依赖私有 API。
+Workbench 是 v0.3 与 `vqld` 服务态一同交付的 Web 图形界面，也是位于 `vql-workbench/` 的独立轻量子项目。它包含单页应用和配套后端，后端作为标准 Arrow Flight SQL 客户端连接 `vqld`。Workbench 与引擎之间只使用公开客户端协议，不依赖私有 API。
 
 **为什么需要 Workbench？** DBeaver 等通用 SQL 客户端可以通过 JDBC/ADBC 连接 `vqld`，但通常只会把 `IMAGE` 显示为二进制，把检测结果显示为结构体文本。视觉查询需要直接查看图片、检测框和实时画面，才能有效调试。Workbench 专注于多模态结果预览和视觉查询运维，不与通用 BI 工具竞争。
 
@@ -417,12 +421,12 @@ Workbench 是 v0.2 与 `vqld` 服务态一同交付的 Web 图形界面，也是
 
 | 能力 | 说明 | 阶段 |
 |---|---|---|
-| SQL 编辑与执行 | VQL 语法高亮、目录感知补全、多语句脚本执行和查询历史。客户端通过 prepared schema metadata 识别语句类型和有界性；交互查询会在传输端限制返回行数，不改写 SQL，也不改变查询语义 | v0.2 |
-| 结果预览 | 表格分页;`IMAGE` 缩略图内联显示,点击后经 locator(Flight ticket)解引用取原图,解引用时重新授权;原图点查仅对持久数据有效(文件表、落盘表),live 流的实时预览只承诺缩略图,需要回查原图的行先经事件帧留存落盘(3.3.6);检测结果(`BOX2D`)叠加绘制在对应帧上,置信度滑杆前端过滤(调阈值不重跑查询);`VECTOR` 折叠显示 | v0.2 |
-| 流结果实时预览 | 实时滚动显示无界 SELECT 的最近 N 行结果；关闭页面时自动取消预览查询 | v0.2 |
-| 目录浏览 | 浏览表、流、模型、函数和 Sink，并查看 schema 与 DDL | v0.2 |
-| 持续查询运维 | 通过公开 SQL 显式提交持久作业，展示名称、定义、状态、推理量、延迟、丢帧和断流指标，并提供 `PAUSE`、`RESUME`、`STOP` 操作 | v0.2 |
-| 成本面板 | 读取引擎的 Prometheus 指标端点，展示每个查询的实际 GPU 时长和推理次数；无需部署 Prometheus server | v0.2 |
+| SQL 编辑与执行 | VQL 语法高亮、目录感知补全、多语句脚本执行和查询历史。客户端通过 prepared schema metadata 识别语句类型和有界性；交互查询会在传输端限制返回行数，不改写 SQL，也不改变查询语义 | v0.3 |
+| 结果预览 | 表格分页;`IMAGE` 缩略图内联显示,点击后经 locator(Flight ticket)解引用取原图,解引用时重新授权;原图点查仅对持久数据有效(文件表、落盘表),live 流的实时预览只承诺缩略图,需要回查原图的行先经事件帧留存落盘(3.3.6);检测结果(`BOX2D`)叠加绘制在对应帧上,置信度滑杆前端过滤(调阈值不重跑查询);`VECTOR` 折叠显示 | v0.3 |
+| 流结果实时预览 | 实时滚动显示无界 SELECT 的最近 N 行结果；关闭页面时自动取消预览查询 | v0.3 |
+| 目录浏览 | 浏览表、流、模型、函数和 Sink，并查看 schema 与 DDL | v0.3 |
+| 持续查询运维 | 通过公开 SQL 显式提交持久作业，展示名称、定义、状态、推理量、延迟、丢帧和断流指标，并提供 `PAUSE`、`RESUME`、`STOP` 操作 | v0.3 |
+| 成本面板 | 读取引擎的 Prometheus 指标端点，展示每个查询的实际 GPU 时长和推理次数；无需部署 Prometheus server | v0.3 |
 
 **产品原则**:
 
@@ -430,7 +434,7 @@ Workbench 是 v0.2 与 `vqld` 服务态一同交付的 Web 图形界面，也是
 2. **保持无状态**：Workbench 不持久化业务数据。认证由引擎处理，保存的查询放在浏览器本地，因此 Workbench 进程可以随时重启或扩容。
 3. **独立发布**：Workbench 有自己的版本号和发布节奏，引擎不依赖 Workbench。两者的兼容范围跟随 SQL 方言和 Flight SQL 协议的稳定性承诺（3.7）。
 
-技术设计见 [Workbench 设计文档](./workbench.md)。
+技术设计见 [Workbench 设计](./proposals/0006-workbench.md)。
 
 ---
 
@@ -442,26 +446,29 @@ Workbench 是 v0.2 与 `vqld` 服务态一同交付的 Web 图形界面，也是
 - **不做视频存储系统（VMS）或流媒体服务器**：VisionQL 连接 RTSP 和对象存储等现有系统，不替代它们。
 - **不做面向最终用户的安防或审核应用**：VisionQL 为应用开发者提供引擎。场景包只包含模型、SQL 模板和面板。
 
-**v0.1 包含的能力**聚焦于库态单机处理图片、视频文件和视频流：
+**v0.1 包含的能力**聚焦于库态单机处理图片与视频文件，纯批处理：
 
-- 类型系统 + IMAGE/VIDEO/BOX2D（`VECTOR` 类型随 v0.3 嵌入检索启用）
+- 类型系统 + IMAGE/VIDEO/BOX2D（`VECTOR` 类型随 v0.4 嵌入检索启用）
 - 图片与视频文件(批):图片/视频目录表(视频建表时按 fps 展开为帧表)、`UNNEST`
-- 视频流:RTSP 单流摄入、TUMBLE 窗口；流式窗口聚合白名单为 `COUNT/SUM/AVG/MIN/MAX` 的可持久化标量类型；投递语义:RTSP 为不可重放 live 源,尽力而为(断流/丢帧缺口如实反映)
 - `CREATE MODEL` + `CREATE FUNCTION ... USING MODEL`(OBJECT_DETECTION 一类,含 1:1 语法糖)+ 库态 Python UDF
-- Sink:Kafka、Console(前台调试用,`INSERT INTO` 形状不变只换 Sink);Parquet 随 v0.2、Lance 随 v0.3 加入
-- 产品形态:库态(pip 包)+ SQL shell + Python DataFrame API;持续查询由 `visionql run job.sql` 在本地前台运行,随客户端进程结束,不承诺持久恢复
+- Sink:Console(前台调试用,`INSERT INTO` 形状不变只换 Sink);Kafka 随 v0.2、Parquet 与 Lance 随 v0.4 加入
+- 产品形态:库态(pip 包)+ SQL shell + `vql run job.sql` 脚本执行 + Python 库接口(`sess.sql()`、Arrow 结果交换、notebook 富显示、UDF 注册;链式 DataFrame 见 3.4,随 v0.3 交付)
 - 优化：帧采样下推（实现相对简单，且效果容易验证）
 
-**明确安排在 v0.2 的能力**：`vqld` 服务态（Flight SQL、TLS/认证、表/流级权限、持久作业管理与恢复）、Parquet Sink 和 Workbench（Web 工作台）。
+**明确安排在 v0.2 的能力**：库态流处理，把 v0.1 验证过的查询逻辑原样切换到实时流。RTSP 单流摄入、TUMBLE 窗口聚合（白名单为 `COUNT/SUM/AVG/MIN/MAX` 的可持久化标量类型）、Kafka Sink，以及持续查询的前台附着运行（随客户端进程结束，不承诺持久恢复）。投递语义：RTSP 为不可重放 live 源，尽力而为，断流/丢帧缺口如实反映。
 
-**明确安排在 v0.3 的能力**：跨模态检索（文搜图）。EMBEDDING 模型类型、`VECTOR` 类型、`<->` 暴力 TopK、Lance 存储（`IMAGE` 原生列存与向量列）与 HNSW 向量索引，SQL 语义见 3.3.5。
+**明确安排在 v0.3 的能力**：`vqld` 服务态（Flight SQL、TLS/认证、表/流级权限、持久作业管理与恢复）、Python DataFrame API（3.4）和 Workbench（Web 工作台）。
+
+**明确安排在 v0.4 的能力**：跨模态检索（文搜图）与结果落盘。EMBEDDING 模型类型、`VECTOR` 类型、`<->` 暴力 TopK、Parquet 与 Lance 落盘（`IMAGE` 原生列存与向量列）以及 HNSW 向量索引，SQL 语义见 3.3.5。Parquet 与 Lance 同版本交付，两者共用同一套写出、CTAS 与逻辑类型恢复契约，分版本做会把 `IMAGE` 列存设计两遍。
 
 **其余方向暂不定义**：候选清单见 [Roadmap](../ROADMAP.md) 的"后续方向"一节，待前几个版本获得真实反馈后再规划，避免过早设计。
 
-**MVP 验收场景**：以下两个场景合并覆盖全部 MVP 组件，确保每项实现都被真实流程使用。
+**MVP 验收场景**：以下两个场景合并覆盖全部 MVP 组件，确保每项实现都被真实流程使用。两者分属不同版本：场景 A 随批能力（v0.1）验收，场景 B 随流能力（v0.2）验收——场景 B 的断言是批流结果一致，批必须先成为可信基准，否则结果不一致时无从判断是哪一侧出错。版本划分见 [Roadmap](../ROADMAP.md)。
 
-- **场景 A(批流一体)**:以 3.2 的"每分钟人数"查询为基础:先在本地视频表上批量回算(即 3.2 旅程),再把同一条查询逻辑切换到 RTSP 流,以 `visionql run` 前台运行并写入 Kafka,断言两者结果一致(相同模型与采样率);调试阶段以 console sink 查看 `UNNEST` 展开的检测明细;
-- **场景 B（首次使用无需外部服务）**：全程在本地运行。用户从图片目录建表，通过 Python UDF 过滤模糊图片，用 `detect` 筛选出包含指定目标的图片，结果直接显示在 shell 中。从 `pip install` 到第一个结果不超过 5 分钟。场景 A 用于验证完整能力（含流处理和外部 Sink），场景 B 用于验证首次使用是否足够简单。
+- **场景 A（首次使用无需外部服务，v0.1）**：全程在本地运行。用户从图片目录建表，通过 Python UDF 过滤模糊图片，用 `detect` 筛选出包含指定目标的图片，结果直接显示在 Python 会话中。因为进程内 Python UDF 要求引擎与用户代码同进程，该场景在 Python 宿主（notebook 或 REPL）中完成，而不是 `vql shell`——CLI 遇到 Python UDF 会明确提示改用 Python 宿主（见[系统设计](./design.md) §10.3）。纯 SQL 的首用路径（3.2）在 shell 中完成，两条路径都要满足从 `pip install` 到第一个结果不超过 5 分钟。
+- **场景 B(批流一体,v0.2)**:以 3.2 的"每分钟人数"查询为基础:先在本地视频表上批量回算(即 3.2 旅程),再把同一条查询逻辑切换到 RTSP 流,以 `vql run` 前台运行并写入 Kafka,断言两者结果一致(相同模型与采样率);调试阶段以 console sink 查看 `UNNEST` 展开的检测明细。
+
+场景 A 用于验证首次使用是否足够简单，场景 B 用于验证完整能力（含流处理和外部 Sink）。
 
 ## 5. 路线图
 
@@ -469,9 +476,10 @@ Workbench 是 v0.2 与 `vqld` 服务态一同交付的 Web 图形界面，也是
 
 | 阶段 | 主题 | 关键交付 |
 |---|---|---|
-| **v0.1(MVP)** | 单机端到端处理图片、视频文件与视频流 | 库态(pip 包)+ SQL/DataFrame + CLI、图片/视频目录表 + RTSP 单流、检测模型、帧采样下推;验收场景见第 4 节 |
-| **v0.2** | 服务化与图形界面 | `vqld` 服务态(Flight SQL、TLS/认证、表/流级权限、显式 `SUBMIT QUERY` 持久作业与恢复)、Parquet Sink 和 Workbench(Web 工作台,见 3.8) |
-| **v0.3** | 跨模态检索(文搜图) | EMBEDDING 模型类型、`VECTOR` 类型与 `<->` 暴力 TopK、Lance 存储(IMAGE 原生列存与向量列)、HNSW 向量索引(按规模启用);SQL 语义见 3.3.5 |
+| **v0.1(MVP)** | 单机批处理图片与视频文件 | 库态(pip 包)+ SQL + CLI、图片/视频目录表、检测模型、Python UDF、Console Sink、帧采样下推;验收场景 A 见第 4 节 |
+| **v0.2** | 批流一体 | RTSP 单流摄入与 TUMBLE 窗口聚合、Kafka Sink、持续查询前台附着运行;验收场景 B 见第 4 节 |
+| **v0.3** | 服务化与图形界面 | `vqld` 服务态(Flight SQL、TLS/认证、表/流级权限、显式 `SUBMIT QUERY` 持久作业与恢复)、Python DataFrame API(见 3.4)和 Workbench(Web 工作台,见 3.8) |
+| **v0.4** | 跨模态检索与结果落盘 | EMBEDDING 模型类型、`VECTOR` 类型与 `<->` 暴力 TopK、Parquet 与 Lance 落盘(IMAGE 原生列存与向量列)、HNSW 向量索引;SQL 语义见 3.3.5 |
 
 更远期的方向（优化器降本、集群与多租户、边缘协同等）待这些版本获得真实反馈后再定义。本表为产品级概要；完整交付清单、验收口径和候选方向维护于 [Roadmap](../ROADMAP.md)。
 
@@ -487,7 +495,7 @@ VisionQL 通过开源引擎（Apache-2.0）建立用户和生态：引擎内核�
 
 | 维度 | 指标 |
 |---|---|
-| 激活 | 首次价值时间（TTFV）：从 `pip install` 到第一个查询结果少于 5 分钟，全程不依赖外部服务，口径见 3.2 五分钟旅程与第 4 节场景 B |
+| 激活 | 首次价值时间（TTFV）：从 `pip install` 到第一个查询结果少于 5 分钟，全程不依赖外部服务，口径见 3.2 五分钟旅程与第 4 节场景 A |
 | 效率 | 典型的“每分钟人数统计”任务少于 30 行代码；从零到上线少于 30 分钟 |
 | 成本 | 在可采样负载上，帧采样下推使 GPU 时长相对逐帧全量推理按采样比例线性降低 |
 | 正确性 | 使用相同模型和采样率时，窗口聚合结果与手写基线管道一致 |
@@ -501,7 +509,7 @@ VisionQL 通过开源引擎（Apache-2.0）建立用户和生态：引擎内核�
 1. **首个重点场景**：选择安防/园区，还是内容审核？前者更依赖私有化部署和渠道，但付费意愿较强；后者更偏云原生，决策链较短，数据量更大。这个选择会影响首批连接器和场景包的投入方向。
 2. **SQL 方言兼容范围**：类型名、函数命名和错误码需要在多大程度上遵循 PostgreSQL 习惯？这会直接影响现有生态工具的兼容成本。
 3. **置信度在聚合中的语义**：是否需要提供区间估计等专用原语，还是长期保持由用户在查询中明确指定阈值？
-4. **客户端协议中的 `IMAGE` 传输策略**：方向已确定——结果默认返回缩略图 + 引用，不内联原图字节；引用同时包含只展示的脱敏 `uri` 和绑定数据版本的不透明 `locator`，原图通过 Flight 原生的 ticket/DoGet 以 locator 解引用获取，解引用时重新授权（传输层机制，不占用 SQL 语法）。locator 只对持久数据有效：文件表和落盘表可随时解引用，live 流的瞬时帧不承诺可回取，需要回查的行先经事件帧留存落盘（3.3.6）。v0.2 Flight schema 冻结前仍需用 Workbench、Python 和 BI 客户端确认缩略图尺寸、内联字节上限与 locator TTL，详见 [Workbench 设计](./workbench.md) §3.2。
+4. **客户端协议中的 `IMAGE` 传输策略**：方向已确定——结果默认返回缩略图 + 引用，不内联原图字节；引用同时包含只展示的脱敏 `uri` 和绑定数据版本的不透明 `locator`，原图通过 Flight 原生的 ticket/DoGet 以 locator 解引用获取，解引用时重新授权（传输层机制，不占用 SQL 语法）。locator 只对持久数据有效：文件表和落盘表可随时解引用，live 流的瞬时帧不承诺可回取，需要回查的行先经事件帧留存落盘（3.3.6）。v0.3 Flight schema 冻结前仍需用 Workbench、Python 和 BI 客户端确认缩略图尺寸、内联字节上限与 locator TTL，详见 [Workbench 设计](./proposals/0006-workbench.md) §3.2。
 
 ---
 
@@ -516,11 +524,11 @@ VisionQL 通过开源引擎（Apache-2.0）建立用户和生态：引擎内核�
 | `ALTER MODEL ...` | DDL | 创建新的模型版本；只影响之后新规划的查询 |
 | `ALTER FUNCTION ... SET MODEL` | DDL | 为函数换绑模型；只影响之后新规划的查询 |
 | `CREATE SINK` | DDL | 声明查询结果的输出位置 |
-| `CREATE INDEX ... USING HNSW` | DDL | 向量索引,`ORDER BY <-> LIMIT` 自动改写为 ANN(v0.3) |
+| `CREATE INDEX ... USING HNSW` | DDL | 向量索引,`ORDER BY <-> LIMIT` 自动改写为 ANN(v0.4) |
 | `TUMBLE(ts, interval)` | 时间分桶函数 | 滚动窗口,用于 GROUP BY,批流同形 |
 | `UNNEST(expr) AS x` | 关系化 | 检测结果数组 → 行(隐式关联) |
 | `COUNT_OBJECTS(dets, label, conf)` | 内置数组函数 | 按标签/置信度计数,免 lambda |
-| `<->`(等价 `L2_DISTANCE`) | 向量 | 跨模态相似检索(v0.3) |
-| `SUBMIT QUERY name AS INSERT INTO ...` | 运维 | v0.2 显式创建持久 Sink 作业,CLI 入口为 `visionql submit job.sql`；普通无界 SQL 仍附着客户端 |
+| `<->`(等价 `L2_DISTANCE`) | 向量 | 跨模态相似检索(v0.4) |
+| `SUBMIT QUERY name AS INSERT INTO ...` | 运维 | v0.3 显式创建持久 Sink 作业,CLI 入口为 `vql submit job.sql`；普通无界 SQL 仍附着客户端 |
 | `SHOW/DESCRIBE QUERY / PAUSE / RESUME / STOP` | 运维 | 持久查询详情与状态管理(服务态) |
 | `EXPLAIN` | 运维 | 展示查询计划 |

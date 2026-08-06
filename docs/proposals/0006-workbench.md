@@ -1,12 +1,14 @@
-# VisionQL Workbench 设计
+# 0006: Workbench（Web 工作台）
 
-> 本文根据 [VisionQL PRD](./prd.md) 3.8 和 [引擎设计](./engine.md) 设计 Workbench。Workbench 是与 `vqld` 服务态在 v0.2 同期交付的多模态 SQL 客户端，负责查询、结果预览和持续查询运维，不拥有业务数据，也不依赖引擎私有接口。
+> 本文根据 [VisionQL PRD](../prd.md) 3.8、[系统设计](../design.md)和 [proposal 0005](./0005-vqld-service.md) 设计 Workbench。Workbench 是与 `vqld` 服务态在 v0.3 同期交付的多模态 SQL 客户端，负责查询、结果预览和持续查询运维，不拥有业务数据，也不依赖引擎私有接口。
 
-- **设计版本**：v0.3.0（Draft）
-- **日期**：2026-08-05
-- **对应 PRD**：v0.1.6
-- **对应引擎设计**：v0.5.0
-- **状态**：评审中
+- **编号**：0006
+- **状态**：Draft
+- **目标版本**：v0.3
+- **对应 PRD**：[prd.md](../prd.md) §3.8
+- **依赖设计**：[design.md](../design.md) §6.2（IMAGE 三态）、§10（产品形态）、§11.3（指标）、§12.2（服务态安全）
+- **关联 proposal**：0005（vqld 服务态与 Flight SQL 契约）
+- **最后更新**：2026-08-06
 
 ---
 
@@ -22,9 +24,9 @@
 
 Workbench 不是 notebook、通用 BI、VMS、标注平台或独立的用户管理系统。
 
-### 1.2 v0.2 交付范围
+### 1.2 v0.3 交付范围
 
-能力清单以 [PRD](./prd.md) 3.8 为准：SQL 编辑与执行、多模态结果预览、流结果实时预览、目录浏览、持续查询运维和成本面板，全部随 v0.2 交付；各能力的实现口径见本文 §6～§10。`EXPLAIN` 成本预估、视频时间轴、权限/审计展示、服务端保存查询和团队共享均未排期，待真实反馈后再评估。
+能力清单以 [PRD](../prd.md) 3.8 为准：SQL 编辑与执行、多模态结果预览、流结果实时预览、目录浏览、持续查询运维和成本面板，全部随 v0.3 交付；各能力的实现口径见本文 §6～§10。`EXPLAIN` 成本预估、视频时间轴、权限/审计展示、服务端保存查询和团队共享均未排期，待真实反馈后再评估。
 
 ### 1.3 设计原则
 
@@ -88,7 +90,7 @@ Workbench 不是 notebook、通用 BI、VMS、标注平台或独立的用户管�
 | Catalog | 全量目录浏览和对象详情；Query 页左栏提供精简树 |
 | Jobs | 持续查询列表、详情、指标和运维动作 |
 
-v0.2 不增加首页仪表盘。登录后直接进入 Query，缩短首次得到结果的路径。
+v0.3 不增加首页仪表盘。登录后直接进入 Query，缩短首次得到结果的路径。
 
 ### 2.3 Query 工作区
 
@@ -96,7 +98,7 @@ v0.2 不增加首页仪表盘。登录后直接进入 Query，缩短首次得到
 - 中间编辑器支持多个本地 tab，每个 tab 对应一份浏览器本地草稿；
 - 下方结果区按脚本语句建立结果 tab，DDL 显示消息，SELECT 显示 schema 和数据；
 - 结果区同时显示运行时长、已接收行数/字节、截断状态、query ID 和取消按钮；
-- 小屏设备保持可读，但 v0.2 以桌面浏览器为主要目标，不承诺手机上的完整编辑体验。
+- 小屏设备保持可读，但 v0.3 以桌面浏览器为主要目标，不承诺手机上的完整编辑体验。
 
 ---
 
@@ -112,7 +114,7 @@ flowchart LR
         RING[结果环形缓冲]
     end
 
-    subgraph BFF[visionql-workbench]
+    subgraph BFF[vql-workbench]
         HTTP[HTTP API / SSE / 静态资源]
         SESSION[内存会话]
         EXEC[活动执行代理]
@@ -171,7 +173,7 @@ Workbench 采用 PRD 开放问题 4 的当前方案：引擎协议默认返回�
 | 本地草稿 | IndexedDB | 容量和结构化数据支持优于 localStorage；仍属于浏览器本地 |
 | 短期图表 | uPlot 或同级轻量时序库 | 适合查询详情中的少量实时曲线 |
 
-浏览器 v0.2 不引入 Arrow JS。BFF 只转换受限的交互结果，避免同时维护 Arrow 与 JSON 两套前端渲染路径。以后若浏览器直连生态成熟，再单独评估。
+浏览器 v0.3 不引入 Arrow JS。BFF 只转换受限的交互结果，避免同时维护 Arrow 与 JSON 两套前端渲染路径。以后若浏览器直连生态成熟，再单独评估。
 
 ---
 
@@ -229,7 +231,7 @@ visionql.query.mode = bounded | unbounded | not_applicable
 visionql.statement.side_effect = read_only | write
 ```
 
-Workbench 不用本地 parser 推断这些语义。`statement_info_v1` 是 v0.2 Query 工作区的必需 capability；缺失时保留连接诊断和只读目录浏览，但阻止 SQL 执行，不用猜测结果生命周期。
+Workbench 不用本地 parser 推断这些语义。`statement_info_v1` 是 v0.3 Query 工作区的必需 capability；缺失时保留连接诊断和只读目录浏览，但阻止 SQL 执行，不用猜测结果生命周期。
 
 ### 4.3 `IMAGE` 传输契约
 
@@ -276,7 +278,7 @@ sequenceDiagram
 
 ### 4.5 系统 SQL 输出
 
-Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象依赖使用 `SHOW QUERY DEPENDENCIES <id>`，并只依赖 [引擎设计](./engine.md) §11.6 固定的最小列。Workbench 对状态和错误码使用枚举映射：
+Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象依赖使用 `SHOW QUERY DEPENDENCIES <id>`，并只依赖 [proposal 0005](./0005-vqld-service.md) 固定的系统查询最小列。Workbench 对状态和错误码使用枚举映射：
 
 - 未知状态按原字符串显示，不把页面渲染失败；
 - 指标单位以引擎 Prometheus 指标名后缀与 HELP 元数据为准，BFF 不自行猜测；
@@ -285,7 +287,7 @@ Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象�
 
 ### 4.6 结构化错误
 
-引擎用标准 gRPC status 表示错误大类，并在 `visionql-error-bin` trailing metadata 中按 [引擎设计](./engine.md) §11.4 的 Protobuf `VisionqlErrorV1` 返回版本化字段：
+引擎用标准 gRPC status 表示错误大类，并在 `visionql-error-bin` trailing metadata 中按 [proposal 0005](./0005-vqld-service.md) 的 Protobuf `VisionqlErrorV1` 返回版本化字段：
 
 ```text
 version, code, message, hint,
@@ -361,7 +363,7 @@ schema field 至少包含 `name`、Arrow storage type、VisionQL logical type、
 
 ### 6.1 编辑器
 
-v0.2 提供：
+v0.3 提供：
 
 - SQL 关键字、VQL DDL、类型、内置函数和表值函数高亮；
 - 括号匹配、注释、格式化、查找替换和基础诊断；
@@ -377,7 +379,7 @@ v0.2 提供：
 BFF 使用独立的词法切分器识别分号、字符串、引用标识符和行/块注释，不复制完整 VQL parser。它只负责确定语句边界；每条语句都按顺序 prepare，并以 §4.2 的 schema metadata 作为类型、有界性与副作用的唯一判断：
 
 - 每条语句有独立结果 tab；
-- 第一条错误会停止后续语句，v0.2 不提供“错误后继续”；
+- 第一条错误会停止后续语句，v0.3 不提供“错误后继续”；
 - 有界 SELECT 达到显示上限后被取消并标记为截断，随后脚本可以继续；
 - 普通无界 `SELECT` 和 `INSERT INTO ... SELECT ...` 都是附着执行，不会自然完成，因此必须是脚本最后一条语句；若当前 prepare 后发现它不是最后一句，BFF 在执行当前语句前停止并提示拆分，不能自动转成后台作业；
 - 显式 `SUBMIT QUERY <name> AS INSERT INTO ... SELECT ...` 的 kind 为 `persistent_submission`，执行后立即返回 query ID、名称、状态和定义 revision，可以继续执行后续语句；结果 tab 显示“已提交”以及 Jobs 详情链接；
@@ -447,7 +449,7 @@ Query 页提供“提交为持久作业”动作时，必须要求用户填写�
 
 - `VECTOR(n)` 默认显示维度、范数和前 4 个值，可展开查看当前行完整数组；大量向量不绘制图表；
 - `VIDEO` 显示 URI 摘要、时长、fps、分辨率和 codec；
-- v0.2 不实现视频播放器或时间轴。用户需要具体画面时，通过 SQL 使用 `FRAMES` 或 `FRAME_AT`。
+- v0.3 不实现视频播放器或时间轴。用户需要具体画面时，通过 SQL 使用 `FRAMES` 或 `FRAME_AT`。
 
 ### 7.5 可访问性
 
@@ -521,7 +523,7 @@ STARTING → LIVE ⇄ RECONNECTING → CANCELLED
 - Sink format 和脱敏目标；
 - 可复制的脱敏 DDL。
 
-v0.2 不在详情页编辑对象。变更通过生成 SQL 回到 Query 页执行，保留声明式、可审查的操作路径。
+v0.3 不在详情页编辑对象。变更通过生成 SQL 回到 Query 页执行，保留声明式、可审查的操作路径。
 
 ---
 
@@ -566,7 +568,7 @@ Jobs 页默认只展示持久作业，并允许切换查看当前 principal 可�
 
 ### 10.4 成本阶段边界
 
-v0.2 只展示实测：
+v0.3 只展示实测：
 
 ```text
 processed_frames
@@ -587,7 +589,7 @@ Workbench 不把 GPU seconds 换算为货币；价格和计费属于部署/商�
 
 ### 11.1 登录会话
 
-- v0.2 的引擎 endpoint 由部署配置并在登录页只读显示；登录页只收集引擎支持的凭证，BFF 立即通过 Flight 验证，浏览器不能指定任意后端地址；
+- v0.3 的引擎 endpoint 由部署配置并在登录页只读显示；登录页只收集引擎支持的凭证，BFF 立即通过 Flight 验证，浏览器不能指定任意后端地址；
 - BFF 只在内存中保存凭证或短期引擎 token，不写日志、磁盘、IndexedDB 或 cookie；
 - 每个登录会话对应一个独立的 Flight SQL 逻辑 session，`image_mode` 等 `SET` 选项不能跨用户复用；BFF 必须在每个 Flight RPC 上携带该会话的 token，服务端逐请求验证后才选择 Session。满足这一条件时底层 gRPC channel 才可以共享；
 - 浏览器 cookie 只包含高熵会话 ID，使用 `HttpOnly`、`Secure`、`SameSite=Strict`；需要外部 IdP 回跳时才按部署要求改为 `Lax`；
@@ -611,7 +613,7 @@ Workbench 不缓存“允许/拒绝”决定。每次查询、`FRAME_AT` 和作�
 
 ### 11.4 多副本
 
-v0.2 多副本需要负载均衡器按 session cookie 做粘滞：
+v0.3 多副本需要负载均衡器按 session cookie 做粘滞：
 
 - 活动 SSE、Flight stream 和 blob cache 留在创建它们的实例；
 - 健康检查失败后用户重新登录，原实例的 Flight 连接断开并由引擎取消；
@@ -677,13 +679,13 @@ Workbench 自身暴露：
 ### 13.1 发布形态
 
 ```bash
-visionql-workbench \
+vql-workbench \
   --server grpc+tls://vqld.example.com:32010 \
   --listen 0.0.0.0:8080
 ```
 
 - 前端构建产物嵌入 BFF 单二进制，同时提供容器镜像；
-- 默认只配置一个 `vqld` endpoint。v0.2 不在一个会话中切换多端点；
+- 默认只配置一个 `vqld` endpoint。v0.3 不在一个会话中切换多端点；
 - Workbench 部署在中心或管理网络，不部署到每个边缘节点；
 - 浏览器 TLS 可以由 Workbench 或反向代理终止，部署文档必须说明信任头和 secure cookie 配置；
 - readiness 要同时检查 BFF 可用和引擎连接配置合法，但引擎暂时不可达时进程仍可启动并显示诊断页。
@@ -714,7 +716,7 @@ vql-workbench/
 
 硬约束：
 
-- `vql-workbench/server` 不依赖根 workspace 中的 `vql-core`、`vql-daemon` 或其他引擎 crate；
+- `vql-workbench/server` 不依赖根 workspace 中的 `vql-kernel`、`vql-server` 或其他引擎 crate；
 - 协议测试从 Flight SQL schema 和公开 SQL 生成 fixtures，不复制 Catalog Rust struct；
 - 前后端 API 类型在 Workbench 内生成，不能从引擎内部类型生成；
 - 引擎和 Workbench 使用独立版本与 CI，可按目录分别发布。
@@ -753,7 +755,7 @@ vql-workbench/
 
 ### 14.3 发布门槛
 
-v0.2 Workbench 发布前必须满足：
+v0.3 Workbench 发布前必须满足：
 
 1. 通过真实 `vqld` 的协议契约套件；
 2. 端到端完成“无需本地安装的查询 → 图片和框预览 → live 取消 → 持续查询运维”；
@@ -774,11 +776,11 @@ v0.2 Workbench 发布前必须满足：
 
 | 问题 | 当前倾向 | 决策时间 |
 |---|---|---|
-| `IMAGE` 缩略图参数 | 引擎默认 reference；`uri` 只展示、locator 负责读取已固定；Workbench 会话使用 thumbnail，待确定尺寸/字节上限和 locator TTL | v0.2 Flight schema 冻结前 |
+| `IMAGE` 缩略图参数 | 引擎默认 reference；`uri` 只展示、locator 负责读取已固定；Workbench 会话使用 thumbnail，待确定尺寸/字节上限和 locator TTL | v0.3 Flight schema 冻结前 |
 | live 原图缓存时长 | 引擎短期环形缓存；过期保留缩略图 | 真实 8 路负载测试后 |
-| Jobs 列表大规模分页 | 优先定义公开 SQL 过滤/分页，不在 BFF 全量拉取 | v0.2 生产规模测试前 |
-| 外部 IdP 登录 | 首发先支持引擎 token/basic 能力；OIDC 由部署层或引擎统一 | v0.2 认证方案冻结前 |
-| 大结果导出 UX | 生成明确 SQL 并由用户确认，不经 BFF 下载 | v0.2 可用性测试后 |
+| Jobs 列表大规模分页 | 优先定义公开 SQL 过滤/分页，不在 BFF 全量拉取 | v0.3 生产规模测试前 |
+| 外部 IdP 登录 | 首发先支持引擎 token/basic 能力；OIDC 由部署层或引擎统一 | v0.3 认证方案冻结前 |
+| 大结果导出 UX | 生成明确 SQL 并由用户确认，不经 BFF 下载 | v0.3 可用性测试后 |
 | 视频时间轴（未排期） | 先测 `FRAME_AT` 并发、缓存命中和对象存储费用 | 排期前 |
 
 ---
@@ -807,3 +809,11 @@ v0.2 Workbench 发布前必须满足：
 - [Apache Arrow Flight SQL 规范](https://arrow.apache.org/docs/format/FlightSql.html)
 - [Apache Arrow Flight：取消与 PollFlightInfo](https://arrow.apache.org/docs/format/Flight.html)
 - [Apache Arrow：扩展类型](https://arrow.apache.org/docs/format/Columnar.html#extension-types)
+
+---
+
+## 变更记录
+
+| 日期 | 变更 |
+|---|---|
+| 2026-08-06 | 由 workbench.md 设计版本 v0.3.0 整体迁入，内部章节号不变 |
