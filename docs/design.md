@@ -1,11 +1,11 @@
 # VisionQL 系统设计
 
-> 本文根据 [VisionQL PRD](./prd.md) 设计系统，是了解 VisionQL 技术架构的第一入口，只保留贯穿全系统的核心设计：架构分层、统一逻辑计划、流执行模型、多模态类型、SQL 与目录、公开接口边界，以及横切的资源、安全与测试约束。可独立开发交付的子功能设计见 [proposals/](./proposals/README.md)。
+> 本文把 [VisionQL PRD](./prd.md) 落实为当前在建能力的系统设计，覆盖架构、计划与执行、多模态类型、数据进出口、模型运行时、资源和安全约束。
 >
-> **文档地图**：[prd.md](./prd.md)（产品真相源）→ 本文（系统设计第一入口）→ [proposals/](./proposals/README.md)（子功能设计）。
+> **文档地图**：[prd.md](./prd.md)（范围与需求）→ 本文（系统设计）→ [proposals/](./proposals/README.md)（后续能力设计）。
 
-- **设计版本**：v1.0.0（Draft）
-- **日期**：2026-08-06
+- **设计版本**：v1.1.0（Draft）
+- **日期**：2026-08-07
 - **对应 PRD**：v0.1.6
 - **状态**：评审中
 
@@ -13,22 +13,21 @@
 
 ## 1. 设计范围
 
-### 1.1 本文要解决的问题
+### 1.1 设计目标
 
-本文需要把 PRD 中的产品承诺落实为可以编码和验收的系统边界：
+本文有五项目标：
 
-1. 同一套 SQL 和 DataFrame 逻辑如何同时用于有界数据与无界数据；
-2. `IMAGE` 如何在不复制大量像素的前提下穿过列式计划；
-3. 模型调用如何成为优化器可见、运行时可调度的计划节点；
-4. 事件时间、水位线、窗口状态和源进度如何在过滤、异步推理与失败恢复后仍然正确；
-5. 库态（v0.1）与服务态（v0.3）如何复用同一内核；
-6. Workbench 如何只通过公开 SQL 与 Arrow Flight SQL 使用引擎。
+1. 有界与无界数据共享 SQL、DataFrame 和逻辑计划；
+2. `IMAGE` 穿过列式计划时不复制大量像素；
+3. 模型调用成为可优化、可调度的计划节点；
+4. 过滤、异步推理和失败不破坏事件时间、窗口状态与源进度；
+5. 内核不假设进程形态，可嵌入 CLI 和 Python。
 
-### 1.2 版本边界
+### 1.2 能力范围
 
-各版本的功能范围以 [PRD](./prd.md) 第 4～5 节和 [Roadmap](../ROADMAP.md) 为准，本文不重复罗列。本文固定贯穿各版本的核心设计与公开契约；各子功能的详细设计按 feature 拆分在 [proposals/](./proposals/README.md)；未排期方向不设计。
+本文覆盖本地图片和视频目录表、SQL 模型推理、RTSP 与 `TUMBLE`、Console 和 Kafka Sink，以及 CLI 和 Python 宿主。完整范围和交付顺序见 [PRD](./prd.md) 与 [Roadmap](../ROADMAP.md)；尚未纳入本文的子功能见 [proposals/](./proposals/README.md)。未排期方向不做设计。
 
-超出当前版本的语法即使可以被解析，也必须返回明确的 `FEATURE_NOT_AVAILABLE`（携带目标版本或“未排期”），不能只写入目录后假装可用；逐语句的版本行为见 §7.1。
+未交付的语法即使能解析，也必须返回 `FEATURE_NOT_AVAILABLE`，并注明目标版本或“未排期”；不得登记不可执行的目录对象。逐语句行为见 §7.1。
 
 ### 1.3 技术非目标
 
@@ -36,8 +35,8 @@
 
 - 不修改或 fork DataFusion 内核；
 - 不自研通用 SQL 执行引擎、视频存储格式或模型服务平台；
-- 不把批处理和流处理强行塞进同一套物理算子。批流一体指语言、类型、目录和逻辑计划一致，物理运行时可以根据边界性采用不同实现；
-- 不在 v0.1 实现跨查询共享解码、模型结果缓存、状态检查点、持久作业恢复或多用户安全边界。
+- 不强求批流共用物理算子；批流只共享语言、类型、目录和逻辑计划；
+- 本文范围内不实现跨查询共享解码、模型结果缓存、状态检查点、持久作业恢复或多用户安全边界。
 
 ### 1.4 关键术语
 
@@ -47,7 +46,7 @@
 | 持续查询 | 至少包含一个无界源，需要长期运行的查询 |
 | 执行周期（epoch） | 流源在一个短时间段内产生的一组 RecordBatch，以及与这组数据对应的水位线、源进度和资源租约 |
 | 数据片段 | 在一个 epoch 内执行的有界 DataFusion 计划，不携带水位线等控制消息 |
-| 作业协调器 | 顺序驱动 epoch、窗口状态、Sink 确认和检查点的流运行时组件 |
+| 作业协调器 | 顺序驱动 epoch、窗口状态和 Sink 确认的流运行时组件 |
 | 媒体引用 | 指向图片或视频帧的逻辑定位信息，不包含解码后的像素 |
 | 帧仓 | 只在当前进程、当前 epoch 内有效的解码帧 arena |
 | 定义快照 | 查询规划时解析并固定的表、模型、函数和 Sink 修订版本 |
@@ -58,22 +57,20 @@
 
 | 编号 | PRD 承诺 | 设计约束 |
 |---|---|---|
-| G1 | 批流共享 SQL / DataFrame 语义 | 只维护一套 `VqlLogicalPlan`；边界性在分析阶段推导，物理编译阶段再分为批计划和流作业图 |
+| G1 | 批流共享 SQL 与 DataFrame 语义 | 只维护一套 `VqlLogicalPlan`；边界性在分析阶段推导，物理编译阶段再分为批计划和流作业图 |
 | G2 | `pip install` 后无需服务即可使用 | 内核不得监听端口或依赖外部元数据服务；本地目录使用 SQLite；CLI 和 Python 都嵌入同一内核 |
 | G3 | 模型调用可优化 | `USING MODEL` 函数必须在规划期提取为显式 `Inference` 节点，不能作为普通逐行 UDF 执行 |
-| G4 | 大图像不能在算子间反复复制 | `IMAGE` 默认保存引用；像素只存在于有界帧仓、张量缓冲或明确的 IPC/落盘边界 |
+| G4 | 大图像不能在算子间反复复制 | `IMAGE` 默认保存引用；像素只存在于有界帧仓、张量缓冲或明确的 IPC 或落盘边界 |
 | G5 | 流处理有事件时间与明确投递语义 | 水位线、源 offset 和帧租约属于 epoch 控制面，不编码成可能被 Filter 丢弃的普通行 |
 | G6 | 错误行默认不终止整个查询 | 解码或推理失败时保留输入行，把对应结果列置为 NULL，并记录结构化错误指标；严格模式才失败 |
-| G7 | 服务态和客户端使用公开协议 | `vql-server` 构建的 `vqld`（v0.3）只暴露 Flight SQL、SQL 系统语句、健康检查和 Prometheus 指标端点；Workbench 不依赖根目录引擎 crate 或私有管理 API |
-| G8 | 后续扩展不能破坏 MVP 主线 | 模型类型、processor、推理后端、源、Sink 和逻辑节点都通过窄 trait 或注册表扩展；未实现功能直接拒绝 |
+| G7 | 结果可被标准 Arrow 生态直接消费 | 多模态类型使用标准 Arrow storage type 加扩展元数据；不把进程内内存结构暴露到进程外，不认识扩展类型的客户端仍可按 storage type 读取 |
+| G8 | 后续扩展不能破坏主线 | 模型类型、processor、推理后端、源、Sink 和逻辑节点都通过窄 trait 或注册表扩展；未实现功能直接拒绝 |
 
-所有实现还必须遵守五条原则：
+补充三条实施规则：
 
-1. **先保证语义，再追求复用。** 原生算子无法传递控制信息时，不把水位线伪装成数据列，也不假设过滤后的行仍能代表源进度。
-2. **先减少工作量，再加速单次操作。** 优化顺序是列裁剪、时间裁剪、显式采样、推理去重、批量推理，最后才是硬件特化。
-3. **所有队列都有上限。** 媒体、推理、窗口和 Sink 缓冲都必须纳入查询资源预算；无界队列视为实现错误。
-4. **查询固定定义，DDL 创建新修订。** 正在运行的查询不因 `ALTER MODEL` 或 `ALTER FUNCTION` 在中途悄悄改变结果。
-5. **版本范围按能力生效。** 暂未消费的参数不允许静默保存。
+1. 优化先减少工作量，再加速单次操作：依次考虑列裁剪、时间裁剪、显式采样、推理去重、批量推理和硬件特化。
+2. 媒体、推理、窗口和 Sink 缓冲都必须有上限并纳入查询预算；无界队列视为实现错误。
+3. 尚未消费的参数直接拒绝，不静默保存。
 
 ---
 
@@ -86,7 +83,6 @@ flowchart TB
     subgraph HOSTS[宿主]
         PY[Python 库]
         CLI[vql shell / run]
-        DAEMON[vqld v0.3]
     end
 
     subgraph CORE[引擎内核]
@@ -102,7 +98,6 @@ flowchart TB
         DF[DataFusion 有界执行]
         COORD[流作业协调器]
         STATE[TUMBLE 状态]
-        CHECKPOINT[检查点 v0.3]
     end
 
     subgraph RUNTIME[运行时服务]
@@ -115,7 +110,6 @@ flowchart TB
 
     PY --> ENTRY
     CLI --> ENTRY
-    DAEMON --> ENTRY
     ENTRY --> SQL
     SQL <--> CAT
     SQL --> PLAN
@@ -123,7 +117,6 @@ flowchart TB
     PLAN --> SCOMP --> COORD
     COORD --> DF
     COORD --> STATE
-    COORD -. v0.3 .-> CHECKPOINT
     DF --> MEDIA & MODELS & CONNECTORS
     COORD --> CONNECTORS
     MEDIA & MODELS & CONNECTORS & STATE --> BUDGET
@@ -134,16 +127,16 @@ flowchart TB
 
 | 组件 | 职责 | 不负责 |
 |---|---|---|
-| `Engine` / `Session` | 组装目录、规划器、运行时和配置；提供 SQL/DataFrame 执行入口 | 进程信号、端口、用户认证 |
+| `Engine` / `Session` | 组装目录、规划器、运行时和配置；提供 SQL 与 DataFrame 执行入口 | 进程信号、端口、用户认证 |
 | VQL 前端 | 切分语句、解析 VQL DDL、规范化语法糖、生成统一逻辑计划 | 执行 DDL 之外的 I/O |
 | Catalog | 对象修订、依赖、schema、模型哈希和作业定义的事务持久化 | 保存视频、权重字节或用户明文凭证 |
 | 规划器 | 类型检查、边界性和可重放性推导、函数解析、推理提取、streamability 校验 | GPU 放置、模型加载 |
 | 批计划编译器 | 将有界逻辑计划降为 DataFusion `ExecutionPlan` | 水位线与恢复 |
 | 流作业编译器 | 将持续查询切成源、一个或多个有界数据片段、状态算子和 Sink | 自己实现表达式计算 |
-| 作业协调器 | 驱动 epoch，按序推进控制面，管理状态、取消、Sink 确认和恢复 | 解释 SQL 表达式 |
+| 作业协调器 | 驱动 epoch，按序推进控制面，管理状态、取消和 Sink 确认 | 解释 SQL 表达式 |
 | 媒体运行时 | 探测、读取、解码、采样、帧仓和编码 | 模型前后处理 |
 | 模型运行时 | 权重解析、processor、设备会话、批量调度和推理 | SQL 语义与目录权限 |
-| 连接器 | 读取图片、视频与 RTSP，以及写入 Kafka/Console（Parquet 与 Lance 随 v0.4） | 改写查询计划 |
+| 连接器 | 读取图片、视频与 RTSP，以及写入 Console 与 Kafka | 改写查询计划 |
 
 ### 3.3 两条执行路径
 
@@ -153,9 +146,9 @@ flowchart TB
 | 优化 | 同一套列裁剪、谓词下推、推理提取和显式采样下推 | 同左，另外执行 streamability 校验 |
 | 物理编译 | 完整降为一个 DataFusion 计划 | 切成 `Source → EpochTransform → StatefulOp → Sink` 作业图；每个 `EpochTransform` 是有界 DataFusion 片段 |
 | 控制信息 | 不需要水位线；输入结束即完成 | 由协调器在 epoch 边界传递，不进入 RecordBatch |
-| 结束条件 | 所有分区耗尽 | 用户停止、不可恢复错误或服务管理操作 |
+| 结束条件 | 所有分区耗尽 | 用户停止或不可恢复错误 |
 
-这一区分是本设计最重要的选择。DataFusion 的 `ExecutionPlan::execute` 输出 `RecordBatch` 流，适合增量计算数据，但原生 Filter、Projection 等算子没有水位线或源进度通道。VisionQL 因此复用它的 SQL、表达式、优化器与有界执行能力，不要求原生算子承担它们没有声明过的控制语义。
+DataFusion 的 `ExecutionPlan::execute` 只输出 `RecordBatch`，原生算子没有水位线或源进度通道。因此 VisionQL 复用其 SQL、优化器和有界执行能力，流控制面由协调器处理。
 
 ---
 
@@ -165,14 +158,13 @@ flowchart TB
 
 标准关系节点尽量复用 DataFusion `LogicalPlan`。视觉或流语义无法由标准节点完整表达时，使用扩展节点：
 
-| 扩展节点 | 输入与输出 | v0.1 物理实现 |
+| 扩展节点 | 输入与输出 | 物理实现 |
 |---|---|---|
-| `Inference` | 输入关系 → 追加模型结果列 | `InferenceExec` |
-| `TumbleAggregate` | 带事件时间的关系 → 窗口聚合结果 | 有界：`date_bin + AggregateExec`；无界：`TumbleState` |
+| `Inference` | 输入关系 → 追加模型结果列 | `InferenceExec`（§10） |
+| `TumbleAggregate` | 带事件时间的关系 → 窗口聚合结果 | 有界：`date_bin + AggregateExec`；无界：`TumbleState`（§5.4） |
 | `SinkWrite` | 输入关系 → 写入目录中的 Sink | `SinkExec` / 流 Sink 驱动器 |
-| `Track` | 帧关系 → 带 `track_id` 的关系 | 未排期，解析后拒绝 |
 
-视频表的帧展开不是独立逻辑节点：它按建表声明的 fps 发生在 `USING VIDEOS` 扫描算子内部（见 [proposal 0001](./proposals/0001-media-table-providers.md)），与 PRD 3.3.7 保持一致。
+视频表的帧展开不是独立逻辑节点：它按建表声明的 fps 发生在 `USING VIDEOS` 扫描算子内部（§8.2），与 PRD 3.3.7 保持一致。
 
 每个计划节点都携带或推导以下属性：
 
@@ -203,24 +195,24 @@ SQL / DataFrame
   → 执行
 ```
 
-规划阶段只读取目录和轻量元数据。对象存储扫描、模型下载、视频探测和网络连接都发生在执行阶段，避免 `EXPLAIN` 或补全触发昂贵 I/O。
+规划只读取目录和轻量元数据；对象扫描、模型下载、视频探测与网络连接推迟到执行阶段，避免 `EXPLAIN` 或补全触发昂贵 I/O。
 
 ### 4.3 定义快照
 
-目录对象采用稳定 ID、不可变修订和可变 head：
+目录对象使用稳定 ID、不可变 revision 和可变 head：
 
-- `CREATE` 生成第一版；`ALTER` 或 `CREATE OR REPLACE` 生成新修订；
-- Function 的 `USING MODEL` 绑定稳定 `model_id`，不直接保存某个 Model revision。规划器在同一个 Catalog 读事务中先解析 Function revision，再解析该 `model_id` 当时的 head revision；
-- 规划时把表、函数、解析后的模型和 Sink revision ID，以及模型语义指纹和绑定参数写进计划；模型语义指纹至少包含 artifact hash 或声明的 immutable endpoint revision/config hash、processor ID/版本、precision、backend kind/版本和模型声明的输出 schema；
-- 批查询在执行期间固定该快照；持续查询在整个运行周期固定该快照；
-- `ALTER MODEL` 生成新的 Model revision 并推进该 `model_id` 的 head，只影响之后新规划的查询；`ALTER FUNCTION ... SET MODEL` 生成新的 Function revision 并改绑另一个 `model_id`，同样只影响之后新规划的查询；
-- 已 prepare 的 statement、正在运行的批查询和持续查询都不自动 replan。普通 prepared statement 需要关闭后重新 prepare；附着式持续查询需要取消后重新执行，持久作业需要停止旧作业并显式提交新作业；
-- 删除对象只把名称 head 标记为 tombstone。活动查询、检查点或未过期媒体定位符持有 revision lease 时不得物理回收；权限撤销立即生效，不因 lease 继续授权；
-- `EXPLAIN`、`SHOW QUERIES` 和错误日志都显示所使用的修订，保证结果可追溯。
+- `CREATE` 生成首个 revision；`ALTER` 或 `CREATE OR REPLACE` 生成新 revision 并推进 head，只影响后续规划；
+- `USING MODEL` 绑定稳定 `model_id`。规划器在同一 Catalog 读事务中解析 Function revision 和该模型当时的 head revision；
+- 计划记录表、Function、Model、Sink revision ID，以及绑定参数和模型语义指纹。指纹至少包含 artifact hash 或 immutable endpoint revision/config hash、processor ID/版本、precision、backend kind/版本和输出 schema；
+- 批查询在执行期间固定快照，持续查询在整个运行期间固定快照；
+- `ALTER FUNCTION ... SET MODEL` 创建 Function revision 并绑定另一个 `model_id`，也只影响后续规划；
+- prepared statement 和运行中查询均不自动 replan；前者需重新 prepare，持续查询需取消后重启；
+- `DROP` 将名称 head 标记为 tombstone。存在查询或未过期 locator 的 revision lease 时不得物理回收；撤权立即生效，不受 lease 影响；
+- `EXPLAIN`、`SHOW QUERIES` 和错误日志显示实际 revision。
 
 ### 4.4 无界查询白名单
 
-v0.2 对无界计划采用白名单，而不是猜测任意 DataFusion 计划能否持续运行。
+无界计划采用白名单，而不是猜测任意 DataFusion 计划能否持续运行。
 
 允许：
 
@@ -236,13 +228,12 @@ v0.2 对无界计划采用白名单，而不是猜测任意 DataFusion 计划能
 |---|---|---|
 | 无窗口全局或分组聚合 | 输入永不结束 | 增加 `TUMBLE` |
 | 无界 `ORDER BY` / TopK | 需要无限状态或等待结束 | 先限定窗口或改为批查询 |
-| 无界 `DISTINCT` | 状态无法回收 | 改用 v0.2 白名单聚合，或改为批查询 |
-| JOIN、UNION 多源 | v0.2 尚未定义多源水位线与一致性 | 拆为独立查询 |
-| `OVER` 分析窗口 | v0.2 没有有界状态规则 | 改为时间窗口聚合 |
-| `TRACK`、`HOP`、`SESSION` | 未排期 | 返回明确的未支持错误 |
-| 不在窗口聚合白名单中的 aggregate / UDAF | 无法保证内存、帧生命周期或检查点状态可恢复 | 改用受支持聚合或批查询 |
+| 无界 `DISTINCT` | 状态无法回收 | 改用白名单聚合，或改为批查询 |
+| JOIN、UNION 多源 | 本设计未定义多源水位线与一致性 | 拆为独立查询 |
+| `OVER` 分析窗口 | 没有有界状态规则 | 改为时间窗口聚合 |
+| 不在窗口聚合白名单中的 aggregate / UDAF | 无法保证内存、帧生命周期或状态可恢复 | 改用受支持聚合或批查询 |
 
-流式 `TUMBLE` 的聚合白名单细则（允许的聚合函数与类型约束）见 [proposal 0002](./proposals/0002-video-stream-processing.md)。
+流式 `TUMBLE` 的聚合白名单细则（允许的聚合函数与类型约束）见 §5.4。
 
 校验错误必须指出第一个不支持的节点或聚合、所在 SQL 片段和可行改写，不能只返回 DataFusion 内部错误。
 
@@ -264,7 +255,7 @@ struct StreamEpoch {
 }
 ```
 
-`batches` 可以为空。`source_progress`、`watermark` 和 `frame_lease` 不会变成 RecordBatch 中的隐藏列。Filter 即使把整个 epoch 的行全部过滤掉，协调器仍然能够推进源进度、释放帧仓并处理水位线。
+`batches` 可以为空；其余控制信息不编码为隐藏列，因此 Filter 清空数据后仍可推进进度、水位线并释放帧仓。
 
 ### 5.2 一个 epoch 的执行顺序
 
@@ -284,7 +275,7 @@ sequenceDiagram
     W-->>C: 已关闭窗口结果
     C->>K: 写出并等待确认
     K-->>C: ack
-    C->>C: 标记 epoch 完成；v0.3 进入检查点协议
+    C->>C: 标记 epoch 完成
     C->>S: 释放 frame lease / 更新可提交进度
 ```
 
@@ -294,9 +285,9 @@ sequenceDiagram
 2. 只有当前 epoch 的所有数据输出完成后，协调器才把它的水位线交给状态算子；
 3. 只有状态更新和所有新关闭窗口的 Sink 写入完成后，epoch 才算完成；
 4. 取消查询会取消当前 DataFusion stream、模型请求和 Sink 请求，再释放帧租约；
-5. 当前所有版本都只有单源单分区，不需要合并水位线；多分区可重放源（如 Kafka 帧源）未排期。
+5. 本设计只有单源单分区，不需要合并水位线。
 
-数据片段的**计划模板**在作业启动时只编译一次，但同一棵 `ExecutionPlan` 实例绝不能跨 epoch 直接重复 `execute()`。模板只保存 schema、表达式、operator ID、分区要求和扩展算子 factory，不保存 channel、动态过滤器、metrics recorder、输入槽或其他运行态：
+数据片段的计划模板只编译一次，但 `ExecutionPlan` 实例不得跨 epoch 重用。模板保存 schema、表达式、operator ID、分区要求和扩展算子 factory，不保存 channel、动态过滤器、metrics recorder、输入槽等运行态：
 
 ```rust
 trait EpochPlanTemplate {
@@ -316,19 +307,54 @@ struct EpochBinding {
 }
 ```
 
-每个 epoch 都从模板实例化一棵新的执行树和新的 `EpochInputExec`，并创建新的子 `TaskContext`；它们共享作业级 RuntimeEnv、MemoryPool、模型运行时和指标汇聚器，但不共享算子运行态。DataFusion 适配层可以用当前锁定版本提供的递归 `reset_state` / `with_new_state` 实现 factory，外部不变量始终是“执行实例不复用”。当前实例的所有输出分区必须全部结束或完成取消、后台任务全部 join、资源 reservation 全部释放后，协调器才能实例化下一个 epoch。状态算子位于片段之外，不能被误放进每次都会重建的 DataFusion 执行状态。
+每个 epoch 必须：
+
+- 创建新的执行树、`EpochInputExec` 和子 `TaskContext`；
+- 只共享作业级 RuntimeEnv、MemoryPool、模型运行时和指标汇聚器；
+- 等所有分区结束或取消、后台任务 join、reservation 释放后，再实例化下一棵树；
+- 将状态算子保留在数据片段之外。
+
+适配层可用锁定版本的 `reset_state` / `with_new_state` 实现 factory，但执行实例不得复用。
 
 ### 5.3 背压与丢帧
 
 背压沿 `Sink → 状态 → 数据片段 → 源缓冲` 反向传递。所有缓冲都有容量：
 
 - 批输入等可重放输入在容量不足时等待；
-- RTSP 无法让摄像头回放历史数据。缓冲达到上限时，只在最靠近源的位置丢弃尚未进入 epoch 的最旧采样帧；
-- 已经进入 epoch 的行不会因为超载被静默丢弃；如果无法在预算内执行，查询失败；
-- 每次丢弃记录源、原因、帧数和事件时间范围。丢帧指标至少区分 `source_overrun`、`decode_slow`、`inference_backlog` 与 `sink_backlog`；
-- `on_overload = 'fail'` 可将 live 丢帧改为失败，便于对完整性要求更高的测试环境使用。
+- RTSP 缓冲满时，只在源端丢弃尚未进入 epoch 的最旧采样帧；
+- 已进入 epoch 的行不得因超载静默丢弃；预算不足时查询失败；
+- 每次丢弃记录源、原因、帧数和事件时间范围；原因至少区分 `source_overrun`、`decode_slow`、`inference_backlog` 和 `sink_backlog`；
+- `on_overload = 'fail'` 将 live 丢帧改为查询失败。
 
-流处理的子功能设计：`TUMBLE` 窗口状态与 RTSP 接入见 [proposal 0002](./proposals/0002-video-stream-processing.md)；v0.3 持久作业的检查点、恢复与状态机见 [proposal 0005](./proposals/0005-vqld-service.md)。
+### 5.4 `TUMBLE` 窗口状态
+
+流模式下，`TumbleState` 保存规范化 Arrow 状态，不长期持有 DataFusion `Accumulator`：
+
+```text
+key = (window_start, group_key)
+value = versioned_arrow_states + source_progress_span
+```
+
+- 窗口为 `[start, end)`；时间统一为 UTC 纳秒，固定原点为 Unix epoch；
+- interval 必须是正的固定时长，不支持日历间隔；无界查询的事件时间必须是非空 TIMESTAMP，nullable 列需先过滤 NULL；
+- 每个白名单聚合由 `WindowStateCodec` 定义输入、state schema、更新、求值、大小和恢复；
+- accumulator 仅用于单次转换：用 `merge_batch` 恢复 state，处理本 epoch 后调用一次 `state()`，随即丢弃。快照只复制规范化 state；
+- 数据处理完成后再推进 watermark；`window_end <= watermark` 时输出并删除窗口；
+- `event_time < current_watermark` 的行默认丢弃并增加 `late_rows_total`；不支持 `allowed_lateness`；
+- 停止查询时不输出未关闭窗口；
+- state schema 由 `(aggregate_kind, input_types, state_codec_version)` 决定并纳入 fingerprint。每次更新按 `size()` 调整 reservation；无法记账的 codec 不得注册；
+- state 和 group key 不得包含 `arena_id/arena_slot`。画面需先转为持久 locator 或编码态；窗口状态默认拒绝 `IMAGE/VIDEO`；
+- 批模式将 `TUMBLE` 降为时间分桶和聚合。白名单聚合必须通过批/流差分测试，覆盖 NULL、分组、溢出和最终值。
+
+`WindowStateCodec` 是 VisionQL 的恢复 ABI。修改已发布 codec 必须提供迁移或重放方案；新增 codec 必须通过确定性 schema、非破坏性快照、restore round-trip 和资源记账测试。
+
+流式 `TUMBLE` 的聚合范围：
+
+- 允许 `COUNT`、`SUM`、`AVG`、`MIN` 和 `MAX`；参数与 group key 必须是可持久化的标量 Arrow 类型；
+- `COUNT(DISTINCT primitive)` 通过状态恢复和内存上限测试后才能单独启用；
+- 拒绝 `ARRAY_AGG`、`STRING_AGG`、近似聚合、ordered aggregate、UDAF，以及对 `IMAGE`、`VIDEO`、Binary 或含进程内媒体槽位的复杂类型做聚合。
+
+计划形状白名单见 §4.4。
 
 ---
 
@@ -336,20 +362,19 @@ struct EpochBinding {
 
 ### 6.1 Arrow 物理表示
 
-VQL 类型名是逻辑类型。底层全部使用标准 Arrow storage type，并用字段元数据标注扩展语义。
+VQL 类型使用标准 Arrow storage type，并以字段 metadata 标注逻辑语义。
 
 | VQL 类型 | Arrow storage type | 约定 |
 |---|---|---|
 | `IMAGE` | `Struct`，见 §6.2 | `ARROW:extension:name=visionql.image` |
 | `VIDEO` | `Struct<uri, locator, duration_ns, fps, width, height, codec>` | `uri` 只展示，`locator` 用于重新授权后的读取；永远不内联完整视频 |
 | `BOX2D` | `Struct<x: Float32, y: Float32, w: Float32, h: Float32>` | 左上原点，归一化坐标 `[0,1]` |
-| `VECTOR(n)` | `FixedSizeList<Float32, n>` | 维度属于类型，规划期检查；随 v0.4 启用（[proposal 0008](./proposals/0008-cross-modal-retrieval.md)） |
 | `POINT2D` | `Struct<x: Float32, y: Float32>` | 空间函数的内部逻辑类型 |
-| `POLYGON` | `List<POINT2D>` | v0.1 只支持归一化二维多边形 |
+| `POLYGON` | `List<POINT2D>` | 只支持归一化二维多边形 |
 | 检测结果 | `List<Struct<label: Utf8, confidence: Float32, box: BOX2D>>` | 一帧对应一个数组；`UNNEST` 负责展开 |
-| `AUDIO` / `MASK` | 保留逻辑类型 | v0.1 注册和执行都返回未支持错误 |
+| `AUDIO` / `MASK` | 保留逻辑类型 | 注册和执行都返回未支持错误 |
 
-字段 metadata 固定包含 `ARROW:extension:name=visionql.image` 和 `ARROW:extension:metadata={"version":1}`；SqlInfo `visionql_image_version` 对应返回字符串 `1`。未知扩展类型的 Arrow 客户端仍能按其标准 storage type 读取，避免把协议绑定在 VisionQL 私有内存结构上。
+`IMAGE` 字段固定携带 `ARROW:extension:name=visionql.image` 和 `ARROW:extension:metadata={"version":1}`；未知该扩展的客户端仍可读取标准 storage type。
 
 ### 6.2 `IMAGE` 的三种载荷
 
@@ -368,37 +393,34 @@ IMAGE storage := Struct {
 }
 ```
 
-同一值可以处于三种载荷形态：
+`IMAGE` 有三种载荷形态：
 
 | 形态 | 有效字段 | 使用位置 |
 |---|---|---|
 | 引用态 | `uri`、`locator`、`pts_ms`、元数据；`locator` 必须非 NULL | 表扫描、视频帧展开和绝大多数算子间传递 |
 | 帧仓态 | `arena_id`、`arena_slot`、元数据 | 当前 epoch 内，解码点到像素消费者之间 |
-| 编码态 | `encoded`、`encoding`、元数据 | Python 边界、Flight SQL、Kafka 显式输出、Lance/Parquet 落盘 |
+| 编码态 | `encoded`、`encoding`、元数据 | Python 边界、Kafka 显式输出等进程外出口 |
 
 不变量：
 
-1. `arena_id` 和 `arena_slot` 绝不能跨进程、落盘或进入 Catalog；
-2. `uri` 必须去掉账号、签名查询串和其他秘密，只用于 SQL 展示、日志和导出；运行时绝不能用它反查 Catalog 或直接发起 I/O；
-3. `locator` 是 `vql://media/v1/...` 版本化不透明值，载荷至少绑定 `source_id`、`source_revision_id`、规范化 object key 或 stream generation、media version，以及适用时的 PTS/frame ID。它可以带完整性校验，但安全边界仍是服务端重新授权和路径范围校验；
-4. 服务端只解析 `locator` 指向的已注册来源。解析时按当前 principal 重新检查对象权限，从对应 source revision 取得凭证引用，并验证 object key 仍在登记前缀内；协议错误码固定为 `INVALID_MEDIA_LOCATOR`、`MEDIA_LOCATOR_EXPIRED`、`PERMISSION_DENIED`、`SOURCE_REVISION_UNAVAILABLE` 和 `FRAME_NOT_AVAILABLE`，客户端不得解析错误文本；
-5. live RTSP 帧没有可重放的长期引用。它的 `locator` 包含 stream generation 与 frame ID；服务态只在有界环形缓存中按该定位符提供短期点查，过期后返回 `FRAME_NOT_AVAILABLE`；
-6. `encoded` 表示原图还是缩略图由字段元数据和会话 `image_mode` 明确标记，客户端不能靠尺寸猜测。
-
-v0.3 的 live 点查不长期保留 6MB 级原始像素。RTSP connector 在启用媒体预览时保存一个受总字节数和 TTL 限制的压缩 packet/GOP ring；`FRAME_AT`（[proposal 0005](./proposals/0005-vqld-service.md)）从目标帧之前最近的关键帧开始解码。缓存按最旧 GOP 淘汰，查询取消不会延长 TTL，缓存未命中时不尝试向 live 摄像头“回放”历史。
+1. `arena_id` 和 `arena_slot` 不得跨进程、落盘或进入 Catalog；
+2. `uri` 必须脱敏且仅供展示、日志和导出；运行时不得用它读取媒体；
+3. `locator` 是绑定来源 revision 和帧信息的 `vql://media/v1/...` 不透明值。解析时只接受已登记来源，并按当前调用者重新授权；
+4. live RTSP 帧不可重放，没有持久 `locator`；需要回查时先编码或落盘；
+5. 字段 metadata 必须说明 `encoded` 是原图还是缩略图。
 
 ### 6.3 epoch 帧仓
 
-RTSP 解码后把采样帧放入当前 epoch 的 `FrameArena`，RecordBatch 只保存槽位。协调器持有 `FrameArenaLease`，直到该 epoch 的数据片段、状态处理，以及 Sink/Flight 等出口所需的编码全部结束才整体释放 arena。
+RTSP 采样帧存入当前 epoch 的 `FrameArena`，RecordBatch 只保存槽位。数据片段、状态处理和出口编码全部结束后，协调器才释放 `FrameArenaLease`。
 
 这种生命周期不依赖每一行都到达下游：
 
 - Filter 丢弃单行或整批不会泄漏帧；
 - 异步推理结束前 lease 不会释放；
 - 查询取消会先取消使用者，再释放整个 epoch；
-- 一个查询不跨 epoch 保存帧仓引用。窗口状态只能保存白名单标量；后续版本若允许保存媒体，只能保存可重新授权的 `locator` 或编码态值，不能保存 `arena_slot`。
+- 不跨 epoch 保存帧仓引用；窗口状态不得保存 `arena_slot`。
 
-批视频通常不需要帧仓。`InferenceExec` 可以把“读取 → 解码 → 前处理”融合在一个算子内；只有同一帧在一个计划中被多个像素消费者使用时，才为当前批建立短生命周期 arena。
+批视频通常由 `InferenceExec` 融合读取、解码和前处理。只有多个像素消费者共享同一帧时，才为当前批建立短生命周期 arena。
 
 ### 6.4 NULL 与单行错误
 
@@ -414,38 +436,33 @@ RTSP 解码后把采样帧放入当前 epoch 的 `FrameArena`，RecordBatch 只�
 
 ### 7.1 解析边界
 
-VQL 使用 sqlparser-rs 的 tokenizer 和标准 SQL AST，但由自己的语句入口处理新增 DDL 与表值语法：
+VQL 复用 sqlparser-rs 的 tokenizer 和标准 SQL AST，并用独立入口处理扩展语法：
 
 1. 先按字符串、注释和引用规则切分完整脚本；
-2. `CREATE STREAM/MODEL/FUNCTION/SINK`、`ALTER`、`SHOW`、`SUBMIT QUERY`、`PAUSE/RESUME/STOP` 进入 VQL DDL parser；
+2. `CREATE STREAM/MODEL/FUNCTION/SINK`、`ALTER`、`SHOW` 进入 VQL DDL parser；
 3. SELECT、INSERT 和标准 DDL 进入标准 SQL parser；
-4. `<->`（v0.4）、`.center`、`TUMBLE` 等在 AST/逻辑计划层规范化；
+4. `.center`、`TUMBLE` 等在 AST/逻辑计划层规范化；
 5. 规范化后的关系表达式交给 DataFusion 规划接口。
 
-不能只通过 `Dialect` 钩子假设 sqlparser-rs 会自动支持所有新增 Statement；VQL parser 必须有自己的金样测试。
+扩展 Statement 不能只依赖 `Dialect` 钩子，必须有 VQL parser 金样测试。
 
-v0.1 未加引号的标识符按小写解析，双引号标识符保留原样；字符串只使用单引号。新增 DDL 的状态如下：
+未加引号的标识符按小写解析，双引号标识符保留原样；字符串只使用单引号。新增 DDL 的行为如下：
 
-| 语句 | v0.1 行为 |
+| 语句 | 行为 |
 |---|---|
-| `CREATE TABLE ... USING IMAGES/VIDEOS` | 创建外部图片或视频表 |
-| `CREATE TABLE ... AS SELECT` | v0.4 起支持（Parquet 见 [proposal 0007](./proposals/0007-parquet-sink.md)，Lance 见 [proposal 0008](./proposals/0008-cross-modal-retrieval.md)）；此前返回版本明确的未支持错误 |
-| `CREATE STREAM ... FROM 'rtsp://...'` | 创建单路 RTSP 流 |
-| `CREATE STREAM ... FROM 'kafka://...'` | 解析后返回明确的未支持错误（未排期） |
+| `CREATE TABLE ... USING IMAGES/VIDEOS` | 创建外部图片或视频表（§8.2） |
+| `CREATE STREAM ... FROM 'rtsp://...'` | 创建单路 RTSP 流（§8.3） |
 | `CREATE MODEL ... [FUNCTION f]` | 创建模型；可在同一事务中派生一个函数 |
 | `ALTER MODEL ...` | 创建新 Model 修订并推进稳定 `model_id` 的 head，不修改已规划查询 |
 | `CREATE FUNCTION ...` | 支持 Model、Python 与 SQL 宏三种实现 |
 | `ALTER FUNCTION ... SET MODEL` | 创建新 Function 修订，不修改运行中查询 |
-| `CREATE SINK ...` | 创建 Kafka 或 Console Sink（Parquet 与 Lance 随 v0.4） |
-| `CREATE MATERIALIZED VIEW ...` | 解析后返回明确的未支持错误（未排期），不登记空对象 |
-| `CREATE INDEX ... USING HNSW` | 解析后返回“v0.4 支持”（[proposal 0008](./proposals/0008-cross-modal-retrieval.md)），不登记空对象 |
-| `SUBMIT QUERY name AS INSERT INTO ... SELECT ...` | v0.3 持久作业语法（[proposal 0005](./proposals/0005-vqld-service.md)）；v0.1 返回版本明确的未支持错误 |
+| `CREATE SINK ...` | 创建 Kafka 或 Console Sink |
 
-对应对象的 `DROP`、`SHOW`、`DESCRIBE` 与 `SHOW CREATE` 走相同 VQL DDL 路径；`SHOW CREATE` 必须输出脱敏且可再次解析的定义。
+`DROP`、`SHOW`、`DESCRIBE` 和 `SHOW CREATE` 走同一 VQL DDL 路径；`SHOW CREATE` 输出脱敏且可解析的定义。其余语句按 §1.2 拒绝，不登记存根。
 
 ### 7.2 目录对象
 
-SQLite 是 v0.1 的默认目录，默认位置为平台用户数据目录下的 `visionql/catalog.db`。核心对象如下：
+SQLite 是默认目录，默认位置为平台用户数据目录下的 `visionql/catalog.db`。核心对象如下：
 
 | 对象 | 关键内容 |
 |---|---|
@@ -454,68 +471,60 @@ SQLite 是 v0.1 的默认目录，默认位置为平台用户数据目录下的 
 | Model | type、不可变来源 revision、内容哈希、processor、precision、backend、输出 schema、声明式约束 |
 | Function | 签名、实现种类、稳定 `model_id` 或代码入口、绑定参数、确定性 |
 | Sink | connector、format、options、凭证引用 |
-| QueryJob（v0.3） | 名称、SQL、定义快照、状态、检查点位置、owner |
 
 约束：
 
-- 每条 DDL 在一个 SQLite 事务中提交；`CREATE MODEL ... FUNCTION f` 同事务创建两个对象；
-- 对象之间使用稳定 ID 和修订 ID，不使用可变名称作为内部外键；
-- Function 通过稳定 `model_id` 引用 Model；QueryJob、计划和检查点引用不可变 revision ID。不能在同一字段中混用“跟随 head”和“固定 revision”两种语义；
-- Table、Stream 和 View 共享 relation 名称空间；Model、Function 与 Sink 分别使用独立名称空间。未加引号的名称按 §7.1 的小写规则唯一；
-- schema 使用 Arrow IPC schema 编码；Catalog 自身保存格式版本和迁移记录；
-- 密码、token、S3 secret 和带签名 URL 不写入目录；只保存环境变量、文件或 secret provider 的引用；
-- DROP 创建 tombstone 并阻止新规划；运行中查询的 revision lease 保证定义和凭证元数据在查询结束前不会被物理 GC。权限判定不进入 lease，撤权后新的媒体读取和恢复仍会失败；
-- `SUBMIT QUERY` 的名称在 owner 范围内对非终态作业唯一且创建后不可变；状态变更只使用服务端 UUID，名称只用于展示和确认。
+- 每条 DDL 在一个 SQLite 事务中提交；`CREATE MODEL ... FUNCTION f` 原子创建两个对象；
+- 内部外键使用稳定 ID 和 revision ID，不使用可变名称；
+- Function 引用稳定 `model_id`，计划引用不可变 revision ID；单个字段不得混用 head 与固定 revision 语义；
+- Table、Stream、View 共享 relation 名称空间；Model、Function、Sink 各自独立。未加引号的名称按 §7.1 规则唯一；
+- schema 使用 Arrow IPC 编码；Catalog 保存格式版本和迁移记录；
+- 目录不保存密码、token、S3 secret 或签名 URL，只保存 secret 引用；
+- `DROP` 创建 tombstone 并阻止新规划。revision lease 在查询结束前阻止物理 GC，但不延续权限；撤权后新的媒体读取失败。
 
 ### 7.3 MODEL 与 FUNCTION
 
-MODEL 是资源实现，FUNCTION 是查询接口。Function revision 保存稳定 `model_id`；规划时在同一 Catalog 快照中把它解析为当时的 Model head revision，并把该 revision 与 Function 语义参数一起固定到计划。
+MODEL 描述资源实现，FUNCTION 定义查询接口。Function revision 保存稳定 `model_id`；规划时将当时的 Model head revision 和 Function 参数固定到计划。
 
 模型类型：
 
-| TYPE | 标准签名 | 状态 |
-|---|---|---|
-| `OBJECT_DETECTION` | `(IMAGE) -> ARRAY<STRUCT<label, confidence, box>>` | v0.1 支持 |
-| `EMBEDDING` | `(IMAGE) -> VECTOR(n)` 或 `(STRING) -> VECTOR(n)`；入口决定输入模态 | v0.4（[proposal 0008](./proposals/0008-cross-modal-retrieval.md)）；此前拒绝注册 |
-| `VQA` | `(IMAGE, STRING) -> STRING` | 未排期；拒绝注册 |
+| TYPE | 标准签名 |
+|---|---|
+| `OBJECT_DETECTION` | `(IMAGE) -> ARRAY<STRUCT<label, confidence, box>>` |
 
-`VECTOR(n)` 的维度（v0.4）必须在 Function 创建时确定。显式 `RETURNS VECTOR(n)` 优先；省略时从已解析的模型 manifest 推导；两处冲突或都无法确定时 DDL 失败，不能把未知维度拖到首批数据执行时才报错。
+参数分属查询接口、模型实现和运行时部署。会改变结果的权重、processor 和 precision 必须进入模型语义指纹与定义快照：
 
-参数归属按“查询接口、模型实现、运行时部署”三层执行。权重、processor 和 precision 虽然属于 Model 管理，但可能改变结果，因此必须进入模型语义指纹和定义快照，不能被当作纯成本参数：
+- Function 保存签名、稳定 `model_id`、`classes`、`min_confidence`、NMS 阈值和 determinism；
+- Model revision 保存 artifact revision/hash、processor ID/版本、label/schema、precision、backend 和 `latency_slo`；修改时创建新 revision；
+- device、replica、动态 batch 和队列权重属于部署配置，不进入 Function 或 Model semantic fingerprint，也不得改变 precision、processor 或 backend kind；
+- 参数白名单由 model type 和 processor schema 提供，未知参数直接报错。
 
-- Function 保存签名、稳定 `model_id`、`classes`、`min_confidence`、NMS 阈值、prompt 模板和 determinism 等查询接口语义；
-- Model revision 保存固定 artifact revision/hash、processor ID/版本、label/schema、precision、backend 与 `latency_slo` 等实现定义；`ALTER MODEL` 改变这些内容时创建新 revision；
-- device、replica、动态 batch 和队列权重属于运行时部署配置，不进入 Function，也不改变 Model semantic fingerprint；部署配置不能悄悄改变 precision、processor 或 backend kind；
-- 未消费的 `resource_group` 返回明确的未支持错误（未排期），不静默保存；
-- 参数白名单由 model type / processor schema 提供，未知参数直接报错。
+`ALTER MODEL` 仅在新 revision 与所有相关 Function head 的任务类型、输入模态、输出 schema 和参数 schema 兼容时推进 head；校验与更新在同一事务中完成。不兼容升级需创建新 Model ID，并通过 `ALTER FUNCTION ... SET MODEL` 或新 Function revision 显式迁移。
 
-`ALTER MODEL` 只有在新 revision 与所有引用该 `model_id` 的当前 Function head 在任务类型、输入模态、输出 schema/向量维度和绑定参数 schema 上兼容时，才能推进 head；校验与 head 更新在同一个 Catalog 事务中完成。不兼容升级必须创建新的 Model ID，再用 `ALTER FUNCTION ... SET MODEL` 或新 Function revision 显式迁移，不能让已有函数接口在下一次规划时突然失效。
-
-固定 artifact 的本地/ONNX 模型默认可以声明为 `deterministic`。没有不可变 revision 的 endpoint 一律是 `volatile`；volatile 调用不能做公共表达式消除、常量提升或结果缓存。用户只能把经过能力声明和回归测试的固定 endpoint 标记为 `stable_within_query`，此时同一查询内可以去重，但仍不能跨查询缓存。
+固定 artifact 的本地/ONNX 模型可声明为 `deterministic`。没有不可变 revision 的 endpoint 一律为 `volatile`，不得去重、常量提升或缓存。通过能力声明和回归测试的固定 endpoint 可标记为 `stable_within_query`，只允许查询内去重。
 
 ### 7.4 三类函数实现
 
 | 语法 | 规划与执行 |
 |---|---|
 | `USING MODEL` | 注册签名与模型绑定；调用在规划期提取为 `Inference` 节点 |
-| `LANGUAGE PYTHON AS 'module:function'` | 注册批量 Arrow ABI；只有 Python 宿主在 v0.1 能执行 |
+| `LANGUAGE PYTHON AS 'module:function'` | 注册批量 Arrow ABI；只有 Python 宿主能执行 |
 | `AS (<表达式>)` | SQL 宏；规划前进行卫生替换和递归深度检查，不产生运行时函数 |
 
-Python UDF v0.1 ABI：入口每次接收与参数一一对应的 `pyarrow.Array`，返回长度相同、类型匹配的 `pyarrow.Array`。`IMAGE` 参数在跨语言前转换为编码态；SDK 提供批量解码 helper。逐行 Python 回调不在支持范围内，模型推理必须使用 `USING MODEL`。
+Python UDF 每次接收与参数对应的 `pyarrow.Array`，并返回等长、类型匹配的 `pyarrow.Array`。`IMAGE` 跨语言前转为编码态，SDK 提供批量解码 helper。不支持逐行 Python 回调；模型推理使用 `USING MODEL`。
 
 ### 7.5 语法到计划的映射
 
 | VQL 表达 | 规范化结果 |
 |---|---|
-| `a <-> b`（v0.4） | `L2_DISTANCE(a, b)` |
 | `box.center` | `BOX_CENTER(box)` |
 | `TUMBLE(ts, interval)` | `TumbleAggregate`；物理编译时按边界性分流 |
-| `FROM t, UNNEST(expr)` | DataFusion 原生展开节点；这是 v0.1 唯一行展开方式 |
+| `FROM t, UNNEST(expr)` | DataFusion 原生展开节点；这是唯一的行展开方式 |
 | `CREATE ...` | Catalog 或运行时操作，不进入关系计划 |
 
-检测函数的 `classes/min_confidence` 由 processor 对数组元素执行，不改写为行级 Filter。行级 Filter 会丢掉整帧，语义不等价。
+`classes/min_confidence` 由 processor 过滤数组元素，不改写为会丢弃整帧的行级 Filter。
 
-### 7.6 v0.1 内置函数
+### 7.6 内置函数
 
 | 函数 | 签名 | 实现约束 |
 |---|---|---|
@@ -523,17 +532,15 @@ Python UDF v0.1 ABI：入口每次接收与参数一一对应的 `pyarrow.Array`
 | `BOX_CENTER` | `(BOX2D) -> POINT2D` | `box.center` 的等价形式 |
 | `POLYGON` / `ST_POLYGON` | `(STRING) -> POLYGON` | 常量参数在规划期解析并检查闭合、有限数值和 `[0,1]` 范围 |
 | `ST_CONTAINS` | `(POLYGON, POINT2D) -> BOOLEAN` | 采用明确的边界规则：边界点视为包含 |
-| `L2_DISTANCE` | `(VECTOR(n), VECTOR(n)) -> FLOAT` | v0.4（[proposal 0008](./proposals/0008-cross-modal-retrieval.md)）；规划期要求维度相同；`<->` 的等价形式 |
 | `TO_JPEG` | `(IMAGE [, quality]) -> BINARY` | 显式触发读取/解码/编码；quality 范围在规划期校验 |
-| `FRAME_AT` | `(locator STRING [, pts_ms BIGINT]) -> IMAGE` | v0.3（[proposal 0005](./proposals/0005-vqld-service.md)）；含 I/O，规划为 `MediaFetchExec`，并按 locator 中的 source revision 执行权限与范围检查 |
 
-上述函数遵循 SQL NULL 传播；`COUNT_OBJECTS` 的 NULL 输入返回 NULL。`FRAME_AT` 的 locator 已包含当前帧 PTS；显式第二参数只用于在同一已授权视频对象内选择其他时间点。它在 v0.1 返回版本明确的未支持错误，不登记一个无法执行的存根。
+上述函数遵循 SQL NULL 传播；`COUNT_OBJECTS` 的 NULL 输入返回 NULL。
 
 ---
 
-## 8. 数据源与 Sink 概览
+## 8. 数据源与 Sink
 
-数据的进出口都实现为连接器，通过窄 trait 由内核装配（§2 G8）：表与流 provider 负责读取，Sink 负责写出。各连接器可独立开发交付，详细设计见对应 proposal：图片与视频目录表见 [proposal 0001](./proposals/0001-media-table-providers.md)，RTSP 流源见 [proposal 0002](./proposals/0002-video-stream-processing.md)，Kafka / Parquet Sink 见 [proposal 0004](./proposals/0004-kafka-sink.md) / [proposal 0007](./proposals/0007-parquet-sink.md)，Lance 见 [proposal 0008](./proposals/0008-cross-modal-retrieval.md)。本章只固定跨连接器的公共契约。
+数据进出口均为窄 trait 连接器：表和流 provider 读取，Sink 写出。
 
 ### 8.1 内置 provider 的最小 schema
 
@@ -542,28 +549,74 @@ Python UDF v0.1 ABI：入口每次接收与参数一一对应的 `pyarrow.Array`
 | IMAGES | `uri STRING, image IMAGE, width INT, height INT, captured_at TIMESTAMP` |
 | VIDEOS（帧表） | `uri STRING, ts TIMESTAMP, pts_ms BIGINT, frame_id BIGINT, frame IMAGE, duration DOUBLE, fps DOUBLE, width INT, height INT, codec STRING` |
 | RTSP Stream | `ts TIMESTAMP NOT NULL, frame IMAGE, frame_id BIGINT, source STRING` |
-| Parquet / Lance Table（v0.4） | 从已保存 Arrow schema 恢复；未知逻辑类型仍按标准 storage type 读取 |
 
-无法读取的可选元数据为 NULL；`uri`、媒体值和 RTSP 的 `ts/frame_id/source` 不为 NULL。用户通过目录选项添加的分区列可以追加，但不能改变上述列的含义。
+无法读取的可选元数据为 NULL；`uri`、媒体值和 RTSP 的 `ts/frame_id/source` 非 NULL。目录选项可追加分区列，但不得改变基础列语义。
 
-Parquet 与 Lance 表 provider（均随 v0.4）支持列裁剪、谓词下推和统计信息；VisionQL 自己写出的文件保存逻辑类型 metadata，读回时恢复 `IMAGE/BOX2D/VECTOR`（分别见 proposal 0007 / 0008）。
+### 8.2 图片与视频目录表
 
-### 8.2 Sink 公共契约
+`CREATE TABLE ... USING IMAGES/VIDEOS` 将本地或对象存储目录注册为外部表。图片逐文件成行；视频按建表 `fps` 在扫描算子内展开为帧行。
 
-| Sink | 阶段 | 说明 |
-|---|---|---|
-| Console | v0.1 | 仅 shell 和 `vql run` 前台可用；`IMAGE` 显示摘要，不输出像素；服务态拒绝常驻 Console Sink |
-| Kafka | v0.2 | JSON 编码规则见 [proposal 0004](./proposals/0004-kafka-sink.md) |
-| Parquet | v0.4 | 批追加与流式滚动文件，见 [proposal 0007](./proposals/0007-parquet-sink.md) |
-| Lance | v0.4 | 面向检索的落盘，见 [proposal 0008](./proposals/0008-cross-modal-retrieval.md) |
+provider 行为：
 
-`CREATE SINK` 只登记连接信息。第一次 `INSERT INTO` 规划时完成输出 schema 与 format 校验。Sink 写入必须支持取消、超时和有界缓冲；持续查询中的重试策略由作业协调器统一管理。
+- 两者实现为 `TableProvider`；规划期只返回 schema 和统计信息，列举与读取在 `execute()` 中发生；
+- 支持 `file://` 和 object_store 已支持的存储；执行前校验路径、扩展名和 `recursive`；
+- `uri`、大小和修改时间来自对象列表；宽高、时长、codec 等仅在投影时探测；
+- `IMAGE` 和 `frame` 以引用态输出，扫描不解码像素。
+
+视频帧展开不引入表值函数或独立逻辑节点：
+
+- 扫描按 `WITH (fps = ...)` 展开帧，输出 `uri`、`ts`、`pts_ms`、`frame_id`、引用态 `frame`，并透传 `duration` 等文件属性；
+- 不同采样率需为同一目录另建逻辑表，不复制媒体；
+- `fps` 是显式采样目标，按 PTS 而不是帧序号采样，支持 VFR；
+- `pts_ms` 是媒体内相对时间，`ts` 是事件时间。`ts` 优先使用可信 `start_time + pts`，其次使用表选项 `start_time`；均无时以 Unix epoch 合成，并标记 `synthetic_event_time`；
+- 时间谓词下推为 `time_range`，容器支持时先 seek 到范围附近；
+- 顺序解码与稀疏 seek 的选择由媒体运行时依据采样比、GOP 和存储能力决定。稀疏 seek 未经 PoC 前不作为吞吐承诺；
+- 元数据查询若不读取 `frame` 像素，只生成帧定位信息。
+
+### 8.3 RTSP 流源
+
+`CREATE STREAM ... FROM 'rtsp://...'` 创建单路 RTSP 流。RTSP 不可重放，只承诺尽力而为；崩溃、丢帧或暂停造成的数据无法恢复。
+
+摄入路径：
+
+- FFmpeg demux/decode 在受控工作线程运行，不阻塞 async executor；
+- RTSP 优先 TCP interleaved，可配置 UDP；
+- 普通帧间编码通常仍需按源帧率解码后采样；`fps=5` 只减少帧仓、前处理和推理量；
+- 支持硬解时可以启用 NVDEC、VideoToolbox 等后端，失败回退软件解码并记录指标；
+- 采样帧进入当前 epoch arena，达到行数或时间阈值后生成 `StreamEpoch`。
+
+事件时间与断流：
+
+- 作业启动时以一次 UTC 时间和 monotonic clock 建立 `IngestClock`，之后用 monotonic elapsed 生成 ingest time；重连和系统时钟回拨不会使其倒退；
+- 初连、重连、codec/timebase 变化或 RTP/RTCP 映射失效都会开启新 `source_generation`。`ingest_time` 无需探测；`capture_time` 必须在 `timestamp_probe_timeout` 内通过单调性、漂移及与 `IngestClock` 偏差检查。每个 generation 只使用一种时钟；
+- capture 映射失效、倒退或漂移超限时，结束当前 generation，以 `ingest_time` 开启下一代，并记录 `event_time_fallback_total` 和原因；
+- 水位线为 `max_seen_event_time - watermark_delay`，且不回退。max 值取自所有成功取得时间戳的源帧，不限于采样行；本 epoch 数据处理完成后才应用其水位线；
+- 断流后按 1s 起、最大 30s 指数退避重连；期间冻结水位线，不用本地时钟伪造进度；
+- 新 generation 的 capture time 若早于当前 watermark，或相对 `IngestClock` 偏移异常，则改用 ingest time。重连后的 ingest time 保留真实 gap，可推进水位线并关闭窗口，但不补造缺失行；在容差内的 capture time 仍可使用；
+- 若始终未恢复，最后一个未关闭窗口不输出。查询保持 `RUNNING`，并以 `source_health=DISCONNECTED`、缺口时长和最后事件时间表示源状态。
+
+### 8.4 Sink 公共契约
+
+| Sink | 说明 |
+|---|---|
+| Console | 仅 shell 和 `vql run` 前台可用；`IMAGE` 显示摘要，不输出像素 |
+| Kafka | JSON 编码规则见 §8.5 |
+
+`CREATE SINK` 只登记连接信息；首次规划 `INSERT INTO` 时校验输出 schema 和 format。Sink 必须支持取消、超时和有界缓冲，重试由协调器统一管理。
+
+### 8.5 Kafka Sink
+
+Kafka Sink 将查询结果以 JSON 写入 topic：
+
+- JSON 标量按稳定规则编码，字段名与查询输出列名一致；编码规则进入回归测试，不随实现细节漂移；
+- `IMAGE` 默认只输出脱敏 URI、locator 和元数据，必须显式 `TO_JPEG` 才输出 base64 字节，避免把原始像素隐式塞进消息流；
+- 写入失败的重试策略由作业协调器统一管理；缓冲有界，背压回传至上游。
 
 ---
 
 ## 9. 优化器与 `EXPLAIN`
 
-### 9.1 v0.1 规则顺序
+### 9.1 规则顺序
 
 | 顺序 | 规则 | 正确性或收益 |
 |---|---|---|
@@ -574,9 +627,7 @@ Parquet 与 Lance 表 provider（均随 v0.4）支持列裁剪、谓词下推和
 | R5 | 显式采样下推 | 把视频表和 Stream 声明的 `fps` 推到媒体层 |
 | R6 | 原生 DataFusion 规则 | 谓词、投影、常量折叠和普通关系优化 |
 
-根据窗口粒度自动猜测 fps 不属于当前任何版本（自动采样在 Roadmap 中未排期）。用户显式指定的 fps 是结果语义的一部分；未来的自动调整必须在 `EXPLAIN` 中可见，并允许关闭。
-
-向量 TopK（v0.4，`<->` 规范化与 HNSW ANN 改写）见 [proposal 0008](./proposals/0008-cross-modal-retrieval.md)。
+不根据窗口粒度自动猜测 fps；用户显式指定的 fps 是结果语义的一部分。
 
 ### 9.2 推理调用提取
 
@@ -584,15 +635,15 @@ Parquet 与 Lance 表 provider（均随 v0.4）支持列裁剪、谓词下推和
 
 1. 把调用替换为内部列引用；
 2. 在最早同时具备所需输入列、且不会改变语义的位置插入 `Inference`；
-3. 只有 determinism 为 `deterministic` 或 `stable_within_query` 时，完全相同的 Function revision、Model semantic fingerprint、输入表达式和绑定参数才执行一次；volatile 调用保持原次数和顺序；
-4. 常量参数调用（如 v0.4 的 `embed_text('...')`）只有满足同一 determinism 条件时才作为 query init expression 执行一次；
-5. v0.1 不跨不同 Function 修订共享原始模型输出。跨绑定参数共享与缓存留到 v0.4，避免后处理语义被错误合并。
+3. `deterministic` 或 `stable_within_query` 调用仅在 Function revision、Model semantic fingerprint、输入表达式和参数完全相同时去重；`volatile` 保持原次数与顺序；
+4. 只有满足同一 determinism 条件，常量参数调用才作为 query init expression 执行一次；
+5. 不跨不同 Function 修订共享原始模型输出，避免后处理语义被错误合并。
 
-`Inference` 节点的物理执行（`InferenceExec` 批路径与调度）见 [proposal 0003](./proposals/0003-model-runtime-and-inference.md)。
+`Inference` 节点的物理执行见 §10。
 
 ### 9.3 `EXPLAIN` 输出
 
-v0.1 的 `EXPLAIN` 至少展示：
+`EXPLAIN` 至少展示：
 
 - 定义快照和查询模式；
 - 逻辑计划与批计划 / 流作业图；
@@ -601,52 +652,110 @@ v0.1 的 `EXPLAIN` 至少展示：
 - 是否需要解码和使用哪种 IMAGE 形态；
 - 流查询的状态算子、watermark delay、投递语义和不支持项。
 
-GPU 时长或费用预估属于未排期的“优化器降本”方向。当前只展示工作量，不输出貌似精确但没有校准的数据。
+`EXPLAIN` 只展示工作量，不输出未经校准的 GPU 时长或费用预估。
 
 ---
 
-## 10. 产品形态与公开接口
+## 10. 模型运行时与推理执行
 
-### 10.1 无进程假设的内核
+本章定义 `Inference` 节点的模型加载、processor、异步批推理与跨查询调度。
 
-`vql-kernel` 不处理信号、不监听端口、不读取全局单例。宿主构造 `EngineConfig`、注入 secret provider 和可选 Python UDF host，再负责生命周期。
+### 10.1 运行时接口
 
-| 形态 | 宿主职责 | 阶段 |
-|---|---|---|
-| Python 库 | PyO3 绑定、`sess.sql()`、Arrow 结果交换、进程内 Python UDF、notebook 富显示 | v0.1（DataFrame 见 §10.2，v0.3） |
-| CLI | shell、脚本执行、信号处理 | v0.1（前台持续查询随 v0.2） |
-| `vqld`（`vql-server`） | Flight SQL、TLS/认证、服务配置、进程生命周期、持久作业管理、恢复和 Prometheus 指标端点 | v0.3（[proposal 0005](./proposals/0005-vqld-service.md)） |
+```rust
+trait ModelBackend {
+    fn load(&self, spec: &ResolvedModel) -> Result<ModelSession>;
+}
 
-更远期的集群等形态与 PRD 3.5 一致，暂不定义；内核只保证无进程假设（本节）与可序列化逻辑计划不被破坏。
+trait ModelSession {
+    async fn infer(&self, batch: TensorBatch, cancel: CancellationToken)
+        -> Result<RawModelOutput>;
+}
 
-### 10.2 Python 结果接口与 DataFrame API
+trait Processor {
+    fn preprocess(&self, images: &DecodedBatch, buffers: &mut TensorBuffers)
+        -> Result<TensorBatch>;
+    fn postprocess(&self, raw: RawModelOutput, params: &BoundParams)
+        -> Result<ArrayRef>;
+}
+```
 
-v0.1 的 Python 面只有 `sess.sql()` 及其返回的结果对象：`collect/show/write` 触发执行。Arrow C Data Interface 用于结果交换。`IMAGE` 在普通 `show()` 中只显示摘要；notebook 需要缩略图时显式请求编码，避免 collect 隐式搬运原图。
+引擎提供 ONNX Runtime 后端与 HTTP endpoint 后端。processor 负责 resize、归一化、检测框还原、NMS 和绑定参数；后端只负责模型会话和张量 I/O。
 
-链式 DataFrame API 随 v0.3 交付。它直接构造 `VqlLogicalPlan`，不先生成 SQL 字符串，因此等于把内核的逻辑计划固化为公共契约——推迟到 v0.1 的边界性推导和 definition snapshot 经过真实查询验证之后再发布。届时 `sess.sql()` 和链式 API 返回同一个 DataFrame 类型，`collect/show/write/start` 触发执行。
+### 10.2 模型来源与完整性
 
-v0.1 期间的内部约束：`VqlLogicalPlan` 必须保持可被程序化构造，不能出现只有 SQL 解析器才能生成的节点或不变量。这是把 DataFrame 推迟到 v0.3 的前提，也是 G1（批流共享 SQL/DataFrame 语义）在 v0.1 的实际要求。
+- `file://`、`hf://` 和 `endpoint://` 由独立 resolver 处理；
+- 浮动的 Hugging Face revision 首次解析时固定为 commit，并记录内容哈希；
+- 下载使用临时文件，哈希校验后原子放入内容寻址缓存；
+- 离线环境可以只使用本地路径或预热缓存；
+- endpoint URL 的鉴权通过 secret 引用注入，不写入模型 DDL 的可见输出。
 
-### 10.3 CLI
+模型可执行性由 manifest 决定，不根据 `TYPE OBJECT_DETECTION` 猜测张量布局。manifest 至少包含 backend artifact、输入和输出张量、processor ID/版本、图像尺寸与归一化、标签表和入口名称。它可以来自 `visionql-manifest.json`、内置模型清单或显式 processor 配置。
+
+引擎不嵌入 PyTorch，也不执行任意仓库代码。`hf://` 缺少可用 ONNX artifact 或受支持 manifest 时，`CREATE MODEL` 返回所需 artifact/endpoint。远程模型应提供或声明 revision；否则标记为 `mutable_endpoint`，由 `EXPLAIN` 警告，且不得跨查询缓存。
+
+### 10.3 `InferenceExec` 批路径
+
+```text
+引用/编码态 IMAGE
+  → 异步读取
+  → 解码
+  → 批量前处理
+  → 模型调度队列
+  → 异步推理
+  → 后处理
+  → 追加 nullable Arrow 结果列
+```
+
+输出顺序与输入一致。取消 stream 时移除未提交请求，丢弃已提交请求的结果并释放资源。
+
+批视频通常不需要帧仓：`InferenceExec` 可以把“读取 → 解码 → 前处理”融合在一个算子内（§6.3）。
+
+### 10.4 调度与 batching
+
+- 每个 `ModelInstanceKey`（Model semantic fingerprint、设备和运行时配置代次）有一个队列；
+- 请求按 `interactive`、`stream`、`batch` 进入加权公平队列；流请求可带 deadline，批任务不得无限挤占流 SLO；
+- 达到 `max_batch`、最早 deadline 或 `max_wait` 时发车；batch 大小、等待时间和 GPU 选择属于运行时配置；
+- 张量缓冲按最大在途批次预分配并复用；队列满时提交端等待，背压回传；
+- 默认单设备；显存不足在加载阶段失败并报告模型、估算需求和可选 endpoint，不做未经验证的运行时 LRU 换出；
+- 运行时记录实际 batch 分布、排队时间、推理时间和设备利用率，作为成本观测的数据来源。
+
+---
+
+## 11. 产品形态与公开接口
+
+### 11.1 无进程假设的内核
+
+`vql-kernel` 不处理信号、监听端口或读取全局单例。宿主注入 `EngineConfig`、secret provider 和可选 Python UDF host，并管理生命周期。
+
+| 形态 | 宿主职责 |
+|---|---|
+| Python 库 | PyO3 绑定、`sess.sql()`、Arrow 结果交换、进程内 Python UDF、notebook 富显示 |
+| CLI | shell、脚本执行、信号处理 |
+
+### 11.2 Python 结果接口
+
+`sess.sql()` 返回惰性结果对象，`collect/show/write` 触发执行，结果通过 Arrow C Data Interface 交换。`show()` 只显示 `IMAGE` 摘要；notebook 缩略图需显式编码。
+
+链式 DataFrame API 尚未纳入本文，但未来会直接构造 `VqlLogicalPlan`。因此计划及其不变量不能依赖 SQL parser 才能产生，这是 G1 的当前约束。
+
+### 11.3 CLI
 
 | 命令 | 契约 |
 |---|---|
 | `vql shell` | 多行 SQL、历史、目录查看；无界 SELECT 持续打印；Ctrl-C 取消当前查询 |
-| `vql run job.sql [--server endpoint]` | 未指定 server 时顺序执行脚本，持续查询以前台作业运行；指定 server（v0.3）时通过 Flight SQL 执行，普通无界语句仍保持客户端附着。附着执行时 Ctrl-C 先优雅停止，第二次立即取消 |
-| `vql submit job.sql [--name <job>]`（v0.3） | 将脚本中的 DDL 逐条执行，并把其中唯一一条无界 Sink 语句包装为 `SUBMIT QUERY` 提交为持久作业；作业名默认取文件名，源文件不改写 |
+| `vql run job.sql` | 顺序执行脚本，持续查询以前台作业运行；Ctrl-C 先优雅停止，第二次立即取消 |
 | `vql explain query.sql` | 输出与 SQL `EXPLAIN` 相同的计划 |
 
-CLI 的可执行文件名是 `vql`，与守护进程 `vqld` 形成命名配对；pip 包名和 Python import 名保持 `visionql`。
+CLI 的可执行文件名是 `vql`；pip 包名和 Python import 名保持 `visionql`。
 
-v0.1 CLI 遇到 Python UDF 时明确提示改用 Python 宿主。它不能为了看似统一而把 Python 解释器嵌入引擎二进制。
-
-v0.3 服务态的 Flight SQL 契约、系统查询与持久作业见 [proposal 0005](./proposals/0005-vqld-service.md)；Workbench 见 [proposal 0006](./proposals/0006-workbench.md)。
+CLI 遇到 Python UDF 时提示改用 Python 宿主，不嵌入 Python 解释器。
 
 ---
 
-## 11. 资源、性能与可观测性
+## 12. 资源、性能与可观测性
 
-### 11.1 统一资源预算
+### 12.1 统一资源预算
 
 查询配置一个总内存预算，以下资源都通过 DataFusion `MemoryPool` reservation 或 VisionQL 的等价外部 reservation 记账：
 
@@ -655,14 +764,13 @@ v0.3 服务态的 Flight SQL 契约、系统查询与持久作业见 [proposal 0
 | Arrow batch 与算子状态 | 使用 DataFusion 内存管理；不支持 spill 的自定义状态明确失败 |
 | 对象存储预取和压缩字节 | 收缩并发与 read-ahead |
 | 解码帧仓 | 批处理背压；RTSP 只在入 epoch 前丢最旧采样帧 |
-| live 媒体预览 ring（v0.3，[proposal 0005](./proposals/0005-vqld-service.md)） | 按总字节数和 TTL 淘汰最旧 GOP；不影响查询数据语义 |
 | 张量缓冲与推理队列 | 有界队列，提交方 await |
-| TUMBLE 状态 | v0.2 不 spill；超限失败并提示降低 group key 基数或缩短窗口 |
+| TUMBLE 状态 | 不 spill；超限失败并提示降低 group key 基数或缩短窗口 |
 | Sink 缓冲 | 背压；超时后按查询容错策略失败 |
 
 显存单独计量。模型加载前依据权重、workspace 与 batch 上限做保守预估，加载后用实际值修正指标。
 
-### 11.2 MVP 性能口径
+### 12.2 性能口径
 
 PRD 的 8 路 1080p@5fps 基线要区分四个量：
 
@@ -673,58 +781,45 @@ PRD 的 8 路 1080p@5fps 基线要区分四个量：
 | 采样输出率 | 8 × 5fps = 40fps | 进入帧仓、前处理与查询的数据 |
 | 推理率 | 约 40fps，扣除查询过滤 | GPU 主要工作量 |
 
-因此不能用 40fps 代替解码容量。性能验收必须分别报告网络、解码、采样、推理、窗口延迟和丢帧率，并注明模型、硬件、codec、GOP 和 watermark 配置。
+40fps 不能代表解码容量。验收需分别报告网络、解码、采样、推理、窗口延迟和丢帧率，并注明模型、硬件、codec、GOP 与 watermark 配置。
 
-### 11.3 指标
+### 12.3 指标
 
 至少暴露：
 
 - 查询：输入/输出行、epoch 延迟、端到端延迟、错误行、迟到行、状态内存、Sink 重试；
 - 媒体：输入码率、解码 fps、采样 fps、丢帧数及原因、断流次数和缺口时长；
 - 模型：队列深度、等待时间、batch 分布、推理次数、P50/P95、显存；
-- 恢复（v0.3）：检查点耗时/大小、最后成功 epoch、恢复次数；
 - 资源：各 reservation 当前值和峰值。
 
-库态通过执行结果、前台输出和 tracing 日志提供指标；v0.3 服务态增加 Prometheus 指标端点，按 `query_id` 等标签区分查询级指标，供 Workbench 成本面板直接抓取，无需部署 Prometheus server。日志必须包含 `query_id`、`epoch_id`、对象修订与稳定错误码。
+库态通过执行结果、前台输出和 tracing 日志提供指标；日志包含 `query_id`、`epoch_id`、对象 revision 和稳定错误码。
 
-### 11.4 错误分类
+### 12.4 错误分类
 
 | 类别 | 示例 | 默认行为 |
 |---|---|---|
 | 行级数据错误 | 单帧损坏、单次推理失败 | 结果 NULL，计数并继续 |
 | 查询语义错误 | 类型不匹配、无界排序、未支持功能 | 规划失败，不启动运行时 |
 | 资源错误 | 内存/显存不足、状态超限 | 查询失败，释放全部租约 |
-| 外部系统错误 | RTSP 断流、Kafka/Lance 不可达 | 按连接器策略重试；超过上限失败或保持 Disconnected |
+| 外部系统错误 | RTSP 断流、Kafka 不可达 | 按连接器策略重试；超过上限失败或保持 Disconnected |
 | 引擎缺陷 | 不变量破坏、arena 越界 | 立即失败并记录诊断，不降级为 NULL |
 
-稳定错误码与自然语言信息分离。Workbench 根据错误码决定界面状态，不匹配错误文本。
+稳定错误码与自然语言信息分离。客户端根据错误码决定界面状态，不匹配错误文本。
 
 ---
 
-## 12. 安全与隐私
+## 13. 安全与隐私
 
-### 12.1 v0.1 库态
-
-- `vql-kernel` 默认不监听网络；服务端口只随 v0.3 的 `vqld` 出现；
+- `vql-kernel` 默认不监听网络端口；
 - 除用户声明的 endpoint 模型、对象存储、Kafka、RTSP 和模型下载外，不产生出站连接；
 - 模型权重固定 revision 和哈希，加载时复核；
 - 目录、日志和 `SHOW CREATE` 都必须脱敏 URI 与 secret 引用；
-- 所有网络读取都经过 URL scheme 与目标策略，普通查询不能临时指定任意 URL。
-
-### 12.2 服务态 v0.3
-
-- Flight SQL 使用 TLS；认证身份映射到 Catalog principal；
-- 查询规划和媒体解引用都检查表/流级权限，不能只在目录列表处隐藏对象；
-- `FRAME_AT` 只接受指向已登记来源的 `locator`；服务态默认阻止云 metadata、link-local 和配置未授权的目标；
-- Workbench 取得的 `IMAGE.uri` 只是脱敏展示值；`IMAGE.locator` 才是可重新授权的媒体定位符，两者都不包含底层凭证；
-- Python UDF 运行在进程外 worker，设置超时、内存限制和依赖环境；它不是多租户安全沙箱；
-- 审计日志未排期（属于 Roadmap“规模化”方向），但 v0.3 已在执行上下文保留 principal、query_id 和对象修订字段，避免以后无法补齐来源。
-
-服务态协议层的具体机制（session token、locator 解引用流程）见 [proposal 0005](./proposals/0005-vqld-service.md)。
+- 所有网络读取都经过 URL scheme 与目标策略，普通查询不能临时指定任意 URL；
+- 执行上下文保留 query_id 和对象 revision。
 
 ---
 
-## 13. 代码组织
+## 14. 代码组织
 
 ```text
 visionql/
@@ -746,12 +841,12 @@ visionql/
 ├── vql-server/                   # Cargo package（v0.3 交付）
 │   └── src/
 │       ├── lib.rs                # vql_server crate
-│       └── bin/vqld.rs      # 对外守护进程
-├── vql-workbench/                # 独立 workspace 和 Web 项目（proposal 0006）
+│       └── bin/vqld.rs           # 对外守护进程
+├── vql-workbench/                # 独立 workspace 和 Web 项目（proposal 0002）
 └── docs/
 ```
 
-根 `Cargo.toml` 显式列出 `vql-kernel`、`vql-cli`、`vql-python` 和 `vql-server`，并通过 `exclude = ["vql-workbench"]` 排除独立子项目，不能使用会把它纳入的宽泛 glob。`vql-workbench` 拥有自己的 workspace、前端工具链和 CI，不参加根 workspace 的默认构建。
+根 `Cargo.toml` 显式列出四个引擎 crate，并以 `exclude = ["vql-workbench"]` 排除独立子项目，不使用宽泛 glob。`vql-workbench` 有独立 workspace、工具链和 CI。
 
 crate 依赖只有三条：
 
@@ -761,176 +856,47 @@ vql-python ──┼──→ vql-kernel
 vql-server ──┘
 ```
 
-`types`、`catalog`、`sql`、`planner`、`execution`、`media`、`models` 和 `connectors` 在 v0.1 都是 `vql-kernel` 的内部 module，而不是独立 crate。默认使用 `pub(crate)`；只有宿主真正需要的 `Engine`、`Session`、配置、结果和注入 trait 进入公共 API。只有出现独立消费者或发布周期、无法用 feature 解决的原生依赖冲突，或有实测编译隔离收益时，才通过 ADR 将 module 提取为 crate。
+v0.1 将 `types`、`catalog`、`sql`、`planner`、`execution`、`media`、`models` 和 `connectors` 保留为 `vql-kernel` 内部 module，默认 `pub(crate)`。公共 API 只暴露宿主所需的 `Engine`、`Session`、配置、结果和注入 trait。仅在出现独立消费者/发布周期、无法由 feature 解决的原生依赖冲突或实测编译收益时，才通过 ADR 提取 crate。
 
 边界规则：
 
 - `vql-kernel` 不能依赖 PyO3、clap 或 Flight；
-- `vql-cli` 负责 clap、终端和信号；`vql-python` 负责 PyO3 与 Python UDF host；`vql-server`（v0.3）负责 Flight SQL、TLS/认证、配置、进程生命周期和作业恢复；
+- `vql-cli` 负责 clap、终端和信号；`vql-python` 负责 PyO3 与 Python UDF host；`vql-server`（v0.3）负责 Flight SQL、TLS/认证、配置、进程生命周期和恢复；
 - `vql-server` 是 Cargo package 名称，library crate 标识符为 `vql_server`，对外 binary target 和守护进程命令保持 `vqld`；
-- planner module 不能调用 execution module；batch/stream 物理编译入口属于 execution，media、models 与 connectors 通过窄 trait 由内核装配，禁止形成反向调用；
+- planner 不调用 execution；物理编译入口属于 execution，media、models 和 connectors 通过窄 trait 装配，不反向依赖；
 - `vql-workbench/server` 不能直接依赖 `vql-kernel`、`vql-server` 或其他根 workspace crate，只能作为 Flight SQL 客户端；
-- DataFusion 破坏性升级集中在 planner 与 execution module 的适配层，禁止其类型扩散到公开 Python、CLI 或 Flight API。
-- 根 workspace 锁定一组经过验证的 DataFusion、Arrow 与 sqlparser 版本；文末 `latest` 文档链接只用于阅读，不是依赖声明。升级必须运行物理计划重新实例化、窗口 state codec、Arrow wire schema 和 Flight 协议回归套件后才能更新 lockfile。
+- DataFusion 破坏性升级集中在 planner 与 execution module 的适配层，禁止其类型扩散到公开 Python、CLI 或 Flight API；
+- 根 workspace 锁定经验证的 DataFusion、Arrow 和 sqlparser 版本；文末 `latest` 链接不是依赖声明。升级通过物理计划实例化、窗口 state codec、Arrow wire schema 和 Flight 协议回归后才能更新 lockfile。
 
 ---
 
-## 14. 测试与验收
-
-### 14.1 分层测试
-
-| 层 | 必测内容 |
-|---|---|
-| Parser / Catalog | 全部新增语法、脚本切分、参数归属、对象修订、事务回滚、未支持功能错误；Function 稳定 model ID 解析、旧计划固定 revision、兼容/不兼容 `ALTER MODEL` |
-| 逻辑计划 | 边界性与 definition snapshot 正确；`VqlLogicalPlan` 可绕过 SQL 解析器程序化构造（§10.2 对 v0.3 DataFrame 的前提）|
-| streamability | 每个允许节点正例；无界聚合、排序、DISTINCT、JOIN 等逐项负例 |
-| epoch 控制 | 整个批次被 Filter 丢弃后仍推进水位线和释放 FrameArena；异步推理完成前不得推进 watermark；连续两个不同 epoch 在含 Repartition 的计划中不串数据/metrics；取消后下一实例无残留任务 |
-| TUMBLE（proposal 0002） | 边界、乱序、迟到、NULL、空窗口、批流同语义；聚合白名单逐项差分；拒绝 IMAGE/UDAF；state codec 非破坏性快照、restore round-trip、版本不兼容与内存记账 |
-| 媒体（proposal 0001 / 0002） | 固定图片/视频、VFR、不同 GOP、损坏帧、采样 PTS；RTSP source generation、capture/ingest 选择、进程内时钟回拨、恢复后时钟落后 watermark，以及断流后的真实前向 gap |
-| 推理（proposal 0003） | 固定小模型数值回归、processor、semantic fingerprint、deterministic/volatile 去重边界、batching 公平性、取消、显存不足 |
-| Sink（proposal 0004 / 0007） | schema 校验、取消、背压、Kafka JSON IMAGE 规则；滚动文件原子性随 v0.4 Parquet |
-| 协议 v0.3（proposal 0005） | 全部约定 metadata RPC、statement/prepared transport 映射、`statement_info_v1`、FlightInfo query ID、附着式无界状态流、断连取消、逐 RPC session 隔离、Protobuf 错误 envelope、IMAGE storage schema/version、TLS/认证/权限、`SUBMIT QUERY`、查询详情/依赖/控制、IMAGE 三种模式、locator 篡改/撤权/过期、`FRAME_AT`、能力协商 |
-| 恢复 v0.3（proposal 0005） | 在 Sink ack 与检查点持久化前后逐点 kill；验证规范化窗口状态不丢、已确认输出只可能重复，并覆盖 codec/version 不兼容 |
-
-### 14.2 PRD 验收场景
-
-**场景 A：首次使用无需外部服务（v0.1）。**
-
-1. 本地图片目录建表；
-2. Python 批量 UDF 过滤模糊图片；
-3. 用 `detect` 筛选出包含指定目标的图片，结果直接显示在 Python 会话中（进程内 UDF 要求引擎与用户代码同进程，见 §10.3）；
-4. 从 `pip install` 到第一个结果不超过 5 分钟，全程不启动任何外部服务。
-
-**场景 B：批流一体（v0.2）。**
-
-1. 本地视频目录建表（`fps = 5`），用库态 shell 执行 PRD 3.2 的“每分钟人数”批量回算；
-2. 用固定视频通过本地 RTSP mock 提供流源，同一条查询逻辑切换到流表，以 `vql run` 前台运行并写入 Kafka；
-3. 使用相同模型、时间轴和采样率，对齐窗口边界后逐窗口比较批流结果一致；
-4. 调试阶段以 Console Sink 查看 `UNNEST` 展开的检测明细；同时验证断流指标和 Ctrl-C 取消行为；
-5. 查询脚本不超过 PRD 的 30 行口径。
-
-### 14.3 性能门槛
-
-- 固定硬件、codec、模型和数据集运行 8 路基准至少 30 分钟；
-- 报告源解码 fps、采样 fps、推理 fps、GPU 利用率、P95 窗口输出延迟、丢帧和内存峰值；
-- 批基准分别覆盖元数据扫描、全帧推理和稀疏采样；
-- 元数据和已物化结果的交互查询在约定的本地基准数据集与缓存口径下达到 P95 < 1s，并同时报告冷缓存结果；
-- 批扫描应让实际瓶颈资源达到稳定高利用率；如果瓶颈是 GPU 而不是解码器，报告必须如实区分，不能为了满足措辞而宣称“解码打满”；
-- CI 跟踪 micro-benchmark；端到端 GPU 基准在固定 runner 上运行，回归阈值单独配置。
-
----
-
-## 15. 演进接口
-
-已排期能力的设计见对应 proposal（索引见 [proposals/README.md](./proposals/README.md)）；未排期方向只固定扩展点，不提前实现：
-
-| 后续能力 | 已固定的扩展点 | 不提前实现的内容 |
-|---|---|---|
-| 服务态 v0.3（[proposal 0005](./proposals/0005-vqld-service.md)） | 无进程假设的内核、定义快照、取消 token、检查点接口 | v0.1 不实现 Flight SQL、持久 QueryJob、恢复、TLS、认证或权限 |
-| 进程外 Python UDF worker v0.3 | Arrow 批 ABI 与可取消 UDF host | v0.1 只有 Python 宿主进程内执行 |
-| Workbench v0.3（[proposal 0006](./proposals/0006-workbench.md)） | Flight SQL、IMAGE wire schema、`FRAME_AT`、系统查询 schema、Prometheus 指标端点 | 引擎不提供私有 Workbench API |
-| 跨模态检索 v0.4（[proposal 0008](./proposals/0008-cross-modal-retrieval.md)） | `Inference` 节点、`VECTOR` 类型槽位、`L2_DISTANCE + LIMIT` 规范形式、Catalog index 对象接口 | v0.4 前拒绝注册 EMBEDDING 模型与向量索引 |
-| Kafka 帧源 / 至少一次（未排期） | `SourceProgress`、epoch、检查点协议 | 不为不可重放源冒充可重放恢复 |
-| `TRACK` / `HOP` / `SESSION`（未排期） | 新 StatefulOp 与 streamability 能力位 | parser 后直接拒绝 |
-| 物化与跨查询复用（未排期） | `Inference` 节点、模型内容哈希、媒体引用 | 不做共享缓存 |
-| 模型级联 / 自动采样 / ROI（未排期） | model type、成本画像、扫描采样与 time range、`image_access` | 只执行用户显式采样，不自动替换用户模型 |
-| MCP 服务器 / 场景包（未排期） | 作为受权限约束的独立 Flight SQL 客户端适配器 | 不把 Agent 协议放入引擎内核 |
-| 精确一次（未排期） | checkpoint 与 sink delivery sequence | 没有事务 Sink 前不声明精确一次 |
-| 多租户、资源组、审计与 WASM UDF（未排期） | definition snapshot、principal、query/resource 指标、Arrow 批 ABI | 不接受 `resource_group`，不声称有审计能力 |
-| 集群 / 边缘（未排期） | 可序列化逻辑计划和标准 Arrow 数据 | 不预埋分布式调度代码 |
-
-新增实现必须能回答“只增加哪个 trait、注册项或逻辑节点”。如果为了一个新模型需要改 parser、stream coordinator 和多个无关 connector，说明边界设计失效。
-
----
-
-## 16. 设计决策摘要
+## 15. 设计决策摘要
 
 | ADR | 决策 | 主要理由 |
 |---|---|---|
-| ADR-001 | Rust + Arrow + DataFusion | 满足嵌入、列式执行、Python/Flight 互操作与公开扩展点要求 |
+| ADR-001 | Rust + Arrow + DataFusion | 满足嵌入、列式执行、Python 互操作与公开扩展点要求 |
 | ADR-002 | 统一逻辑计划，批与流分别物理编译 | “批流一体”保持用户语义，同时不把流控制面强塞给只处理 RecordBatch 的原生算子 |
 | ADR-003 | 流运行时使用 epoch + 有界 DataFusion 片段 | Filter 不会吞掉水位线和源进度；异步推理与资源释放有明确 barrier |
 | ADR-004 | `IMAGE` 使用标准 Arrow storage + 引用/帧仓/编码三态 | 减少像素复制，并保持 IPC 和未知客户端可读 |
 | ADR-005 | FrameArena 按 epoch 整体租约释放 | 生命周期独立于存活行，避免 Filter 导致引用泄漏 |
 | ADR-006 | 模型函数提取为显式 `Inference` 节点 | 支持异步 batching、去重、未来级联/缓存和成本观测 |
 | ADR-007 | 查询固定目录定义修订 | 防止运行中 DDL 静默改变结果，支持审计和恢复 |
-| ADR-008 | 投递语义服从源可重放性：RTSP 尽力而为，v0.3 检查点只保证窗口状态不丢、已确认输出可能重复 | 不作超出源物理能力的承诺；可重放源的重放式恢复留待排期 |
+| ADR-008 | 投递语义服从源可重放性：RTSP 不可重放，只承诺尽力而为 | 不作超出源物理能力的承诺 |
 | ADR-009 | SQLite 目录，运行时字节不入目录 | 零外部依赖，同时保留事务与迁移能力 |
-| ADR-010 | Workbench 只使用 Flight SQL 和公开 SQL（[proposal 0006](./proposals/0006-workbench.md)） | 客户端解耦，并持续验证公开协议完整性 |
 | ADR-011 | epoch 复用计划模板，但每次实例化新的物理执行树 | 新 TaskContext 不能替代算子 reset；避免 channel、动态状态和取消任务跨 epoch 泄漏 |
 | ADR-012 | TUMBLE 使用白名单 `WindowStateCodec` 和规范化 Arrow 状态 | DataFusion accumulator 快照可能消耗内部状态，恢复 ABI 必须由 VisionQL 版本化 |
 | ADR-013 | Function 绑定稳定 model ID；计划固定解析后的 Model revision；媒体使用带 source revision 的 locator | 同时满足新查询跟随升级、运行中可复现，以及媒体重新授权 |
-| ADR-014 | Workbench 依赖版本化的 Flight/SQL 公共契约（[proposal 0005](./proposals/0005-vqld-service.md)） | metadata、statement 分类、错误、作业详情和媒体点查都必须可由独立客户端实现 |
+
+ADR-010 与 ADR-014 的编号已分配给尚未进入本文范围的公开协议决策（见 [proposals/](./proposals/README.md)），编号不复用。
 
 ---
 
-## 17. 开放技术问题与决策门槛
+## 16. 开放问题
 
 | 问题 | 决策前需要的证据 | 最迟时间 |
 |---|---|---|
-| FFmpeg wheel/二进制的 LGPL 分发方式 | 动态/静态构建 PoC、产物大小和法务意见 | v0.1 发布前 |
-| DataFusion 升级成本 | 第一次升级的适配 diff 和测试结果 | v0.1 beta 前 |
-| epoch 周期默认值 | 8 路流下吞吐、P95 延迟、batch 分布与取消时延 | v0.2 性能调优阶段 |
-
-子功能相关的开放问题随对应 proposal 维护：稀疏采样成本（proposal 0001）、RTCP capture time 可靠性（proposal 0002）、thumbnail/inline 上限与 locator TTL（proposal 0005）、Lance 流式追加与压实（proposal 0008）。
-
----
-
-## 附录 A：PRD 追踪矩阵
-
-### A.1 v0.1 能力（批）
-
-| PRD 能力 | 设计位置 |
-|---|---|
-| IMAGE / VIDEO / BOX2D | §6 |
-| 图片/视频目录表（建表 fps 帧展开）、`UNNEST` | §7.5、§8.1、proposal 0001 |
-| MODEL / FUNCTION（OBJECT_DETECTION）、库态 Python UDF | §7.3～§7.4、proposal 0003 |
-| Console Sink | §8.2 |
-| 库态、shell、Python 结果接口、`vql run` 脚本执行 | §10 |
-| 推理提取、列裁剪、时间谓词下推、帧采样下推 | §9 |
-| 验收场景 A | §14.2 |
-
-### A.2 v0.2 能力（流）
-
-| PRD 能力 | 设计位置 |
-|---|---|
-| RTSP、TUMBLE、尽力而为 | §5、proposal 0002 |
-| 无界查询白名单 | §4.4 |
-| Kafka Sink | §8.2、proposal 0004 |
-| 持续查询前台附着运行 | §10.3 |
-| 验收场景 B | §14.2 |
-
-### A.3 v0.3 / v0.4 接口
-
-| PRD 能力 | 设计位置 |
-|---|---|
-| v0.3：`vqld`、Flight SQL、TLS/认证/权限 | §10.1、§12.2、proposal 0005 |
-| v0.3：`SUBMIT QUERY` 持久作业、检查点与恢复 | proposal 0005 |
-| v0.3：进程外 Python UDF worker、Prometheus 指标端点 | §7.4、§11.3 |
-| v0.3：Workbench 媒体协议（thumbnail / `FRAME_AT`） | §6.2、proposal 0005 |
-| v0.4：EMBEDDING、`VECTOR`、`<->` TopK、Lance、HNSW | §6.1、§7.3、proposal 0008 |
-
-### A.4 NFR
-
-| PRD NFR | 设计位置 |
-|---|---|
-| 8 路性能基线 | §11.2、§14.3 |
-| RTSP 尽力而为、v0.3 持久作业恢复 | §5、proposal 0002、proposal 0005 |
-| 行级 NULL 与严格模式 | §6.4、§11.4 |
-| TLS、权限、模型防篡改、数据不出域 | §12、proposal 0003 |
-| v1.0 前不作兼容性承诺 | §4.3、§7.2、proposal 0005 |
-
-### A.5 Workbench 引擎依赖
-
-| Workbench 能力 | 引擎契约 |
-|---|---|
-| SQL 与脚本 | Flight SQL statement/prepared statement，proposal 0005 |
-| 多模态结果 | `visionql.image`、`image_mode`，§6.2、proposal 0005 |
-| 原图点查 | locator 重新授权后的 `FRAME_AT`，§6.2、proposal 0005 |
-| 实时预览与取消 | 无界 `DoGet` 与 cancellation，proposal 0005 |
-| 目录与补全 | Flight SQL metadata + `SHOW` / `DESCRIBE`，proposal 0005 |
-| 运维 | `SUBMIT QUERY`、`SHOW/DESCRIBE QUERY`、`SHOW QUERY DEPENDENCIES` 与作业控制，proposal 0005 |
-| 成本实测 | Prometheus 指标端点（按 `query_id` 标签），§11.3 |
+| 稀疏视频采样是否真的降低解码成本（§8.2） | 不同 GOP、VFR、本地盘与 S3 range-read 基准 | 批处理性能承诺前 |
+| RTCP capture time 的可靠性（§8.3） | 设计伙伴摄像头样本、漂移和回退比例 | 流验收前 |
 
 ---
 
@@ -940,7 +906,6 @@ vql-server ──┘
 - [Apache DataFusion：ExecutionPlan API](https://docs.rs/datafusion/latest/datafusion/physical_plan/trait.ExecutionPlan.html)
 - [Apache DataFusion：无界数据源](https://datafusion.apache.org/user-guide/sql/ddl.html#example-unbounded-data-sources)
 - [Apache Arrow：扩展类型与列式格式](https://arrow.apache.org/docs/format/Columnar.html#extension-types)
-- [Apache Arrow Flight SQL 规范](https://arrow.apache.org/docs/format/FlightSql.html)
 
 ---
 
@@ -948,4 +913,4 @@ vql-server ──┘
 
 | 日期 | 变更 |
 |---|---|
-| 2026-08-06 | v1.0.0：由引擎设计 engine.md v0.5.0 与 workbench.md v0.3.0 重组而来；子功能设计拆分至 [proposals/](./proposals/README.md) |
+| 2026-08-07 | 初始系统设计 |
