@@ -1,13 +1,13 @@
-# 0006: Workbench（Web 工作台）
+# 0002: Workbench（Web 工作台）
 
-> 本文根据 [VisionQL PRD](../prd.md) 3.8、[系统设计](../design.md)和 [proposal 0005](./0005-vqld-service.md) 设计 Workbench。Workbench 是与 `vqld` 服务态在 v0.3 同期交付的多模态 SQL 客户端，负责查询、结果预览和持续查询运维，不拥有业务数据，也不依赖引擎私有接口。
+> 本文根据 [VisionQL PRD](../prd.md) 3.8、[系统设计](../design.md)和 [proposal 0001](./0001-vqld-service.md) 设计 Workbench。Workbench 是与 `vqld` 服务态在 v0.3 同期交付的多模态 SQL 客户端，负责查询、结果预览和持续查询运维，不拥有业务数据，也不依赖引擎私有接口。
 
-- **编号**：0006
+- **编号**：0002
 - **状态**：Draft
 - **目标版本**：v0.3
 - **对应 PRD**：[prd.md](../prd.md) §3.8
-- **依赖设计**：[design.md](../design.md) §6.2（IMAGE 三态）、§10（产品形态）、§11.3（指标）、§12.2（服务态安全）
-- **关联 proposal**：0005（vqld 服务态与 Flight SQL 契约）
+- **依赖设计**：[design.md](../design.md) §6.2（IMAGE 三态）、§11（产品形态）、§12.3（指标）；服务态契约与安全边界见 [proposal 0001](./0001-vqld-service.md)
+- **关联 proposal**：0001（vqld 服务态与 Flight SQL 契约）
 - **最后更新**：2026-08-06
 
 ---
@@ -278,7 +278,7 @@ sequenceDiagram
 
 ### 4.5 系统 SQL 输出
 
-Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象依赖使用 `SHOW QUERY DEPENDENCIES <id>`，并只依赖 [proposal 0005](./0005-vqld-service.md) 固定的系统查询最小列。Workbench 对状态和错误码使用枚举映射：
+Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象依赖使用 `SHOW QUERY DEPENDENCIES <id>`，并只依赖 [proposal 0001](./0001-vqld-service.md) 固定的系统查询最小列。Workbench 对状态和错误码使用枚举映射：
 
 - 未知状态按原字符串显示，不把页面渲染失败；
 - 指标单位以引擎 Prometheus 指标名后缀与 HELP 元数据为准，BFF 不自行猜测；
@@ -287,7 +287,7 @@ Jobs 列表使用 `SHOW QUERIES`，详情使用 `DESCRIBE QUERY <id>`，对象�
 
 ### 4.6 结构化错误
 
-引擎用标准 gRPC status 表示错误大类，并在 `visionql-error-bin` trailing metadata 中按 [proposal 0005](./0005-vqld-service.md) 的 Protobuf `VisionqlErrorV1` 返回版本化字段：
+引擎用标准 gRPC status 表示错误大类，并在 `visionql-error-bin` trailing metadata 中按 [proposal 0001](./0001-vqld-service.md) 的 Protobuf `VisionqlErrorV1` 返回版本化字段：
 
 ```text
 version, code, message, hint,

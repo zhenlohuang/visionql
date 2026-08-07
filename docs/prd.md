@@ -434,7 +434,7 @@ Workbench 是 v0.3 与 `vqld` 服务态一同交付的 Web 图形界面，也是
 2. **保持无状态**：Workbench 不持久化业务数据。认证由引擎处理，保存的查询放在浏览器本地，因此 Workbench 进程可以随时重启或扩容。
 3. **独立发布**：Workbench 有自己的版本号和发布节奏，引擎不依赖 Workbench。两者的兼容范围跟随 SQL 方言和 Flight SQL 协议的稳定性承诺（3.7）。
 
-技术设计见 [Workbench 设计](./proposals/0006-workbench.md)。
+技术设计见 [Workbench 设计](./proposals/0002-workbench.md)。
 
 ---
 
@@ -509,7 +509,7 @@ VisionQL 通过开源引擎（Apache-2.0）建立用户和生态：引擎内核�
 1. **首个重点场景**：选择安防/园区，还是内容审核？前者更依赖私有化部署和渠道，但付费意愿较强；后者更偏云原生，决策链较短，数据量更大。这个选择会影响首批连接器和场景包的投入方向。
 2. **SQL 方言兼容范围**：类型名、函数命名和错误码需要在多大程度上遵循 PostgreSQL 习惯？这会直接影响现有生态工具的兼容成本。
 3. **置信度在聚合中的语义**：是否需要提供区间估计等专用原语，还是长期保持由用户在查询中明确指定阈值？
-4. **客户端协议中的 `IMAGE` 传输策略**：方向已确定——结果默认返回缩略图 + 引用，不内联原图字节；引用同时包含只展示的脱敏 `uri` 和绑定数据版本的不透明 `locator`，原图通过 Flight 原生的 ticket/DoGet 以 locator 解引用获取，解引用时重新授权（传输层机制，不占用 SQL 语法）。locator 只对持久数据有效：文件表和落盘表可随时解引用，live 流的瞬时帧不承诺可回取，需要回查的行先经事件帧留存落盘（3.3.6）。v0.3 Flight schema 冻结前仍需用 Workbench、Python 和 BI 客户端确认缩略图尺寸、内联字节上限与 locator TTL，详见 [Workbench 设计](./proposals/0006-workbench.md) §3.2。
+4. **客户端协议中的 `IMAGE` 传输策略**：方向已确定——结果默认返回缩略图 + 引用，不内联原图字节；引用同时包含只展示的脱敏 `uri` 和绑定数据版本的不透明 `locator`，原图通过 Flight 原生的 ticket/DoGet 以 locator 解引用获取，解引用时重新授权（传输层机制，不占用 SQL 语法）。locator 只对持久数据有效：文件表和落盘表可随时解引用，live 流的瞬时帧不承诺可回取，需要回查的行先经事件帧留存落盘（3.3.6）。v0.3 Flight schema 冻结前仍需用 Workbench、Python 和 BI 客户端确认缩略图尺寸、内联字节上限与 locator TTL，详见 [Workbench 设计](./proposals/0002-workbench.md) §3.2。
 
 ---
 

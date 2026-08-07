@@ -1,11 +1,11 @@
-# 0005: vqld 服务态（Flight SQL 契约、持久作业与恢复）
+# 0001: vqld 服务态（Flight SQL 契约、持久作业与恢复）
 
-- **编号**：0005
+- **编号**：0001
 - **状态**：Draft
 - **目标版本**：v0.3
 - **对应 PRD**：[prd.md](../prd.md) §3.5（服务态）、§3.6、§3.7
-- **依赖设计**：[design.md](../design.md) §5（epoch 模型）、§6.2（IMAGE 三态与 locator）、§10（无进程假设内核）、§12.2（服务态安全）
-- **关联 proposal**：0002（检查点建立在其规范化窗口状态之上）、0006（Workbench 是本契约的首个客户端）
+- **依赖设计**：[design.md](../design.md) §5（epoch 模型与窗口状态）、§6.2（IMAGE 三态与 locator）、§11.1（无进程假设内核）、§13（安全与隐私）
+- **关联 proposal**：0002（Workbench 是本契约的首个客户端）
 - **最后更新**：2026-08-06
 
 ## 摘要
@@ -14,7 +14,7 @@ v0.3「服务态部署与作业管理」feature：`vql-server` 构建的 `vqld` 
 
 ## 动机与范围
 
-库态内核（v0.1）不监听端口；v0.3 由 `vqld` 承担网络、TLS/认证、持久作业管理与恢复。所有客户端（CLI `--server`、Workbench、ADBC/JDBC）只通过本文契约接入，引擎不提供私有管理 API（design.md §16 ADR-010 / ADR-014）。服务态安全边界见 design.md §12.2。
+库态内核（v0.1）不监听端口；v0.3 由 `vqld` 承担网络、TLS/认证、持久作业管理与恢复。所有客户端（CLI `--server`、Workbench、ADBC/JDBC）只通过本文契约接入，引擎不提供私有管理 API：客户端解耦和公开协议完整性都依赖这一条，服务态的任何能力都必须可由独立客户端按本文实现（对应 design.md 预留的 ADR-010 / ADR-014 编号）。服务态安全边界见本文「安全边界」。
 
 ## 详细设计
 
@@ -114,7 +114,7 @@ SELECT TO_JPEG(FRAME_AT($1, $2), 90);
 -- $1 = IMAGE.locator, $2 = 目标 pts_ms
 ```
 
-`FRAME_AT` 不接受展示 URI，只解析版本化 locator，并按其中的 source revision 对当前 principal 重新授权和执行范围校验。文件和对象存储引用可以重新读取；live 流只在服务端短期环形缓存仍有该帧时成功（缓存行为见 design.md §6.2）。详细客户端行为见 [proposal 0006](./0006-workbench.md)。
+`FRAME_AT(locator STRING [, pts_ms BIGINT]) -> IMAGE` 是本 feature 引入的内置函数：含 I/O，规划为 `MediaFetchExec`，locator 已包含当前帧 PTS，显式第二参数只用于在同一已授权视频对象内选择其他时间点。它不接受展示 URI，只解析版本化 locator，并按其中的 source revision 对当前 principal 重新授权和执行范围校验。文件和对象存储引用可以重新读取（遵守 design.md §6.2 的 locator 不变量）；live RTSP 帧本身没有可重放引用，只在服务端短期环形缓存仍有该帧时成功。该缓存按总字节数和 TTL 淘汰最旧 GOP，纳入服务进程资源预算，且不影响查询数据语义。详细客户端行为见 [proposal 0002](./0002-workbench.md)。
 
 ### 系统查询的最小 schema
 
@@ -150,7 +150,7 @@ STOP QUERY '<query_id>';
 
 `query_id` 是服务端生成的 UUID 字符串；持久作业名称由 `SUBMIT QUERY` 显式提供，在 owner 的非终态作业中唯一。附着查询的 `name` 为 NULL、`lifecycle=attached`；持久作业为 `lifecycle=persistent`。名称只用于展示和筛选，不能代替 ID 执行状态变更。
 
-查询级指标不提供系统 SQL 通道：v0.3 经 Prometheus 指标端点按 `query_id` 等标签暴露（design.md §11.3），与 PRD 3.8 的“成本面板读取 Prometheus 指标端点”保持一致。指标名在 v1.0 前仍可演进，但必须遵循 Prometheus 命名与单位后缀约定，客户端不通过字符串猜单位。
+查询级指标不提供系统 SQL 通道：v0.3 在 design.md §12.3 的指标之上增加 Prometheus 指标端点，按 `query_id` 等标签暴露（另含检查点耗时/大小、最后成功 epoch、恢复次数），与 PRD 3.8 的“成本面板读取 Prometheus 指标端点”保持一致。指标名在 v1.0 前仍可演进，但必须遵循 Prometheus 命名与单位后缀约定，客户端不通过字符串猜单位。
 
 ### 持久作业检查点与恢复
 
@@ -162,11 +162,11 @@ v0.3 为 `SUBMIT QUERY` 提交的持久作业提供检查点与崩溃自愈。RT
 2. 将输出写入 Sink，等待所有写入确认；
 3. 原子持久化新的检查点，其中包含逻辑计划哈希、目录定义快照、水位线、规范化窗口状态、各 `WindowStateCodec` 版本和 Sink delivery sequence。
 
-检查点直接写入 [proposal 0002](./0002-video-stream-processing.md) 定义的规范化 Arrow state，并记录 operator ID、state schema fingerprint、codec version 和 engine state-format version；checkpoint 不调用活动 accumulator 的 `state()`。恢复时这些字段必须与定义快照匹配；不兼容时不能勉强反序列化，作业进入 `state=FAILED, error_code=RECOVERY_INCOMPATIBLE`。
+检查点直接写入 design.md §5.4 定义的规范化 Arrow state，并记录 operator ID、state schema fingerprint、codec version 和 engine state-format version；checkpoint 不调用活动 accumulator 的 `state()`。恢复时这些字段必须与定义快照匹配；不兼容时不能勉强反序列化，作业进入 `state=FAILED, error_code=RECOVERY_INCOMPATIBLE`。
 
 恢复行为：
 
-- 从最近一次成功检查点恢复窗口状态与水位线；RTSP 以新的 `source_generation` 从 live 位置重新接入，并经过 proposal 0002 的时间连续性门；
+- 从最近一次成功检查点恢复窗口状态与水位线；RTSP 以新的 `source_generation` 从 live 位置重新接入，并经过 design.md §8.3 的时间连续性门。进程恢复后需要新建 `IngestClock`；若它的第一个 ingest time 小于已恢复 watermark，作业进入 `state=FAILED, error_code=TIME_DISCONTINUITY`，不把后续帧无限判为迟到，也不把时钟钳到 watermark；
 - 检查点之后、崩溃之前已写出的窗口结果可能重复输出——对已确认输出而言语义是至少一次；
 - 崩溃期间与断流期间的源数据不可恢复，形成的缺口通过指标和 gap 记录如实反映，不补造行。
 
@@ -187,17 +187,36 @@ RUNNING / PAUSED / FAILED → STOPPED
 - `STOP` 是终态，释放模型、源和状态资源，但保留作业历史；
 - 服务进程启动时恢复 `RUNNING` 或 `RECOVERING` 作业：窗口状态从检查点恢复，RTSP 从 live 位置继续。
 
+### 目录对象与安全边界
+
+服务态在 design.md §7.2 的目录对象之上增加一个对象：
+
+| 对象 | 关键内容 |
+|---|---|
+| QueryJob | 名称、SQL、定义快照、状态、检查点位置、owner |
+
+`SUBMIT QUERY` 的名称在 owner 范围内对非终态作业唯一且创建后不可变；状态变更只使用服务端 UUID，名称只用于展示和确认。持久作业与检查点持有的 revision lease 遵守 design.md §4.3。
+
+在 design.md §13 的库态安全约束之上，服务态额外要求：
+
+- Flight SQL 使用 TLS；认证身份映射到 Catalog principal；
+- 查询规划和媒体解引用都检查表/流级权限，不能只在目录列表处隐藏对象；权限撤销立即生效，不因 lease 继续授权；
+- `FRAME_AT` 只接受指向已登记来源的 `locator`；服务端默认阻止云 metadata、link-local 和配置未授权的目标；
+- 客户端取得的 `IMAGE.uri` 只是脱敏展示值，`IMAGE.locator` 才是可重新授权的媒体定位符，两者都不包含底层凭证；
+- Python UDF 运行在进程外 worker，设置超时、内存限制和依赖环境；它不是多租户安全沙箱；
+- 本版不提供审计日志，但执行上下文保留 principal、query_id 和对象修订字段，避免以后无法补齐来源。
+
 ## 与顶层设计的关系
 
-- `vqld` 基于 design.md §10.1 的无进程假设内核构建；`vql-server` 的 crate 边界见 design.md §13；
+- `vqld` 基于 design.md §11.1 的无进程假设内核构建；`vql-server` 的 crate 边界见 design.md §14；
 - IMAGE 传输遵守 design.md §6.2 的三态载荷与 locator 不变量；错误码固定集也定义在该节；
-- 检查点边界建立在 design.md §5 的 epoch 一致性边界之上；窗口状态恢复 ABI 由 proposal 0002 的 `WindowStateCodec` 承担；
+- 检查点边界建立在 design.md §5 的 epoch 一致性边界之上；窗口状态恢复 ABI 由 design.md §5.4 的 `WindowStateCodec` 承担；
 - 定义快照与 revision lease 语义遵守 design.md §4.3、§7.2；
-- TLS、认证与权限边界见 design.md §12.2；至少一次投递语义对应 design.md §16 的 ADR-008。
+- 至少一次投递语义对应 design.md §15 的 ADR-008。
 
 ## 测试与验收
 
-对应 design.md §14.1 的「协议 v0.3」与「恢复 v0.3」测试行：全部约定 metadata RPC、statement/prepared transport 映射、`statement_info_v1`、FlightInfo query ID、附着式无界状态流、断连取消、逐 RPC session 隔离、Protobuf 错误 envelope、IMAGE storage schema/version、TLS/认证/权限、`SUBMIT QUERY`、查询详情/依赖/控制、IMAGE 三种模式、locator 篡改/撤权/过期、`FRAME_AT`、能力协商；在 Sink ack 与检查点持久化前后逐点 kill，验证规范化窗口状态不丢、已确认输出只可能重复，并覆盖 codec/version 不兼容。
+全部约定 metadata RPC、statement/prepared transport 映射、`statement_info_v1`、FlightInfo query ID、附着式无界状态流、断连取消、逐 RPC session 隔离、Protobuf 错误 envelope、IMAGE storage schema/version、TLS/认证/权限、`SUBMIT QUERY`、查询详情/依赖/控制、IMAGE 三种模式、locator 篡改/撤权/过期、`FRAME_AT`、能力协商；在 Sink ack 与检查点持久化前后逐点 kill，验证规范化窗口状态不丢、已确认输出只可能重复，并覆盖 codec/version 不兼容。
 
 ## 开放问题
 

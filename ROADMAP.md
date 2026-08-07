@@ -1,6 +1,6 @@
 # VisionQL Roadmap
 
-VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文档描述近期版本的交付计划，按能力划分、不承诺具体日期；详细的产品定义见 [PRD](./docs/prd.md)，技术设计见[系统设计](./docs/design.md)与 [proposals](./docs/proposals/README.md)。
+VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文档描述近期版本的交付计划，按能力划分、不承诺具体日期；详细的产品定义见 [PRD](./docs/prd.md)，技术设计见[系统设计](./docs/design.md)（v0.1～v0.2 能力）与 [proposals](./docs/proposals/README.md)（后续版本的子功能设计）。
 
 状态图例：✅ 已完成 · 🚧 进行中 · 📋 计划中
 
@@ -12,7 +12,7 @@ VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文�
 - [ ] 图片目录表（`USING IMAGES`）与 `UNNEST` 检测结果展开
 - [ ] 视频目录表（`USING VIDEOS`，建表时按 fps 展开为帧表）
 - [ ] 模型与函数注册：`CREATE MODEL` / `CREATE FUNCTION ... USING MODEL`（OBJECT_DETECTION）
-- [ ] 模型运行时与批量推理（[proposal 0003](./docs/proposals/0003-model-runtime-and-inference.md)）：manifest 校验与模型完整性、processor 前后处理、批量调度、显存管理、取消
+- [ ] 模型运行时与批量推理（[design.md §10](./docs/design.md)）：manifest 校验与模型完整性、processor 前后处理、批量调度、显存管理、取消
 - [ ] 库态 Python UDF
 - [ ] Sink：Console
 - [ ] SQL shell、`vql run job.sql`（脚本顺序执行）、Python 库接口（`sess.sql()`、Arrow 结果交换、notebook 富显示）
@@ -30,7 +30,7 @@ VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文�
 
 流建立在批之上，不与批同版本交付：场景 B 的验收断言是「批量回算与流式运行结果一致」，批必须先成为可信基准，两侧对不上时才有判断依据。
 
-- [ ] RTSP 视频流摄入（[proposal 0002](./docs/proposals/0002-video-stream-processing.md)）：尽力而为投递、事件时间与水位线、断流自动重连
+- [ ] RTSP 视频流摄入（[design.md §8.3](./docs/design.md)）：尽力而为投递、事件时间与水位线、断流自动重连
 - [ ] `TUMBLE` 窗口聚合（`COUNT/SUM/AVG/MIN/MAX`）
 - [ ] Sink：Kafka
 - [ ] 持续查询前台运行：shell 中的无界 SELECT 持续打印，`vql run` 附着执行，Ctrl-C 先优雅停止、再次立即取消
@@ -68,7 +68,7 @@ Workbench（独立子项目，标准 Flight SQL 客户端）：
 **验收**：
 
 - 稳定性：在 PRD 3.7 基线负载（≥ 8 路 1080p@5fps 并发流 + 持久作业）下连续运行 7×24，进程 RSS 无持续增长、无非预期重启、持久作业无掉线
-- 恢复：强制终止演练通过——重启后持久作业自动恢复，规范化窗口状态不丢，已确认输出只可能重复（[系统设计](./docs/design.md) §14）
+- 恢复：强制终止演练通过——重启后持久作业自动恢复，规范化窗口状态不丢，已确认输出只可能重复
 - 升级：用 v0.2 库态建好表、流、模型和函数的 Catalog 目录，直接由 `vqld` 打开后查询与 DDL 行为不变；目录格式版本变化时自动迁移，迁移失败可回滚，不要求用户重建目录
 - 可用性：分析师可在 Workbench 中完成查询、原图点查和作业运维全流程
 
@@ -80,11 +80,11 @@ Parquet 与 Lance 一并在本版交付：两者共用同一套写出、`CREATE 
 
 - [ ] EMBEDDING 模型类型：同一模型派生多个函数（如 CLIP 的 `embed_image` / `embed_text`）
 - [ ] `VECTOR(n)` 类型、`<->`（`L2_DISTANCE`）与 `ORDER BY ... LIMIT` 暴力 TopK
-- [ ] Parquet Sink 与表 provider（[proposal 0007](./docs/proposals/0007-parquet-sink.md)）：批追加与流式滚动文件、`CREATE TABLE ... AS SELECT`、逻辑类型写出/读回
+- [ ] Parquet Sink 与表 provider（[proposal 0003](./docs/proposals/0003-parquet-sink.md)）：批追加与流式滚动文件、`CREATE TABLE ... AS SELECT`、逻辑类型写出/读回
 - [ ] Lance 存储与 Sink：`IMAGE` 原生列存、向量列，嵌入结果落盘复用
 - [ ] HNSW 向量索引：复用 Lance 原生索引，存在索引时 TopK 自动改写为 ANN；自动启用的规模阈值由实测确定并写入文档，在此之前只支持显式建索引
 
-**验收**：本地图片目录 → 嵌入 → 写入 Lance → 以文搜图返回 Top-20（PRD 3.3.5）；暴力 TopK 与 HNSW 各覆盖一档数据规模，规模口径随 [proposal 0008](./docs/proposals/0008-cross-modal-retrieval.md) 立项确定。
+**验收**：本地图片目录 → 嵌入 → 写入 Lance → 以文搜图返回 Top-20（PRD 3.3.5）；暴力 TopK 与 HNSW 各覆盖一档数据规模，规模口径随 [proposal 0004](./docs/proposals/0004-cross-modal-retrieval.md) 立项确定。
 
 ## 后续方向（暂无版本计划）
 
