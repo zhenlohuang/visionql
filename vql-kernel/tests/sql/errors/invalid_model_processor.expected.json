@@ -1,0 +1,12 @@
+{
+  "statements": [
+    {
+      "status": "error",
+      "error": {
+        "code": "INVALID_OPTION",
+        "message": "invalid model parameter 'processor': unsupported processor 'unknown'",
+        "target_version": null
+      }
+    }
+  ]
+}

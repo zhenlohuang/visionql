@@ -1,0 +1,30 @@
+{
+  "statements": [
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created table 'photos' at revision 1",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created model 'detector' at revision 2 and function 'detect' at revision 3",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "vql.on_error = 'fail'",
+      "result": null
+    },
+    {
+      "status": "error",
+      "error": {
+        "code": "EXECUTION_ERROR",
+        "message": "Execution error: [VQL:EXECUTION_ERROR] failed to decode model IMAGE input",
+        "target_version": null
+      }
+    }
+  ]
+}

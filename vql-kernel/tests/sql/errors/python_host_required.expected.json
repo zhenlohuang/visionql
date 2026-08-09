@@ -1,0 +1,18 @@
+{
+  "statements": [
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created function 'py_double' at revision 1",
+      "result": null
+    },
+    {
+      "status": "error",
+      "error": {
+        "code": "PYTHON_HOST_REQUIRED",
+        "message": "function 'py_double' requires the visionql Python host",
+        "target_version": null
+      }
+    }
+  ]
+}

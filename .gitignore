@@ -1,2 +1,24 @@
+# Rust
+/target/
+**/*.rs.bk
+
 # macOS
 .DS_Store
+
+# Python and build output
+.venv/
+__pycache__/
+*.py[cod]
+/dist/
+/build/
+/.maturin/
+/vql-python/python/visionql/_visionql*.so
+/vql-python/python/visionql/_visionql*.dylib
+/vql-python/python/visionql/_visionql*.pyd
+/data/.vql/
+/data/models/*
+!/data/models/README.md
+
+# Datasets are fetched by scripts/fetch_datasets.py; only the README is tracked.
+/data/datasets/*
+!/data/datasets/README.md

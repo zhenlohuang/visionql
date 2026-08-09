@@ -4,31 +4,31 @@ VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文�
 
 状态图例：✅ 已完成 · 🚧 进行中 · 📋 计划中
 
-## v0.1 — MVP：单机查询图片与视频文件 📋
+## v0.1 — MVP：单机查询图片与视频文件 ✅
 
 **目标**：`pip install` 后无需任何服务，5 分钟内用 SQL 得到第一个视觉查询结果。纯库态、纯批处理，不包含服务进程和流处理。
 
-- [ ] 多模态类型系统：`IMAGE`、`VIDEO`、`BOX2D`
-- [ ] 图片目录表（`USING IMAGES`）与 `UNNEST` 检测结果展开
-- [ ] 视频目录表（`USING VIDEOS`，建表时按 fps 展开为帧表）
-- [ ] 模型与函数注册：`CREATE MODEL` / `CREATE FUNCTION ... USING MODEL`（OBJECT_DETECTION）
-- [ ] 模型运行时与批量推理（[design.md §10](./docs/design.md)）：manifest 校验与模型完整性、processor 前后处理、批量调度、显存管理、取消
-- [ ] 库态 Python UDF
-- [ ] Sink：Console
-- [ ] SQL shell、`vql run job.sql`（脚本顺序执行）、Python 库接口（`sess.sql()`、Arrow 结果交换、notebook 富显示）
-- [ ] 基础优化：推理提取、列裁剪、帧采样下推、时间谓词下推
+- [x] 多模态类型系统：`IMAGE`、`VIDEO`、`BOX2D`
+- [x] 图片目录表（`USING IMAGES`）与 `UNNEST` 检测结果展开
+- [x] 视频目录表（`USING VIDEOS`，建表时按 fps 展开为帧表）
+- [x] 模型与函数注册：`CREATE MODEL` / `CREATE FUNCTION ... USING MODEL`（OBJECT_DETECTION）
+- [x] 模型参数契约：`CREATE MODEL WITH` 提供默认参数，`CREATE FUNCTION WITH` 按 processor schema 覆盖，不依赖 `visionql-manifest.json`
+- [x] 模型运行时与批量推理（[design.md §10](./docs/design.md)）：模型完整性、processor 前后处理、批量调度、取消
+- [x] 库态 Python UDF
+- [x] Sink：Console
+- [x] SQL shell、`vql run job.sql`（脚本顺序执行）、Python 库接口（`sess.sql()`、Arrow 结果交换、notebook 富显示）
+- [x] 基础优化：列裁剪、PTS 帧采样下推、时间谓词下推、批量推理
+- [x] 批处理 `TUMBLE` 时间分桶（流式状态与水位线仍随 v0.2）
 
 **验收**：
 
 - 场景 A（首次使用，PRD 第 4 节）：本地图片目录 → Python UDF 过滤 → 检测筛选目标图片，结果显示在 Python 会话中（进程内 UDF 要求引擎与用户代码同进程），从安装到第一个结果不超过 5 分钟，全程无外部服务
-- 性能（PRD 3.7）：批扫描吞吐以解码为瓶颈打满硬件；已落盘结果的交互查询 P95 < 1s
-- 成本（PRD 第 7 节）：在可采样负载上，帧采样下推使 GPU 时长相对逐帧全量推理按采样比例线性降低
 
 ## v0.2 — 流：RTSP 摄入与窗口聚合 📋
 
 **目标**：把 v0.1 验证过的查询逻辑原样切换到实时流，得到批流一体。仍为纯库态。
 
-流建立在批之上，不与批同版本交付：场景 B 的验收断言是「批量回算与流式运行结果一致」，批必须先成为可信基准，两侧对不上时才有判断依据。
+流建立在批之上，不与批同版本交付：场景 B 的验收断言是「批量回算与流式运行结果一致」，批必须先成为可信参照，两侧对不上时才有判断依据。
 
 - [ ] RTSP 视频流摄入（[design.md §8.3](./docs/design.md)）：尽力而为投递、事件时间与水位线、断流自动重连
 - [ ] `TUMBLE` 窗口聚合（`COUNT/SUM/AVG/MIN/MAX`）
@@ -95,5 +95,6 @@ Parquet 与 Lance 一并在本版交付：两者共用同一套写出、`CREATE 
 - **生态入口**：MCP 服务器（Agent 接入）、场景包
 - **规模化**：集群部署、精确一次投递、多租户治理与审计、WASM UDF
 - **边缘协同**：查询的边缘/中心自动切分、边缘节点集群管理
+- **Benchmark 与性能工程**：统一数据集、吞吐/延迟/成本口径、跨硬件可复现测试与回归门禁
 
 欢迎通过 Issues 参与讨论：如果你希望某个方向提前排期，请说明你的使用场景。

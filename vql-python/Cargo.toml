@@ -1,0 +1,18 @@
+[package]
+name = "vql-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "_visionql"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow.workspace = true
+arrow-pyarrow.workspace = true
+pyo3 = { workspace = true, features = ["abi3-py310", "extension-module"] }
+tokio-util.workspace = true
+vql-kernel = { path = "../vql-kernel" }

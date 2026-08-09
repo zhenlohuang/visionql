@@ -1,0 +1,134 @@
+{
+  "statements": [
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created table 'photos' at revision 1",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "1 table(s)",
+      "result": {
+        "schema": [
+          {
+            "name": "table_name",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "provider",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "location",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "revision",
+            "type": "INT64",
+            "nullable": false
+          }
+        ],
+        "rows": [
+          [
+            "photos",
+            "IMAGES",
+            "${TEST_DATA}/images",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "table 'photos'",
+      "result": {
+        "schema": [
+          {
+            "name": "column_name",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "data_type",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "nullable",
+            "type": "UTF8",
+            "nullable": false
+          }
+        ],
+        "rows": [
+          [
+            "uri",
+            "Utf8",
+            "false"
+          ],
+          [
+            "image",
+            "Struct(\"uri\": Utf8, \"locator\": Utf8, \"pts_ms\": Int64, \"frame_id\": UInt64, \"encoded\": Binary, \"encoding\": Utf8, \"width\": Int32, \"height\": Int32, \"arena_id\": UInt64, \"arena_slot\": UInt32)",
+            "false"
+          ],
+          [
+            "width",
+            "Int32",
+            "true"
+          ],
+          [
+            "height",
+            "Int32",
+            "true"
+          ],
+          [
+            "captured_at",
+            "Timestamp(ms, \"UTC\")",
+            "true"
+          ]
+        ]
+      }
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "dropped table 'photos' at revision 2",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "0 table(s)",
+      "result": {
+        "schema": [
+          {
+            "name": "table_name",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "provider",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "location",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "revision",
+            "type": "INT64",
+            "nullable": false
+          }
+        ],
+        "rows": []
+      }
+    }
+  ]
+}

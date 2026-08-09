@@ -1,0 +1,64 @@
+{
+  "statements": [
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created table 'photos' at revision 1",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created model 'detector' at revision 2",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created function 'model_defaults' at revision 3",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "ddl",
+      "message": "created function 'people' at revision 4",
+      "result": null
+    },
+    {
+      "status": "ok",
+      "kind": "query",
+      "message": null,
+      "result": {
+        "schema": [
+          {
+            "name": "uri",
+            "type": "UTF8",
+            "nullable": false
+          },
+          {
+            "name": "default_count",
+            "type": "INT64",
+            "nullable": true
+          },
+          {
+            "name": "overridden_count",
+            "type": "INT64",
+            "nullable": true
+          }
+        ],
+        "rows": [
+          [
+            "${TEST_DATA}/images/a.jpg",
+            0,
+            1
+          ],
+          [
+            "${TEST_DATA}/images/b.png",
+            0,
+            1
+          ]
+        ]
+      }
+    }
+  ]
+}

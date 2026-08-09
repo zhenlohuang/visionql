@@ -4,9 +4,9 @@
 >
 > **文档地图**：[prd.md](./prd.md)（范围与需求）→ 本文（系统设计）→ [proposals/](./proposals/README.md)（后续能力设计）。
 
-- **设计版本**：v1.1.0（Draft）
-- **日期**：2026-08-07
-- **对应 PRD**：v0.1.6
+- **设计版本**：v1.1.1（Draft）
+- **日期**：2026-08-08
+- **对应 PRD**：v0.1.7
 - **状态**：评审中
 
 ---
@@ -462,7 +462,24 @@ VQL 复用 sqlparser-rs 的 tokenizer 和标准 SQL AST，并用独立入口处�
 
 ### 7.2 目录对象
 
-SQLite 是默认目录，默认位置为平台用户数据目录下的 `visionql/catalog.db`。核心对象如下：
+`VQL_HOME` 是库态和 CLI 的唯一默认本地运行根目录。应用按以下顺序解析它：宿主显式注入的
+`EngineConfig`、非空 `VQL_HOME` 环境变量、`$HOME/.vql`；只有在 `HOME` 也不可用时才回退到
+当前目录的 `.vql`。仓库开发统一使用 `VQL_HOME=./data/.vql`，避免测试和示例污染用户目录。
+
+```text
+$VQL_HOME/
+├── catalog/
+│   └── vql.db
+├── history
+└── cache/
+    └── models/
+```
+
+`--catalog`、`VQL_CATALOG` 和 Python `connect(catalog=...)` 只覆盖 SQLite 文件位置，不改变
+history 或 cache 的归属。数据集不属于运行状态：仓库示例约定放在独立的
+`./data/datasets/`，真实表仍通过 `LOCATION` 指向用户选择的任意位置。
+
+SQLite 是默认目录，默认位置为 `$VQL_HOME/catalog/vql.db`。核心对象如下：
 
 | 对象 | 关键内容 |
 |---|---|
@@ -492,12 +509,41 @@ MODEL 描述资源实现，FUNCTION 定义查询接口。Function revision 保�
 |---|---|
 | `OBJECT_DETECTION` | `(IMAGE) -> ARRAY<STRUCT<label, confidence, box>>` |
 
-参数分属查询接口、模型实现和运行时部署。会改变结果的权重、processor 和 precision 必须进入模型语义指纹与定义快照：
+模型参数使用单一合并规则：
 
-- Function 保存签名、稳定 `model_id`、`classes`、`min_confidence`、NMS 阈值和 determinism；
-- Model revision 保存 artifact revision/hash、processor ID/版本、label/schema、precision、backend 和 `latency_slo`；修改时创建新 revision；
-- device、replica、动态 batch 和队列权重属于部署配置，不进入 Function 或 Model semantic fingerprint，也不得改变 precision、processor 或 backend kind；
-- 参数白名单由 model type 和 processor schema 提供，未知参数直接报错。
+```text
+EffectiveParams
+  = ProcessorDefaults
+  + ModelDefaultParams
+  + FunctionOverrides
+```
+
+后出现的层覆盖前一层。`CREATE MODEL ... WITH (...)` 保存默认参数，`CREATE FUNCTION ...
+USING MODEL ... WITH (...)` 只保存覆盖项；Catalog 不保存一份合并后又独立演进的第三套公开定义。
+规划时解析 Function 引用的 Model revision，合并并校验一次，生成不可变 `EffectiveParams` 放入
+内部计划快照。
+
+| 参数层 | 示例 | 所有者与覆盖规则 |
+|---|---|---|
+| Artifact 身份 | source、content hash、Model `TYPE`、backend、precision | 仅 Model 定义；Function 不得覆盖 |
+| Processor 适配 | processor、input/output name、input width/height、output format、labels | Model 提供默认值；Function 仅可覆盖 processor schema 明确开放的字段 |
+| 结果语义 | classes、min confidence、NMS IoU threshold | Model 可提供默认值；Function 可按白名单覆盖 |
+| 运行参数 | device、replica、动态 batch、队列权重 | 只属于内部 RuntimeConfig；不得出现在两类 DDL 中 |
+
+具体约束：
+
+- v0.1 内置 `yolo26-detect-v1`：固定 `images` 输入、`output0` 输出、`640x640` 尺寸、
+  `ultralytics_end_to_end` 输出格式和 COCO 80 类标签；YOLO26 end-to-end 输出为
+  `(N, 300, 6)` 的 `[x1, y1, x2, y2, confidence, class_id]`，不再执行外部 NMS；
+- v0.1 ONNX resolver 只解析 artifact，不从文件名或张量 shape 猜测 processor、输出布局或
+  label 语义；与 processor 默认值不同的张量名称、尺寸或输出格式必须在 `CREATE MODEL` 中显式声明；
+- Model revision 保存 artifact revision/hash、参数默认值和 model-only 字段；Function revision 保存
+  签名、稳定 `model_id` 和覆盖项；
+- Function override 不得改变 Model `TYPE` 或标准返回 schema；processor schema 对每个字段声明
+  类型、默认值、是否必需以及是否允许 Function 覆盖，未知字段直接报错；
+- artifact hash、processor ID/版本和合并后的 `EffectiveParams` 共同进入语义指纹、推理去重键和
+  审计快照；只影响部署的 RuntimeConfig 不进入结果语义指纹；
+- `CREATE MODEL ... FUNCTION f` 等价于原子创建 Model 和一个无覆盖项的 Function。
 
 `ALTER MODEL` 仅在新 revision 与所有相关 Function head 的任务类型、输入模态、输出 schema 和参数 schema 兼容时推进 head；校验与更新在同一事务中完成。不兼容升级需创建新 Model ID，并通过 `ALTER FUNCTION ... SET MODEL` 或新 Function revision 显式迁移。
 
@@ -680,19 +726,35 @@ trait Processor {
 }
 ```
 
-引擎提供 ONNX Runtime 后端与 HTTP endpoint 后端。processor 负责 resize、归一化、检测框还原、NMS 和绑定参数；后端只负责模型会话和张量 I/O。
+引擎提供 ONNX Runtime 后端与 HTTP endpoint 后端。processor 负责 resize、归一化、检测框还原
+和绑定参数；只有传统 raw 输出需要 processor 执行 NMS，YOLO26 end-to-end 输出不重复执行
+NMS。后端只负责模型会话和张量 I/O。
 
 ### 10.2 模型来源与完整性
 
 - `file://`、`hf://` 和 `endpoint://` 由独立 resolver 处理；
-- 浮动的 Hugging Face revision 首次解析时固定为 commit，并记录内容哈希；
-- 下载使用临时文件，哈希校验后原子放入内容寻址缓存；
+- `$VQL_HOME/cache` 是统一缓存命名空间；v0.1 只定义其 `models/` 子目录，不缓存数据集、
+  查询结果或解码帧；
+- 只有远程下载的模型进入 `$VQL_HOME/cache/models/<content-hash>/`；本地 `file://` artifact
+  原地读取，不复制进缓存，`endpoint://` 不产生缓存项；
+- 下载缓存只对 ONNX artifact 计算内容哈希；声明式模型参数属于 Catalog 定义，不复制进 artifact
+  缓存目录；
+- 下载完成后先写同目录临时文件，再原子 rename；已有同哈希文件可安全复用，Catalog 只保存
+  原始来源、解析后路径和内容哈希，不保存模型字节；
 - 离线环境可以只使用本地路径或预热缓存；
 - endpoint URL 的鉴权通过 secret 引用注入，不写入模型 DDL 的可见输出。
 
-模型可执行性由 manifest 决定，不根据 `TYPE OBJECT_DETECTION` 猜测张量布局。manifest 至少包含 backend artifact、输入和输出张量、processor ID/版本、图像尺寸与归一化、标签表和入口名称。它可以来自 `visionql-manifest.json`、内置模型清单或显式 processor 配置。
+模型可执行性由 processor schema 与 `EffectiveParams` 决定，不根据 `TYPE OBJECT_DETECTION` 猜测
+张量布局。公共输入只有 `CREATE MODEL ... WITH (...)` 的默认值和 `CREATE FUNCTION ... WITH
+(...)` 的覆盖值；`visionql-manifest.json` 不属于产品契约。对于已知模型，内置 resolver 可以提供
+processor 默认值；对于任意 ONNX，与默认接口不同的张量名称、静态 shape 和输出格式由 MODEL
+显式声明。后续版本可以增加严格的图元数据读取，但不得据此猜测 processor 或 label 语义。
 
-引擎不嵌入 PyTorch，也不执行任意仓库代码。`hf://` 缺少可用 ONNX artifact 或受支持 manifest 时，`CREATE MODEL` 返回所需 artifact/endpoint。远程模型应提供或声明 revision；否则标记为 `mutable_endpoint`，由 `EXPLAIN` 警告，且不得跨查询缓存。
+引擎不嵌入 PyTorch，也不执行任意仓库代码。官方 `Ultralytics/YOLO26` Hugging Face 仓库提供
+`.pt` checkpoint，开发工具先将其显式导出为 ONNX，再通过 `file://` 注册；`hf://` 只用于本身
+已经提供 ONNX artifact 的仓库。缺少可用 ONNX artifact，或合并后的参数无法通过 processor
+schema 校验时，`CREATE MODEL` 返回缺失或不兼容的具体参数。远程模型应提供或声明 revision；
+否则标记为 `mutable_endpoint`，由 `EXPLAIN` 警告，且不得跨查询缓存。
 
 ### 10.3 `InferenceExec` 批路径
 
@@ -713,7 +775,7 @@ trait Processor {
 
 ### 10.4 调度与 batching
 
-- 每个 `ModelInstanceKey`（Model semantic fingerprint、设备和运行时配置代次）有一个队列；
+- 每个 `ModelInstanceKey`（Model semantic fingerprint、EffectiveParams fingerprint、设备和运行时配置代次）有一个队列；
 - 请求按 `interactive`、`stream`、`batch` 进入加权公平队列；流请求可带 deadline，批任务不得无限挤占流 SLO；
 - 达到 `max_batch`、最早 deadline 或 `max_wait` 时发车；batch 大小、等待时间和 GPU 选择属于运行时配置；
 - 张量缓冲按最大在途批次预分配并复用；队列满时提交端等待，背压回传；
@@ -895,7 +957,6 @@ ADR-010 与 ADR-014 的编号已分配给尚未进入本文范围的公开协议
 
 | 问题 | 决策前需要的证据 | 最迟时间 |
 |---|---|---|
-| 稀疏视频采样是否真的降低解码成本（§8.2） | 不同 GOP、VFR、本地盘与 S3 range-read 基准 | 批处理性能承诺前 |
 | RTCP capture time 的可靠性（§8.3） | 设计伙伴摄像头样本、漂移和回退比例 | 流验收前 |
 
 ---
@@ -913,4 +974,6 @@ ADR-010 与 ADR-014 的编号已分配给尚未进入本文范围的公开协议
 
 | 日期 | 变更 |
 |---|---|
+| 2026-08-08 | 将模型适配信息从 `visionql-manifest.json` 收口到 Model 默认参数与 Function 覆盖参数 |
+| 2026-08-08 | 定义 `VQL_HOME`、下载模型缓存、独立数据集目录与场景化示例；性能测试另行规划 |
 | 2026-08-07 | 初始系统设计 |

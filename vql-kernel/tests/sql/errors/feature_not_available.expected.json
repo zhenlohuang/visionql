@@ -1,0 +1,12 @@
+{
+  "statements": [
+    {
+      "status": "error",
+      "error": {
+        "code": "FEATURE_NOT_AVAILABLE",
+        "message": "CREATE STREAM is not available in v0.1",
+        "target_version": "v0.2"
+      }
+    }
+  ]
+}

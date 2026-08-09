@@ -1,0 +1,19 @@
+[package]
+name = "vql-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vql"
+path = "src/main.rs"
+
+[dependencies]
+arrow.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+reedline.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vql-kernel = { path = "../vql-kernel" }

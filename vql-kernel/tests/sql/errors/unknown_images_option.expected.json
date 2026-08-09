@@ -1,0 +1,12 @@
+{
+  "statements": [
+    {
+      "status": "error",
+      "error": {
+        "code": "INVALID_OPTION",
+        "message": "unknown IMAGES option 'magic'",
+        "target_version": null
+      }
+    }
+  ]
+}

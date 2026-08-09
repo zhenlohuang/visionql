@@ -1,0 +1,59 @@
+import base64
+import sys
+import types
+
+import pyarrow as pa
+import pyarrow.compute as pc
+import visionql
+
+
+def test_collect_and_vectorized_python_udf(tmp_path):
+    module = types.ModuleType("vql_test_udfs")
+    module.double = lambda values: pc.multiply(values, 2)
+    sys.modules[module.__name__] = module
+
+    session = visionql.connect(tmp_path / "catalog.db")
+    session.sql(
+        "CREATE FUNCTION double(x BIGINT) RETURNS BIGINT "
+        "LANGUAGE PYTHON AS 'vql_test_udfs:double'"
+    ).collect()
+    table = session.sql(
+        "SELECT double(column1) AS value FROM (VALUES (1), (2))"
+    ).collect()
+    assert table.column("value").to_pylist() == [2, 4]
+    assert "value" in session.sql("SELECT 1 AS value")._repr_html_()
+
+
+def test_image_filtering_python_udf_then_model(tmp_path):
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    # 1x1 RGB PNG; media fixtures stay text/generated in the repository.
+    photos.joinpath("one.png").write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+    )
+    module = types.ModuleType("scenario_ops")
+    module.quality = lambda images: pc.cast(pc.is_valid(images.field("encoded")), pa.float32())
+    sys.modules[module.__name__] = module
+    session = visionql.connect(tmp_path / "catalog.db")
+    session.sql(
+        f"CREATE TABLE photos USING IMAGES LOCATION '{photos}'"
+    ).collect()
+    session.sql(
+        "CREATE FUNCTION quality(img IMAGE) RETURNS FLOAT "
+        "LANGUAGE PYTHON AS 'scenario_ops:quality'"
+    ).collect()
+    session.sql(
+        "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' "
+        "WITH (labels=['person'])"
+    ).collect()
+    session.sql(
+        "CREATE FUNCTION detect USING MODEL detector "
+        "WITH (classes=['person'], min_confidence=0.8)"
+    ).collect()
+    table = session.sql(
+        "SELECT COUNT_OBJECTS(detect(image), 'person', 0.8) AS people "
+        "FROM photos WHERE quality(image) >= 0"
+    ).collect()
+    assert table.column("people").to_pylist() == [1]

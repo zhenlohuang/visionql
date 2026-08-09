@@ -2,8 +2,8 @@
 
 > VisionQL 是一个面向多模态数据的批流一体查询与处理引擎。用户可以通过 SQL 或 DataFrame API 查询和处理图片、视频文件及实时视频流。
 
-- **版本**：v0.1.6（Draft）
-- **日期**：2026-08-05
+- **版本**：v0.1.7（Draft）
+- **日期**：2026-08-08
 - **状态**：评审中
 
 ---
@@ -128,9 +128,10 @@ WITH (fps = 5);
 
 -- ② 注册模型,并同时派生查询函数 detect(1:1 语法糖,详见 3.3.2)
 -- 函数按能力命名而非按模型命名——换绑模型时查询一行不改(见 3.3.3)
-CREATE MODEL yolo
+CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
-FROM 'hf://ultralytics/yolo26n'
+FROM './models/yolo26n.onnx'
+WITH (processor = 'yolo26-detect-v1')
 FUNCTION detect;
 
 -- ③ 一条查询:逐帧数人、按分钟聚合,结果直接显示在 shell 中
@@ -146,7 +147,9 @@ GROUP BY 1;
 -- COUNT_OBJECTS(检测结果, 标签, 置信度阈值) 是内置数组函数,见 3.3.7 设计原则
 ```
 
-整个任务分为三步，约 15 行 SQL，不需要编写 Python 或部署脚本。从 `pip install` 到看到第一个结果不超过 5 分钟，这也是第 7 节 TTFV 指标的口径（与第 4 节场景 A 同口径）。
+整个任务分为三步，约 15 行 SQL，不需要编写推理代码或部署服务。示例模型是从官方
+`Ultralytics/YOLO26` checkpoint 显式导出的 ONNX artifact；模型准备不属于查询逻辑。从
+`pip install` 到看到第一个结果不超过 5 分钟，这也是第 7 节 TTFV 指标的口径（与第 4 节场景 A 同口径）。
 
 同一条查询逻辑可以原样切换到实时流：把 `FROM` 换成 `CREATE STREAM` 注册的 RTSP 流（3.3.1），再通过 `CREATE SINK` + `INSERT INTO` 把结果持续写入 Kafka（3.3.6），就得到一条上线即运行的持续查询。这正是批流一体的含义，也是 MVP 验收场景 B 的内容（第 4 节）。交互模式下，持续查询在前台运行，适合开发和调试；生产环境中的常驻运行方式见 3.5。下面按主题说明 SQL 设计。
 
@@ -188,22 +191,49 @@ WITH (
 
 ```sql
 -- 只声明"是什么",放哪块 GPU、batch 多大等部署决策由引擎运行时负责,默认零配置
-CREATE MODEL yolo
+CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
-FROM 'hf://ultralytics/yolo26n';
+FROM 'file:///models/yolo26n.onnx'
+WITH (processor = 'yolo26-detect-v1');
 
 -- 嵌入模型同样是模型(EMBEDDING 类型随 v0.4 启用)
 CREATE MODEL clip TYPE EMBEDDING FROM 'hf://openai/clip-vit-base-patch32';
 
 -- 简写语法：在 1:1 场景中，一条语句同时注册模型并创建对应函数。
 -- 初次使用时只需调用 FUNCTION；需要一对多、切换模型或管理资源时再操作 MODEL
-CREATE MODEL yolo_l
+CREATE MODEL yolo26l
 TYPE OBJECT_DETECTION
-FROM 'hf://ultralytics/yolo26l'
+FROM 'file:///models/yolo26l.onnx'
+WITH (processor = 'yolo26-detect-v1')
 FUNCTION detect_l;
+
+-- 与 YOLO26 默认接口不同的 ONNX 模型可以覆盖适配和后处理参数
+CREATE MODEL custom_detector
+TYPE OBJECT_DETECTION
+FROM 'file:///models/custom-detector.onnx'
+WITH (
+  processor = 'yolo26-detect-v1',
+  input_name = 'images',
+  output_name = 'output0',
+  input_width = 640,
+  input_height = 640,
+  output_format = 'ultralytics_end_to_end',
+  labels = ['person', 'vehicle'],
+  min_confidence = 0.25
+);
 ```
 
-**模型声明与部署相互独立**。`CREATE MODEL` 只声明"是什么"，不接受 device、副本数和动态 batch 大小等物理部署参数，这些由运行时根据负载决定，部署调整不会改变查询结果。`WITH` 子句只接受影响结果的声明，例如 `precision = 'fp16'`。多租户 `resource_group` 暂不支持，遇到时必须返回明确的能力错误。
+`CREATE MODEL ... WITH (...)` 保存模型参数的默认值，包括 processor、张量入口、输入尺寸、
+输出格式、标签和后处理阈值。v0.1 引擎先应用 processor 内置默认值，再应用 MODEL 默认值；
+与默认接口不同的参数必须显式声明，不根据文件名或张量形状猜测语义，也不要求
+`visionql-manifest.json`。
+
+v0.1 的首个内置 processor 是 `yolo26-detect-v1`，对应官方 YOLO26 detection checkpoint 的
+end-to-end ONNX 导出：`images` 输入、`output0` 输出、`640x640` 尺寸、COCO 80 类标签，以及
+`(N, 300, 6)` 的 `[x1, y1, x2, y2, confidence, class_id]` 输出。官方 Hugging Face 仓库提供
+`.pt` checkpoint，需要先通过 Ultralytics export 显式生成 ONNX；VisionQL 不嵌入 PyTorch。
+
+**模型声明与部署相互独立**。`CREATE MODEL` 只声明"是什么"，不接受 device、副本数和动态 batch 大小等物理部署参数，这些由运行时根据负载决定，部署调整不会改变查询结果。`WITH` 子句只接受上述影响结果的 processor 参数。多租户 `resource_group` 暂不支持，遇到时必须返回明确的能力错误。
 
 模型下载、版本固定、GPU 放置、动态 batching 和失败重试均由引擎负责。
 
@@ -214,16 +244,25 @@ FUNCTION detect_l;
 ```sql
 -- TYPE 蕴含标准签名,签名与 RETURNS 可省略
 -- (OBJECT_DETECTION 标准签名: (IMAGE) -> ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>)
-CREATE FUNCTION detect USING MODEL yolo;
+CREATE FUNCTION detect USING MODEL yolo26n;
 
 -- 同一模型派生带绑定参数的函数(WITH 只收影响结果的语义参数)
-CREATE FUNCTION person_det USING MODEL yolo
-WITH (classes = ['person'], min_confidence = 0.5);
+CREATE FUNCTION person_det USING MODEL yolo26n
+WITH (
+  classes = ['person'],
+  min_confidence = 0.5
+);
 
 -- 一对多：一份 CLIP 权重提供图片和文本两个入口，用于跨模态检索
 CREATE FUNCTION embed_image(img IMAGE) RETURNS VECTOR(512) USING MODEL clip;
 CREATE FUNCTION embed_text(txt STRING) RETURNS VECTOR(512) USING MODEL clip;
 ```
+
+Model 的 `WITH` 是默认值，Function 的 `WITH` 是覆盖值。规划时按
+`processor 默认值 < Model 默认值 < Function 覆盖值` 合并，并用模型类型和
+processor schema 校验最终参数。Function 只能覆盖 processor 明确开放的参数；不能覆盖 artifact
+来源、Model `TYPE`、backend、precision 或任何 device/batch 等运行参数。合并后的有效参数进入
+计划快照和语义指纹，因此不同 Function 可以安全复用同一权重，同时保持结果可复现。
 
 FUNCTION 的定义由五个相互独立的部分组成。新增能力通常只需要扩展其中一项，而不需要引入新的语法结构：
 
@@ -238,12 +277,12 @@ CREATE [OR REPLACE] FUNCTION name [(param type, ...)] [RETURNS type]
 | **形状** | 标量函数 | `CREATE AGGREGATE FUNCTION`、`CREATE TABLE FUNCTION` |
 | **签名** | 显式声明,或由模型 `TYPE` 推导 | 重载(同名多签名) |
 | **实现子句** | `USING MODEL m`(资源引用型)、`LANGUAGE PYTHON AS '<入口>'`(代码型)、`AS (<表达式>)`(SQL 宏) | 新资源类别扩 `USING` 后的枚举;新语言扩 `LANGUAGE` 后的枚举 |
-| **WITH 绑定参数** | 影响结果的常量，例如类别和阈值 | 按前述职责边界校验，不接受资源参数 |
+| **WITH 绑定参数** | 覆盖 Model 默认值的 processor 参数，例如张量入口、类别和阈值 | 按 processor schema 白名单校验，不接受 artifact 身份或运行参数 |
 | **元属性** | 确定性、是否支持 batching 和成本信息，由实现类型自动推导 | 仅供优化器使用，不增加用户语法 |
 
 ```sql
 -- 三种实现形状,同一个 FUNCTION 概念
-CREATE FUNCTION detect USING MODEL yolo;                -- 资源引用型:引擎托管推理
+CREATE FUNCTION detect USING MODEL yolo26n;             -- 资源引用型:引擎托管推理
 
 CREATE FUNCTION blur_score(img IMAGE) RETURNS FLOAT
 LANGUAGE PYTHON AS 'myops.quality:blur_score';          -- 代码型：用于自定义处理逻辑
@@ -256,7 +295,7 @@ AS (b.w * b.h > 0.25);                                  -- SQL 宏:纯表达式�
 
 这种分层带来三个直接收益：
 
-1. **接口与实现可独立演进**：`ALTER FUNCTION person_det SET MODEL yolo_l` 换绑模型后，查询一行不改。函数因此应按能力命名，例如 `detect`，而不是按具体模型命名。
+1. **接口与实现可独立演进**：`ALTER FUNCTION person_det SET MODEL yolo26l` 换绑模型后，查询一行不改。函数因此应按能力命名，例如 `detect`，而不是按具体模型命名。
 2. **一份模型可以复用到多个函数**：CLIP 可以同时提供图片和文本两个入口，而权重只需加载一次。
 3. **优化器可以明确识别模型成本而不改结果契约**：可以对模型调用做 batching、融合和确定性公共表达式消除。
 
@@ -453,6 +492,7 @@ Workbench 是 v0.3 与 `vqld` 服务态一同交付的 Web 图形界面，也是
 - `CREATE MODEL` + `CREATE FUNCTION ... USING MODEL`(OBJECT_DETECTION 一类,含 1:1 语法糖)+ 库态 Python UDF
 - Sink:Console(前台调试用,`INSERT INTO` 形状不变只换 Sink);Kafka 随 v0.2、Parquet 与 Lance 随 v0.4 加入
 - 产品形态:库态(pip 包)+ SQL shell + `vql run job.sql` 脚本执行 + Python 库接口(`sess.sql()`、Arrow 结果交换、notebook 富显示、UDF 注册;链式 DataFrame 见 3.4,随 v0.3 交付)
+- 本地状态：Catalog、shell history 与缓存统一位于 `VQL_HOME`（默认 `$HOME/.vql`），其中 SQLite Catalog 位于 `$VQL_HOME/catalog/vql.db`；开发约定使用 `VQL_HOME=./data/.vql`，数据集独立放在 `./data/datasets/`
 - 优化：帧采样下推（实现相对简单，且效果容易验证）
 
 **明确安排在 v0.2 的能力**：库态流处理，把 v0.1 验证过的查询逻辑原样切换到实时流。RTSP 单流摄入、TUMBLE 窗口聚合（白名单为 `COUNT/SUM/AVG/MIN/MAX` 的可持久化标量类型）、Kafka Sink，以及持续查询的前台附着运行（随客户端进程结束，不承诺持久恢复）。投递语义：RTSP 为不可重放 live 源，尽力而为，断流/丢帧缺口如实反映。
@@ -463,7 +503,7 @@ Workbench 是 v0.3 与 `vqld` 服务态一同交付的 Web 图形界面，也是
 
 **其余方向暂不定义**：候选清单见 [Roadmap](../ROADMAP.md) 的"后续方向"一节，待前几个版本获得真实反馈后再规划，避免过早设计。
 
-**MVP 验收场景**：以下两个场景合并覆盖全部 MVP 组件，确保每项实现都被真实流程使用。两者分属不同版本：场景 A 随批能力（v0.1）验收，场景 B 随流能力（v0.2）验收——场景 B 的断言是批流结果一致，批必须先成为可信基准，否则结果不一致时无从判断是哪一侧出错。版本划分见 [Roadmap](../ROADMAP.md)。
+**MVP 验收场景**：以下两个场景合并覆盖全部 MVP 组件，确保每项实现都被真实流程使用。两者分属不同版本：场景 A 随批能力（v0.1）验收，场景 B 随流能力（v0.2）验收——场景 B 的断言是批流结果一致，批必须先成为可信参照，否则结果不一致时无从判断是哪一侧出错。版本划分见 [Roadmap](../ROADMAP.md)。
 
 - **场景 A（首次使用无需外部服务，v0.1）**：全程在本地运行。用户从图片目录建表，通过 Python UDF 过滤模糊图片，用 `detect` 筛选出包含指定目标的图片，结果直接显示在 Python 会话中。因为进程内 Python UDF 要求引擎与用户代码同进程，该场景在 Python 宿主（notebook 或 REPL）中完成，而不是 `vql shell`——CLI 遇到 Python UDF 会明确提示改用 Python 宿主（见[系统设计](./design.md) §10.3）。纯 SQL 的首用路径（3.2）在 shell 中完成，两条路径都要满足从 `pip install` 到第一个结果不超过 5 分钟。
 - **场景 B(批流一体,v0.2)**:以 3.2 的"每分钟人数"查询为基础:先在本地视频表上批量回算(即 3.2 旅程),再把同一条查询逻辑切换到 RTSP 流,以 `vql run` 前台运行并写入 Kafka,断言两者结果一致(相同模型与采样率);调试阶段以 console sink 查看 `UNNEST` 展开的检测明细。
