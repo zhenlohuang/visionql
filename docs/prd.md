@@ -1,140 +1,142 @@
-# VisionQL 产品需求文档（PRD）
+# VisionQL Product Requirements Document
 
-> VisionQL 是一个面向多模态数据的批流一体查询与处理引擎。用户可以通过 SQL 或 DataFrame API 查询和处理图片、视频文件及实时视频流。
-
-- **版本**：v0.1.7（Draft）
-- **日期**：2026-08-08
-- **状态**：评审中
+> VisionQL is a unified batch and streaming engine for multimodal data. It lets users query and process images, recorded video, and live video streams through SQL or a DataFrame API.
 
 ---
 
-## 1. 一句话定义
+## 1. Product in One Sentence
 
-**VisionQL：物理 AI 的数据引擎。**（*A data engine for Physical AI.*）
+**VisionQL is a data engine for Physical AI.**
 
-传统数据库主要查询业务系统中的结构化记录。VisionQL 则把摄像头和视频记录的内容变成可以查询的数据。工程师和分析师可以用一条 SQL，或几行 DataFrame 代码，对图片、视频和实时视频流进行分析，减少手写 Python 管道和管理 GPU 推理任务的工作。
+Traditional databases answer questions about structured business records. VisionQL makes the visual world captured by cameras and video files queryable. Engineers and analysts can analyze images, recordings, and live streams with one SQL statement or a few lines of DataFrame code, without assembling one-off Python pipelines or operating GPU inference jobs themselves.
 
-- 图片和视频文件使用**批处理**，属于有界数据集，类似 Spark batch。
-- RTSP 视频流使用**流处理**，属于无界数据集，类似 Flink 或 Spark Structured Streaming。
-- 批处理和流处理共享同一套 SQL / DataFrame 语义。
+- Images and recorded video are bounded datasets and run as batch workloads, much like Spark batch jobs.
+- RTSP video is an unbounded dataset and runs as a streaming workload, much like Flink or Spark Structured Streaming.
+- Both modes use the same SQL and DataFrame semantics.
 
 ---
 
-## 2. 需求合理性分析
+## 2. Why This Product Should Exist
 
-### 2.1 背景与趋势
+### 2.1 Market and Technology Context
 
-1. **视觉数据的增长快于现有处理能力**。企业新增数据中有 80%～90% 是非结构化数据，其中包含大量图片、监控视频、行车记录和直播流。随着自动驾驶、机器人等 Physical AI 系统进入落地期，机器本身也在持续产生海量第一视角视频，数据闭环（检索 corner case、构建训练与评测集）对视觉数据基础设施提出了新的刚性需求。现有数据基础设施大多围绕结构化或半结构化数据构建。对视觉数据，主流引擎通常只能保存文件路径，无法直接理解和查询画面内容。
+1. **Visual data is growing faster than the systems built to process it.** An estimated 80–90% of newly created enterprise data is unstructured, including images, surveillance footage, dashcam recordings, and live feeds. Physical AI systems such as autonomous vehicles and robots add a constant stream of first-person video. Their data loops—finding corner cases and assembling training or evaluation sets—need infrastructure designed for visual data. Most existing data platforms can store a file path, but cannot understand or query what appears in the file.
 
-2. **视觉模型已经具备可用的查询能力**。随着检测、跟踪、OCR、多模态大模型（VLM）和向量检索逐渐成熟，“画面中有几个人”或“找出所有闯入禁区的片段”这类问题已经可以通过程序回答。当前缺少的是一层统一的数据系统，用来组织模型、数据和查询。
+2. **Vision models are now useful as query operators.** Detection, tracking, OCR, vision-language models, and vector search can answer questions such as “How many people are in this frame?” or “Which clips show an intrusion into the restricted area?” What is missing is a coherent data system that connects models, media, and queries.
 
-3. **声明式接口可以降低使用门槛**。早期大数据处理依赖手写 MapReduce 作业，随后 Hive 和 Spark SQL 通过声明式接口与优化器显著降低了开发成本。今天的视觉数据处理仍然大量依赖 OpenCV 和 PyTorch 脚本，适合用类似的方法进一步抽象和标准化。
+3. **A declarative interface can remove substantial engineering work.** Data processing moved from hand-written MapReduce jobs to Hive and Spark SQL because declarative languages and optimizers made common workloads easier to build and improve. Visual processing is still dominated by custom OpenCV and PyTorch scripts. It is ready for the same kind of abstraction.
 
-### 2.2 现状痛点（为什么现有方案不够）
+### 2.2 Where Existing Approaches Fall Short
 
-| 现有方案 | 不足 |
+| Approach | Limitation |
 |---|---|
-| **Spark / Flink** | 主要面向结构化数据。视觉处理通常只能放进黑盒 UDF，优化器无法下推采样或时间条件，也难以复用推理结果。视频解码、GPU 调度和模型 batching 仍需用户自行管理。 |
-| **自建 Python 管道**（OpenCV + PyTorch + Celery/Airflow） | 容易形成一次性脚本，缺少统一的优化、增量计算和容错语义。批处理与流处理往往使用两套代码，分析师也很难直接参与。 |
-| **研究系统**（EvaDB、BlazeIt、VIVA 等） | 已经证明 SQL over video 可行，并展示了模型级联和帧采样等优化空间。但这些系统大多是单机原型，偏重批处理，尚未提供完整的生产级流处理能力。 |
-| **多模态数据框架**（Daft、Ray Data、LanceDB） | 擅长多模态数据的存取和并行计算，但定位仍是通用计算或存储层。视觉原生算子、流处理和 SQL 能力通常不完整。 |
-| **云视觉 API**（Rekognition、阿里云视觉智能等） | 使用方便，但模型和执行过程不可控。复杂查询难以组合，通常不能使用自有模型；成本随处理帧数增长，数据也可能需要离开本地环境。 |
+| **Spark / Flink** | Designed primarily for structured data. Vision logic usually lives inside opaque UDFs, which prevents sampling and time-range pushdown and makes inference reuse difficult. Users still manage video decoding, GPU scheduling, and model batching. |
+| **Custom Python pipelines** (OpenCV + PyTorch + Celery/Airflow) | Tend to become disposable scripts with no shared optimizer, incremental execution model, or clear fault semantics. Batch and streaming paths often diverge, and analysts cannot participate directly. |
+| **Research systems** (EvaDB, BlazeIt, VIVA, and others) | Demonstrate that SQL over video is viable and that model cascades and frame sampling can reduce cost. Most remain single-node, batch-oriented prototypes without a complete production streaming story. |
+| **Multimodal data frameworks** (Daft, Ray Data, LanceDB) | Strong at storage or parallel processing, but positioned as general-purpose layers. Vision-native operators, SQL, and streaming are usually incomplete as a combined experience. |
+| **Cloud vision APIs** (Rekognition, Alibaba Cloud Vision AI, and others) | Easy to call, but users have limited control over models and execution. Complex queries are difficult to compose, private models may not be supported, cost scales with processed frames, and data may have to leave the customer environment. |
 
-**结论**：现有方案很少同时提供视觉原生算子、声明式 SQL、批流一体和可解释优化。随着视觉模型逐渐成熟、GPU 资源更易获得，以及企业积累的视频数据持续增长，VisionQL 有明确的产品机会。
+**Product opportunity:** few systems combine vision-native operators, declarative SQL, unified batch and streaming semantics, and explainable optimization. Better models, more accessible GPUs, and rapidly growing video archives create a clear opening for VisionQL.
 
-### 2.3 目标用户与使用场景
+### 2.3 Target Users and Jobs to Be Done
 
-**目标用户**（按优先级）：
+**Primary users, in priority order:**
 
-1. **数据和算法工程师**：目前负责开发视觉处理管道的用户，也是首个版本的核心用户，主要通过 pip 包使用库态能力。
-2. **数据分析师**：熟悉 SQL，但不熟悉 PyTorch。v0.3 起可以通过 Workbench 或 BI 工具连接 `vqld`，使用具备认证和权限控制的服务，无需本地安装。
-3. **平台团队**：希望将视觉分析建设成内部平台，需要多租户、治理和成本控制能力，也是未来企业版的主要购买方。
-4. **AI 应用和 Agent 开发者**：把 VisionQL 作为 Agent 的视觉查询工具，通过 SQL 查询摄像头与视频库，用于回答问题或触发后续操作。现有 text-to-SQL 能力也可以直接复用。
+1. **Data and ML engineers** who build visual-processing pipelines today. They are the core users of the first release and primarily consume VisionQL as a pip-installable library.
+2. **Data analysts** who know SQL but not PyTorch. Starting in v0.3, they can connect to the authenticated `vqld` service from Workbench or a BI tool without a local installation.
+3. **Platform teams** building an internal visual analytics platform with multi-tenancy, governance, and cost controls. They are also the likely buyers of a future enterprise offering.
+4. **AI application and agent developers** who need a visual query tool for cameras and video libraries. Existing text-to-SQL systems can generate auditable, permission-scoped VisionQL queries.
 
-**典型场景**：
+**Representative use cases:**
 
-| 场景 | 模式 | 典型问题 |
+| Use case | Mode | Typical questions |
 |---|---|---|
-| 安防 / 智慧园区 | 流 | 每分钟画面人数、越界/闯入告警、逗留检测、跨摄像头轨迹 |
-| 零售客流分析 | 流 | 进店人数、动线热力、货架前停留时长、排队长度 |
-| 自动驾驶 / 机器人（Physical AI）数据闭环 | 批 | 从大规模路采或遥操作视频中检索“雨天 + 行人横穿 + 遮挡”等 corner case，用于训练与评测 |
-| 媒资 / 内容平台 | 批 | 视频打标、人物/场景检索、精彩片段抽取、“以文搜片” |
-| 内容审核 | 批 + 流 | 实时检测直播流中的违规内容，并回扫已有内容；同一份规则用于两种执行模式 |
-| 工业质检 | 流 | 产线相机流缺陷检测、良率分钟级聚合、异常帧留存 |
-| 无人机 / 设施巡检 | 批 | 电力/管线/光伏巡检视频的缺陷检索、跨期变化对比、工单证据帧 |
-| 体育 / 赛事分析 | 批 | 球员跟踪、阵型统计、射门或犯规等事件检索 |
-| AI Agent / 智能助手 | 批 + 流 | Agent 通过工具提问，例如“仓库里是否有人逗留超过 10 分钟”，再将自然语言转换为 SQL 并返回画面结果；也可用于视觉 RAG |
+| Security and smart campuses | Streaming | People per minute, boundary-crossing alerts, loitering, cross-camera trajectories |
+| Retail traffic analysis | Streaming | Store entries, movement heatmaps, dwell time, queue length |
+| Autonomous driving and robotics data loops | Batch | Find corner cases such as rain + crossing pedestrian + occlusion in large driving or teleoperation archives |
+| Media and content platforms | Batch | Tag videos, find people or scenes, extract highlights, retrieve clips by text |
+| Content moderation | Batch + streaming | Apply the same policy to live feeds and historical backfills |
+| Industrial inspection | Streaming | Detect defects, aggregate yield by minute, retain evidence frames |
+| Drone and infrastructure inspection | Batch | Find defects, compare inspections over time, export work-order evidence |
+| Sports analytics | Batch | Track players, analyze formations, retrieve events such as shots or fouls |
+| AI agents and assistants | Batch + streaming | Answer questions such as “Has anyone remained in the warehouse for more than ten minutes?” and support visual RAG |
 
-内容审核可以直接体现**批流一体**的价值：同一条 SQL 查询文件表时用于历史回扫，查询实时流时用于实时拦截。虽然可覆盖的场景很多，首发版本只会重点做好一个场景。选择标准是当前痛点、数据规模和付费意愿，详见开放问题 1。其他场景后续逐步扩展。
+Content moderation illustrates the value of a unified engine particularly well: one SQL query can backfill a file table and then monitor a live stream. VisionQL may eventually support many industries, but the initial launch will make one scenario excellent. The choice will be driven by pain, data volume, and willingness to pay; see Open Question 1.
 
-### 2.4 产品价值
+### 2.4 Customer Value
 
-1. **提高开发效率**。“统计每分钟画面人数并写入 Kafka”这类任务，可以从数百行 Python 和部署脚本缩减为十几行 SQL。数据分析师也能直接参与视频查询。
-2. **通过优化降低 GPU 成本**。GPU 推理通常是视觉查询中最昂贵的部分，而声明式查询为系统提供了优化空间：
-   - **帧采样下推**：分钟级聚合不需要按 30fps 对所有帧进行推理。
-   - **将谓词下推到解码层**：只解码查询需要的时间段或关键帧。
+1. **Faster development.** A task such as “calculate the people count every minute and publish it to Kafka” should shrink from hundreds of lines of Python and deployment configuration to a small SQL script. Analysts can participate without learning the model stack.
 
-   黑盒 UDF 很难支持这些优化。将模型调用显式放入查询计划，是 VisionQL 相比手写管道的主要技术优势，也为后续更多降本优化保留了空间。
-3. **批处理和流处理共享一份逻辑**。用户可以先在历史视频上验证查询，再将同一查询用于实时流，减少两套实现之间的维护成本和语义差异。
-4. **让视频数据可以持续复用**。模型、数据源和查询结果都作为目录对象管理，可以追踪来源并控制权限。
-5. **默认支持数据留在本地环境**。从 v0.1 起，引擎就可以部署在数据附近，不要求上传视频。这对安防和零售场景的合规要求（个保法、GDPR 等）尤其重要。
-6. **适合作为 Agent 的视觉查询接口**。Agent 可以把自然语言转换为 SQL，再从图片、视频和实时流中获得可审计、可限制权限的结果。现有的 text-to-SQL 生态也能降低接入成本。
+2. **Lower GPU cost through query optimization.** Inference is usually the most expensive part of a visual query. A declarative plan gives VisionQL room to reduce that work:
 
-### 2.5 风险与挑战
+   - Push sampling into the media source so a minute-level aggregate does not infer on every frame at 30 fps.
+   - Push time predicates into decoding so only the requested interval or keyframe neighborhood is read.
 
-| 风险 | 说明 | 缓解 |
+   Opaque UDFs make these optimizations difficult. Representing model calls explicitly in the query plan is VisionQL's primary technical advantage over hand-built pipelines.
+
+3. **One logical workflow for batch and streaming.** A query can be validated against recorded video before it is pointed at a live feed, reducing duplicated implementations and semantic drift.
+
+4. **Reusable visual data assets.** Models, sources, and query outputs are catalog objects with traceable provenance and controllable access.
+
+5. **Data stays near its source by default.** From v0.1 onward, the engine can run beside the data instead of requiring video uploads. This is important for privacy and regulatory obligations such as PIPL and GDPR.
+
+6. **A natural visual tool for agents.** An agent can translate natural language into SQL and return constrained, auditable results from images, recordings, or live feeds. The existing text-to-SQL ecosystem lowers integration cost.
+
+### 2.5 Risks
+
+| Risk | Why it matters | Mitigation |
 |---|---|---|
-| **推理成本仍然较高** | 即使性能提升 10 倍，全量分析大规模视频仍会消耗大量 GPU | 允许用户通过采样率明确控制推理量（帧采样下推）；更多降本优化待后续规划 |
-| **查询结果具有概率性** | 检测模型可能漏检或误检，因此 `COUNT(*)` 不再表示绝对准确的事实 | 将置信度和阈值明确写入查询；聚合层是否需要专用的置信度语义，见开放问题 3 |
-| **SQL 的表达能力有限** | 标定和复杂的多目标关联规则不适合全部放进 SQL | 不追求所有逻辑都用 SQL 表达。UDF、用户自定义模型和 DataFrame API 用于承载复杂逻辑 |
-| **连接器和模型生态需要时间建设** | 引擎的实用性依赖数据源、模型和场景模板 | 首发聚焦检测这一最高频能力，以及 RTSP、对象存储和 Kafka Sink 三类连接器；嵌入检索随 v0.4 加入。先做好安防或审核中的一个场景，再逐步扩展 |
-| **大型平台可能补齐类似能力** | Databricks 或云厂商可能继续扩展多模态处理能力 | 重点做好批流一体和视觉原生优化，并通过开源建立用户和生态 |
+| **Inference remains expensive** | Even a 10× improvement can leave full analysis of a large archive costly | Let users control inference volume explicitly through sample rates; push sampling into the source; pursue additional cost optimizations only after measuring real workloads |
+| **Results are probabilistic** | A detector can miss or falsely report an object, so `COUNT(*)` no longer represents an indisputable fact | Keep confidence and thresholds visible in the query; decide whether confidence-aware aggregation primitives are needed after user research |
+| **SQL cannot express every vision workflow** | Calibration and complex multi-object association do not fit naturally into SQL | Do not force all logic into SQL; use UDFs, custom models, and the DataFrame API for complex processing |
+| **Connector and model coverage takes time** | Product usefulness depends on supported sources, models, and scenario templates | Start with object detection plus RTSP, object storage, and Kafka Sink; add embedding search in v0.4; make one security or moderation workflow complete before expanding |
+| **Large platforms may add similar features** | Databricks and cloud vendors can extend their multimodal offerings | Differentiate through unified batch and streaming behavior, vision-native optimization, and an open-source ecosystem |
 
 ---
 
-## 3. 产品设计：用户如何使用 VisionQL
+## 3. Product Experience
 
-### 3.1 核心抽象
+### 3.1 Core Abstractions
 
-VisionQL 采用一个统一抽象：**视觉数据最终都可以表示为由帧组成的关系表**。
+VisionQL uses one unifying model: **visual data is represented as relations made up of frames.**
 
-| 抽象 | 说明 |
+| Abstraction | Meaning |
 |---|---|
-| **多模态类型系统** | 在标准 SQL 类型之外增加 `IMAGE`、`VIDEO`、`BOX2D`（检测框）、`VECTOR(n)`（嵌入向量，v0.4 启用）以及 `STRUCT`/`ARRAY` 嵌套类型 |
-| **Table（表）** | 有界数据集。图片目录是一张表，每行一张图片；视频目录也是一张表，建表时按声明的采样率展开为帧，每行一帧。两者都是帧粒度的关系表 |
-| **Stream（流）** | 无界数据集。RTSP 摄像头流表示为帧表，例如 `(ts TIMESTAMP, frame IMAGE, ...)`，并带有事件时间和水位线 |
-| **Model（模型）** | 资源实现对象。不可变 revision 固定权重内容、processor、精度、后端和输出 schema 等可能影响结果的定义；GPU 放置、副本数和动态 batching 属于独立部署配置。模型不直接出现在 SQL 中，但规划后的查询会固定具体 revision |
-| **Function（函数）** | 查询中唯一可以调用的接口，保存签名、绑定参数、确定性和稳定 `model_id` 或代码入口。实现可以是 `USING MODEL`、`LANGUAGE PYTHON` 或 SQL 宏；一个模型可以派生多个函数 |
-| **窗口** | 流数据的聚合单位。`TUMBLE` 是时间分桶标量函数，可以直接用于 `GROUP BY`；在批模式下，它就是普通的时间分桶聚合 |
-| **Sink** | 查询结果的输出位置，例如 Console、Kafka、Parquet/Lance 文件 |
+| **Multimodal type system** | Extends standard SQL with `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)` (enabled for embedding search in v0.4), and nested `STRUCT` / `ARRAY` types |
+| **Table** | A bounded dataset. An image directory is one row per image. A video directory is expanded at its declared sample rate into one row per frame. |
+| **Stream** | An unbounded frame relation such as `(ts TIMESTAMP, frame IMAGE, ...)`, with event-time and watermark semantics |
+| **Model** | A resource implementation. An immutable revision fixes weights, processor, precision, backend, output schema, and other result-affecting settings. GPU placement, replicas, and dynamic batching are runtime deployment concerns. Queries do not call models directly, but each planned query pins a model revision. |
+| **Function** | The only model-facing interface callable from a query. It stores a signature, bound semantic parameters, determinism, and a stable `model_id` or code entry point. Implementations may use `USING MODEL`, `LANGUAGE PYTHON`, or a SQL macro. One model may back several functions. |
+| **Window** | A streaming aggregation boundary. `TUMBLE` is a time-bucketing scalar function used in `GROUP BY`; in batch mode it behaves as an ordinary time-bucketed aggregate. |
+| **Sink** | A destination such as Console, Kafka, Parquet, or Lance |
 
-批流一体的关键是：**表和流使用同一套查询语言**。`FROM` 表时执行批任务，`FROM` 流时执行持续查询，窗口聚合等核心语义保持一致。
+The key contract is simple: **tables and streams use the same query language.** A table query terminates; a stream query continues. Their relational and windowing semantics remain aligned.
 
-### 3.2 五分钟用户旅程
+### 3.2 The Five-Minute Journey
 
 ```bash
 pip install visionql
-vql shell               # 交互式 SQL,或在 Python 中 import visionql
+vql shell               # interactive SQL, or import visionql in Python
 ```
 
-下面用一个完整任务说明基本流程：统计一段门口监控录像中每分钟的平均人数。全程只需要本地视频文件，不依赖摄像头、Kafka 等任何外部服务。
+The first-run task calculates the average and peak number of people per minute in a directory of entrance-camera recordings. It is entirely local and needs no camera, Kafka cluster, or other service.
 
 ```sql
--- ① 注册视频目录表(目录即表,按采样率展开,每行一帧)
+-- 1. Register a video directory as a frame table sampled at 5 fps.
 CREATE TABLE entrance_videos
 USING VIDEOS
 LOCATION './recordings/entrance/'
 WITH (fps = 5);
 
--- ② 注册模型,并同时派生查询函数 detect(1:1 语法糖,详见 3.3.2)
--- 函数按能力命名而非按模型命名——换绑模型时查询一行不改(见 3.3.3)
+-- 2. Register a model and derive the query-facing detect function.
+-- Functions are named for capabilities, so rebinding the model does not change queries.
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM './models/yolo26n.onnx'
 WITH (processor = 'yolo26-detect-v1')
 FUNCTION detect;
 
--- ③ 一条查询:逐帧数人、按分钟聚合,结果直接显示在 shell 中
+-- 3. Count people in each frame and aggregate by minute.
 SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        AVG(person_cnt) AS avg_people,
        MAX(person_cnt) AS peak_people
@@ -144,70 +146,68 @@ FROM (
   FROM entrance_videos
 )
 GROUP BY 1;
--- COUNT_OBJECTS(检测结果, 标签, 置信度阈值) 是内置数组函数,见 3.3.7 设计原则
+-- COUNT_OBJECTS(detections, label, confidence threshold) is a built-in array function.
 ```
 
-整个任务分为三步，约 15 行 SQL，不需要编写推理代码或部署服务。示例模型是从官方
-`Ultralytics/YOLO26` checkpoint 显式导出的 ONNX artifact；模型准备不属于查询逻辑。从
-`pip install` 到看到第一个结果不超过 5 分钟，这也是第 7 节 TTFV 指标的口径（与第 4 节场景 A 同口径）。
+The workflow is roughly 15 lines of SQL and requires neither inference code nor a deployed service. The example ONNX artifact is exported explicitly from the official `Ultralytics/YOLO26` checkpoint; preparing a model is separate from query logic. The interval from `pip install` to the first result must remain under five minutes, which is the TTFV definition used in Section 7 and Acceptance Scenario A.
 
-同一条查询逻辑可以原样切换到实时流：把 `FROM` 换成 `CREATE STREAM` 注册的 RTSP 流（3.3.1），再通过 `CREATE SINK` + `INSERT INTO` 把结果持续写入 Kafka（3.3.6），就得到一条上线即运行的持续查询。这正是批流一体的含义，也是 MVP 验收场景 B 的内容（第 4 节）。交互模式下，持续查询在前台运行，适合开发和调试；生产环境中的常驻运行方式见 3.5。下面按主题说明 SQL 设计。
+The same logic can later run against live video: replace the table in `FROM` with an RTSP stream registered by `CREATE STREAM`, then use `CREATE SINK` and `INSERT INTO` to publish continuously to Kafka. This is Acceptance Scenario B and the practical meaning of batch–stream unification. Attached streaming queries run in the foreground for development; production lifecycle behavior is defined in Section 3.5.
 
-### 3.3 SQL 设计详解
+### 3.3 SQL Surface
 
-#### 3.3.1 数据源注册（DDL）
+#### 3.3.1 Registering Sources
 
 ```sql
--- 批:图片目录即表,每行一张图片
+-- Batch: an image directory becomes a table with one image per row.
 CREATE TABLE product_photos
 USING IMAGES
 LOCATION 's3://bucket/photos/'
 WITH (recursive = true);
 -- schema: (uri STRING, image IMAGE, width INT, height INT, captured_at TIMESTAMP, ...)
 
--- 批:视频文件目录即表,建表时按 fps 采样展开,每行一帧
+-- Batch: a video directory becomes a frame table sampled at the declared fps.
 CREATE TABLE traffic_videos
 USING VIDEOS
 LOCATION 's3://bucket/dashcam/2026/07/'
 WITH (fps = 1);
 -- schema: (uri STRING, ts TIMESTAMP, frame IMAGE, frame_id BIGINT, duration DOUBLE, ...)
--- uri、duration 等文件属性作为常量列透传到帧行;frame 列仅在被查询引用时才解码
--- 需要不同采样率时,对同一目录再建一张表(表只是逻辑定义,零拷贝)
+-- File attributes such as uri and duration are repeated on frame rows.
+-- frame is decoded only when the query consumes it.
+-- Register another logical table over the same directory to use a different sample rate.
 
--- 流:注册一路 RTSP 摄像头
+-- Streaming: register one RTSP camera.
 CREATE STREAM cam_entrance
 FROM 'rtsp://10.0.0.15:554/main'
 WITH (
-  fps        = 5,                        -- 引擎按需采样,而非全帧率摄入
+  fps        = 5,                        -- sample on demand instead of ingesting at full frame rate
   event_time = 'capture_time',
   watermark  = INTERVAL '2' SECOND
 );
 -- schema: (ts TIMESTAMP, frame IMAGE, frame_id BIGINT, source STRING)
 ```
 
-#### 3.3.2 模型注册
+#### 3.3.2 Registering Models
 
-**MODEL 是资源实现对象**，用于声明任务类型和可复现的模型实现。查询不直接调用模型，模型的能力通过函数暴露（见 3.3.3）。
+A **MODEL is a resource implementation**: it declares a task type and a reproducible implementation. Queries call functions, not models.
 
 ```sql
--- 只声明"是什么",放哪块 GPU、batch 多大等部署决策由引擎运行时负责,默认零配置
+-- Declare what the model is. Runtime placement and batch size require no DDL configuration.
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM 'file:///models/yolo26n.onnx'
 WITH (processor = 'yolo26-detect-v1');
 
--- 嵌入模型同样是模型(EMBEDDING 类型随 v0.4 启用)
+-- EMBEDDING becomes available in v0.4.
 CREATE MODEL clip TYPE EMBEDDING FROM 'hf://openai/clip-vit-base-patch32';
 
--- 简写语法：在 1:1 场景中，一条语句同时注册模型并创建对应函数。
--- 初次使用时只需调用 FUNCTION；需要一对多、切换模型或管理资源时再操作 MODEL
+-- Shorthand for the common one-model, one-function case.
 CREATE MODEL yolo26l
 TYPE OBJECT_DETECTION
 FROM 'file:///models/yolo26l.onnx'
 WITH (processor = 'yolo26-detect-v1')
 FUNCTION detect_l;
 
--- 与 YOLO26 默认接口不同的 ONNX 模型可以覆盖适配和后处理参数
+-- A model with a different ONNX interface can override adapter and post-processing defaults.
 CREATE MODEL custom_detector
 TYPE OBJECT_DETECTION
 FROM 'file:///models/custom-detector.onnx'
@@ -223,92 +223,73 @@ WITH (
 );
 ```
 
-`CREATE MODEL ... WITH (...)` 保存模型参数的默认值，包括 processor、张量入口、输入尺寸、
-输出格式、标签和后处理阈值。v0.1 引擎先应用 processor 内置默认值，再应用 MODEL 默认值；
-与默认接口不同的参数必须显式声明，不根据文件名或张量形状猜测语义，也不要求
-`visionql-manifest.json`。
+`CREATE MODEL ... WITH (...)` stores result-affecting defaults: processor, tensor names, dimensions, output format, labels, and post-processing thresholds. In v0.1, processor defaults are applied first and MODEL defaults second. Any deviation from the known interface must be explicit; VisionQL does not infer semantics from filenames or tensor shapes and does not require `visionql-manifest.json`.
 
-v0.1 的首个内置 processor 是 `yolo26-detect-v1`，对应官方 YOLO26 detection checkpoint 的
-end-to-end ONNX 导出：`images` 输入、`output0` 输出、`640x640` 尺寸、COCO 80 类标签，以及
-`(N, 300, 6)` 的 `[x1, y1, x2, y2, confidence, class_id]` 输出。官方 Hugging Face 仓库提供
-`.pt` checkpoint，需要先通过 Ultralytics export 显式生成 ONNX；VisionQL 不嵌入 PyTorch。
+The first built-in processor, `yolo26-detect-v1`, targets the end-to-end ONNX export of an official YOLO26 detection checkpoint: input `images`, output `output0`, resolution `640x640`, COCO's 80 labels, and `(N, 300, 6)` records shaped as `[x1, y1, x2, y2, confidence, class_id]`. The official Hugging Face repository provides a `.pt` checkpoint, which must be exported to ONNX with Ultralytics. VisionQL does not embed PyTorch.
 
-**模型声明与部署相互独立**。`CREATE MODEL` 只声明"是什么"，不接受 device、副本数和动态 batch 大小等物理部署参数，这些由运行时根据负载决定，部署调整不会改变查询结果。`WITH` 子句只接受上述影响结果的 processor 参数。多租户 `resource_group` 暂不支持，遇到时必须返回明确的能力错误。
+Model identity is separate from deployment. `CREATE MODEL` does not accept device, replica, or dynamic-batch settings; the runtime owns those decisions because they do not change query results. The `WITH` clause accepts only processor parameters that do affect results. Unsupported settings such as multi-tenant `resource_group` must return an explicit capability error. The engine owns model download, version pinning, GPU placement, batching, and retry.
 
-模型下载、版本固定、GPU 放置、动态 batching 和失败重试均由引擎负责。
+#### 3.3.3 Registering Functions
 
-#### 3.3.3 函数注册
-
-**FUNCTION 是查询中唯一可以调用的接口**，查询只调用函数，不直接引用模型。
+A **FUNCTION is the only callable interface in a query**.
 
 ```sql
--- TYPE 蕴含标准签名,签名与 RETURNS 可省略
--- (OBJECT_DETECTION 标准签名: (IMAGE) -> ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>)
+-- TYPE implies the standard signature, so the signature and RETURNS may be omitted.
+-- OBJECT_DETECTION: (IMAGE) -> ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>
 CREATE FUNCTION detect USING MODEL yolo26n;
 
--- 同一模型派生带绑定参数的函数(WITH 只收影响结果的语义参数)
+-- Derive a function with semantic overrides from the same model.
 CREATE FUNCTION person_det USING MODEL yolo26n
 WITH (
   classes = ['person'],
   min_confidence = 0.5
 );
 
--- 一对多：一份 CLIP 权重提供图片和文本两个入口，用于跨模态检索
+-- One CLIP model exposes both image and text entry points in v0.4.
 CREATE FUNCTION embed_image(img IMAGE) RETURNS VECTOR(512) USING MODEL clip;
 CREATE FUNCTION embed_text(txt STRING) RETURNS VECTOR(512) USING MODEL clip;
 ```
 
-Model 的 `WITH` 是默认值，Function 的 `WITH` 是覆盖值。规划时按
-`processor 默认值 < Model 默认值 < Function 覆盖值` 合并，并用模型类型和
-processor schema 校验最终参数。Function 只能覆盖 processor 明确开放的参数；不能覆盖 artifact
-来源、Model `TYPE`、backend、precision 或任何 device/batch 等运行参数。合并后的有效参数进入
-计划快照和语义指纹，因此不同 Function 可以安全复用同一权重，同时保持结果可复现。
+Model parameters are defaults; Function parameters are overrides. Planning resolves `processor defaults < Model defaults < Function overrides`, validates the merged values against the model type and processor schema, and records them in the plan snapshot and semantic fingerprint. A Function may override only processor fields explicitly marked as overridable—not the artifact, Model `TYPE`, backend, precision, device, or batching policy.
 
-FUNCTION 的定义由五个相互独立的部分组成。新增能力通常只需要扩展其中一项，而不需要引入新的语法结构：
+Every FUNCTION definition has five independent dimensions:
 
-```
+```text
 CREATE [OR REPLACE] FUNCTION name [(param type, ...)] [RETURNS type]
-  <实现子句>
-  [WITH (绑定参数)]
+  <implementation clause>
+  [WITH (bound parameters)]
 ```
 
-| 槽位 | v0.1 | 预留扩展 |
+| Dimension | v0.1 | Extension point |
 |---|---|---|
-| **形状** | 标量函数 | `CREATE AGGREGATE FUNCTION`、`CREATE TABLE FUNCTION` |
-| **签名** | 显式声明,或由模型 `TYPE` 推导 | 重载(同名多签名) |
-| **实现子句** | `USING MODEL m`(资源引用型)、`LANGUAGE PYTHON AS '<入口>'`(代码型)、`AS (<表达式>)`(SQL 宏) | 新资源类别扩 `USING` 后的枚举;新语言扩 `LANGUAGE` 后的枚举 |
-| **WITH 绑定参数** | 覆盖 Model 默认值的 processor 参数，例如张量入口、类别和阈值 | 按 processor schema 白名单校验，不接受 artifact 身份或运行参数 |
-| **元属性** | 确定性、是否支持 batching 和成本信息，由实现类型自动推导 | 仅供优化器使用，不增加用户语法 |
+| **Shape** | Scalar function | `CREATE AGGREGATE FUNCTION`, `CREATE TABLE FUNCTION` |
+| **Signature** | Explicit or inferred from Model `TYPE` | Overloads |
+| **Implementation** | `USING MODEL m`, `LANGUAGE PYTHON AS '<entry>'`, or `AS (<expression>)` | Add resource kinds after `USING`; add languages after `LANGUAGE` |
+| **Bound parameters** | Processor overrides such as tensor names, classes, and thresholds | Validated by a processor-owned allowlist; cannot change artifact identity or runtime placement |
+| **Metadata** | Determinism, batching support, and cost inferred from implementation | Optimizer-only; no additional syntax |
 
 ```sql
--- 三种实现形状,同一个 FUNCTION 概念
-CREATE FUNCTION detect USING MODEL yolo26n;             -- 资源引用型:引擎托管推理
+CREATE FUNCTION detect USING MODEL yolo26n;
 
 CREATE FUNCTION blur_score(img IMAGE) RETURNS FLOAT
-LANGUAGE PYTHON AS 'myops.quality:blur_score';          -- 代码型：用于自定义处理逻辑
+LANGUAGE PYTHON AS 'myops.quality:blur_score';
 
 CREATE FUNCTION is_large(b BOX2D) RETURNS BOOLEAN
-AS (b.w * b.h > 0.25);                                  -- SQL 宏:纯表达式复用,解析期内联展开
+AS (b.w * b.h > 0.25);
 ```
 
-**关键字约定**:`USING` 统一表示"由已注册资源/provider 支撑"(与 `USING IMAGES`、`USING HNSW` 一致);`AS` 保留给实现体本身(CTAS 的 `AS SELECT`、Python UDF 的 `AS '<入口>'`)。模型绑定是资源引用而非函数体,故用 `USING MODEL`。
+`USING` consistently means “backed by a registered resource or provider,” as in `USING IMAGES` and `USING HNSW`. `AS` introduces an implementation body, as in CTAS, a Python entry point, or a SQL macro.
 
-这种分层带来三个直接收益：
+This separation lets interfaces and implementations evolve independently, lets one weight artifact serve multiple functions, and lets the optimizer schedule and deduplicate expensive model calls without weakening the result contract. `ALTER MODEL` and `ALTER FUNCTION` create new revisions that affect only queries planned afterward. A running query remains pinned to the revisions selected during planning.
 
-1. **接口与实现可独立演进**：`ALTER FUNCTION person_det SET MODEL yolo26l` 换绑模型后，查询一行不改。函数因此应按能力命名，例如 `detect`，而不是按具体模型命名。
-2. **一份模型可以复用到多个函数**：CLIP 可以同时提供图片和文本两个入口，而权重只需加载一次。
-3. **优化器可以明确识别模型成本而不改结果契约**：可以对模型调用做 batching、融合和确定性公共表达式消除。
+#### 3.3.4 Locating People in Video or a Stream
 
-**变更以新版本生效**：`ALTER MODEL` 和 `ALTER FUNCTION` 都创建新版本，只影响之后新规划的查询；运行中的查询继续使用规划时固定的模型版本，结果可复现。版本与部署机制的完整设计见[系统设计](./design.md)。
-
-#### 3.3.4 查询一：视频或流中人的位置
-
-检测函数返回数组，使用 `UNNEST` 可以将数组展开为关系行。这是把视觉结果转换为关系数据的基本方式。语法采用类似 BigQuery 的隐式关联写法：`FROM t, UNNEST(expr) AS x`。
+Detection returns an array. `UNNEST` turns each element into a relational row using the BigQuery-style implicit correlation form `FROM t, UNNEST(expr) AS x`.
 
 ```sql
--- 流上:实时输出每个人的位置框
+-- Live stream: emit one row per detected person.
 SELECT ts,
-       det.box,           -- BOX2D: (x, y, w, h),可取 .center 中心点
+       det.box,
        det.confidence
 FROM cam_entrance,
      UNNEST(detect(frame)) AS det
@@ -317,70 +298,67 @@ WHERE det.label = 'person'
 ```
 
 ```sql
--- 批上:同样的写法,视频表本身就是帧表
+-- Recorded video: the frame table uses the same query shape.
 SELECT f.uri, f.ts, det.box
 FROM traffic_videos AS f,
      UNNEST(detect(f.frame)) AS det
 WHERE det.label = 'person';
 ```
 
-#### 3.3.5 查询二：跨模态语义检索（以批处理为主）
+#### 3.3.5 Cross-Modal Retrieval
 
-> 本节对应的嵌入与向量检索能力安排在 v0.4 交付（见第 5 节），这里先行定义 SQL 语义。
+> Embeddings and vector search arrive in v0.4. This section fixes their SQL semantics in advance.
 
 ```sql
--- 以文搜图:找出最像"戴红色安全帽的工人"的 20 张图
--- embed_image / embed_text 是同一 CLIP 模型派生的两个函数(见 3.3.3)
+-- Return the 20 images most similar to the text prompt.
 SELECT uri, image
 FROM product_photos
 ORDER BY embed_image(image) <-> embed_text('a worker wearing a red helmet')
 LIMIT 20;
 ```
 
-向量列可以通过 `CREATE INDEX ... USING HNSW` 建立索引。存在索引时，`ORDER BY <-> LIMIT` 会自动改写为 ANN 检索。`<->` 只是简写，也可以使用等价的 `L2_DISTANCE(a, b)` 函数。
+A vector column can be indexed with `CREATE INDEX ... USING HNSW`. When an index is present, `ORDER BY <-> LIMIT` is rewritten to approximate nearest-neighbor search. `<->` is shorthand for `L2_DISTANCE(a, b)`.
 
-#### 3.3.6 结果输出：Sink
+#### 3.3.6 Writing Results
 
 ```sql
--- 持续查询写入 Kafka(见 3.2 完整示例)
+-- Publish a continuous query to Kafka.
 INSERT INTO people_per_minute SELECT ...;
 
--- 事件帧留存:告警同时把证据帧存下来
-INSERT INTO evidence  -- Lance/Parquet 表,IMAGE 列原生存储(Parquet 与 Lance 随 v0.4)
+-- Retain evidence frames with the alert.
+INSERT INTO evidence  -- a Lance/Parquet table; native IMAGE storage arrives in v0.4
 SELECT ts, frame, det.box
 FROM cam_entrance, UNNEST(detect(frame)) AS det
 WHERE det.label = 'person' AND det.confidence > 0.9;
 ```
 
-#### 3.3.7 SQL 可落地性设计原则
+#### 3.3.7 Rules for an Implementable SQL Dialect
 
-上述语法都限制在成熟列式查询引擎现有的扩展能力之内。每一种扩展语法都必须映射到标准扩展机制，避免修改查询引擎内核：
+Every extension must map to a mature extension point in the columnar query engine. VisionQL does not require a fork of that engine.
 
-1. **所有扩展都转换为两类标准机制**：
-   - **标量函数**（包括异步远程调用）：用于模型推理（`detect`、`embed_image`）、数组处理（`COUNT_OBJECTS`）以及向量谓词（`L2_DISTANCE`）。函数按 RecordBatch 向量化执行，为推理 batching 提供基础。SQL 宏（`AS (<表达式>)`）在解析时内联，不产生运行时实体。
-   - **DDL 对应目录操作**：`CREATE STREAM/MODEL/FUNCTION/SINK` 由 VisionQL 方言层解析，并写入 Catalog 或运行时，不进入查询计划。函数会注册到查询引擎的函数表；模型只保存在目录和模型运行时中。视频表的帧展开发生在扫描算子内部（按建表声明的 fps），不需要自定义表值函数扩展点。
-2. **不引入 lambda 或高阶函数**。数组处理统一使用命名内置函数，例如 `COUNT_OBJECTS(dets, label, min_conf)`。保持一阶表达式可以简化谓词分析和下推优化。
-3. **`UNNEST` 是唯一的行展开方式**。`FROM t, UNNEST(expr) AS x` 直接映射到查询引擎原生的展开节点，不要求通用 LATERAL 关联能力。
-4. **`TUMBLE` 在批处理和流处理中保持一致**。批模式下，它转换为普通的时间分桶聚合；流模式下，运行时为同一计划附加窗口状态和水位线。语法和查询逻辑保持不变。
+1. **Extensions reduce to two standard mechanisms.**
+   - Vectorized scalar functions cover inference (`detect`, `embed_image`), array operations (`COUNT_OBJECTS`), and vector predicates (`L2_DISTANCE`). SQL macros are expanded at parse time and do not create runtime objects.
+   - VQL DDL updates the Catalog or runtime. `CREATE STREAM/MODEL/FUNCTION/SINK` does not enter the relational plan. A video table expands frames inside its scan operator at the fps declared by the table.
+2. **No lambdas or higher-order functions.** Named functions such as `COUNT_OBJECTS(dets, label, min_conf)` keep expressions first-order and easier to analyze and push down.
+3. **`UNNEST` is the only row-expansion mechanism.** `FROM t, UNNEST(expr) AS x` maps to the engine's native unnest node without requiring general lateral joins.
+4. **`TUMBLE` keeps the same shape in both modes.** Batch lowers it to ordinary time bucketing and aggregation. Streaming adds window state and watermark handling to the same logical plan. `WINDOW` remains reserved for ANSI analytic functions whose output cardinality does not change.
+5. **Every custom operator has a function equivalent.** Operators such as `<->` normalize to functions, leaving a portable fallback when dialect syntax is unavailable.
+6. **Multimodal types use standard columnar storage.** `IMAGE` and `VIDEO` are metadata-bearing binary or struct columns, `BOX2D` is a struct, and `VECTOR(n)` is a fixed-size float list. Their names exist in DDL and documentation; the underlying engine needs no custom type kernel.
 
-   `TUMBLE` 不占用 `WINDOW` 关键字。ANSI SQL 中的 `WINDOW`/`OVER` 表示逐行分析，结果行数不变；流式窗口表示分组聚合，结果行数会减少。两者共用一个名称容易造成混淆，因此 `WINDOW` 保留给标准分析函数，例如时间序列平滑中的 `AVG(person_cnt) OVER (ORDER BY ts ...)`；流式时间窗口沿用 `TUMBLE` 这样的专名。
-5. **自定义算子皆有函数等价形式**。`<->` 等运算符经表达式规划扩展映射为函数调用,方言不兼容时用户总有退路。
-6. **多模态类型建立在标准列式类型之上**:`IMAGE`/`VIDEO` 为带元数据的二进制/结构列,`BOX2D` 为结构体,`VECTOR(n)` 为定长浮点列表——类型名只存在于 DDL 与文档层,不要求引擎具备用户自定义类型内核。
+### 3.4 Python DataFrame API (v0.3)
 
-### 3.4 DataFrame API（Python，v0.3）
+SQL and the DataFrame API build the same logical plan. SQL remains the primary interface; the DataFrame API gives engineers a programmable way to assemble more complex workflows.
 
-SQL 之下是同一套逻辑计划,DataFrame 面向工程师,适合复杂管道与编程式组装。
+In v0.1, the Python package provides `sess.sql()`, Arrow result exchange, rich notebook display, and Python UDF registration. The chainable API arrives in v0.3 after the logical plan has been validated by real v0.1 queries; exposing it earlier would freeze an immature internal representation as a public contract.
 
-v0.1 的 Python 库只提供 `sess.sql()`、Arrow 结果交换、notebook 富显示和 Python UDF 注册——足以支撑 3.2 的首用路径。完整的链式 DataFrame 随 v0.3 交付：它直接构造引擎的逻辑计划，等于把内部表示固化为公共契约，需要等逻辑计划在 v0.1 的真实查询中稳定下来。
-
-下面的示例展示 API 的目标形态，其中 `embed_image` 和 Lance 写出属于 v0.4 能力:
+The target API looks like this. `embed_image` and Lance output are v0.4 capabilities:
 
 ```python
 import visionql as vq
 
 sess = vq.connect()
 
-# 与 3.2 的流式版本等价:每分钟平均/峰值人数写入 Kafka
+# Streaming equivalent of Section 3.2: publish average and peak counts by minute.
 counts = (
     sess.stream("cam_entrance")
         .with_column("person_cnt",
@@ -390,7 +368,7 @@ counts = (
 )
 counts.write.kafka("broker:9092", topic="people-count").start()
 
-# 批:图片目录打标后存表
+# Batch: tag an image directory and persist the result.
 (
     sess.table("product_photos")
         .with_column("tags", vq.fn("detect")(vq.col("image")))
@@ -399,176 +377,174 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 )
 ```
 
-SQL 是 VisionQL 的主要用户接口，便于分析师使用，也能让优化器理解查询意图。DataFrame API 提供等价的编程接口，适合工程化组装复杂流程。两者可以混用，`sess.sql(...)` 会返回 DataFrame。
+The APIs can be mixed: `sess.sql(...)` returns a DataFrame.
 
-### 3.5 产品形态与部署
+### 3.5 Product Forms and Deployment
 
-VisionQL 需要同时满足三类不同的使用条件：
+VisionQL must satisfy three competing conditions:
 
-- **批量探索应尽量减少运维成本**：分析师和工程师应当在 `pip install` 后直接开始查询，而不是先部署集群。
-- **流查询需要长期运行**：持续查询包含状态和故障恢复，模型需要常驻显存，GPU 也需要在多个查询之间复用。这些能力更适合运行在长生命周期的服务中，而不是临时脚本进程。
-- **视频数据不适合大规模搬运**：一路 1080p 视频流约为 4Mbps，数十路视频同时回传到中心会带来明显的网络和合规压力。因此，引擎需要能够部署到摄像头附近，只返回 KB 级的结构化结果。
+- Batch exploration should begin immediately after `pip install`, without a cluster.
+- Continuous queries need a long-lived process for state, recovery, resident model sessions, and GPU sharing.
+- High-volume video should stay close to the camera. A 1080p stream is roughly 4 Mbps; centralizing dozens of feeds creates material network and compliance costs, while query results are often only kilobytes.
 
-单一部署方式无法同时满足这些条件。因此，VisionQL 使用**同一个引擎内核，提供两种宿主形态**；SQL 和目录（Catalog）在两种形态之间保持一致。更远期的集群等形态暂不定义，待现有版本验证后再规划。
+One deployment form cannot serve all three well. VisionQL therefore uses **one engine kernel with two hosts**, sharing SQL and Catalog semantics. Cluster designs remain out of scope until these forms are validated.
 
-| 形态 | 载体 | 覆盖场景 | 阶段 |
+| Form | Packaging | Intended use | Release |
 |---|---|---|---|
-| **库态** `visionql` | pip 包，像 DuckDB 一样嵌入进程 | notebook 探索、批任务、CI 回归；开发阶段也可在前台运行流查询（随 v0.2） | v0.1（MVP） |
-| **服务态** `vqld` | 由 `vql-server` crate 构建的单机守护进程；目录、模型运行时和流运行时都包含在一个二进制中 | 常驻流查询、持久作业与恢复、多客户端共享，以及分析师和 BI 工具通过标准协议接入 | v0.3 |
+| Embedded `visionql` | pip package embedded in-process, similar to DuckDB | Notebook exploration, batch jobs, CI regression, and foreground streaming during development | v0.1 (MVP); streaming in v0.2 |
+| Service `vqld` | Single-node daemon built by `vql-server`; Catalog, model runtime, and streaming runtime live in one binary | Long-running streams, durable jobs and recovery, shared clients, Workbench, and BI access | v0.3 |
 
-CLI 的可执行文件名是 `vql`（`vql shell`、`vql run` 等），与守护进程 `vqld` 形成命名配对；pip 包名和 Python import 名保持 `visionql`。
+The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`. The pip package and Python import remain `visionql`.
 
-**形态间的关键约定**:
+**Lifecycle and protocol contracts:**
 
-1. **在 notebook 中验证，再用同一条命令运行**。`run` 与 `submit` 是一对含义明确的动词：`vql run job.sql` 前台附着执行，v0.1 起可用于批脚本、v0.2 起可用于持续查询，任务随客户端进程结束；`vql submit job.sql [--name <job>]` 随 v0.3 服务态提供，将脚本中的 DDL 逐条执行，并把其中唯一一条无界 Sink 语句包装为 `SUBMIT QUERY` 提交为脱离客户端的持久作业，作业名默认取文件名。`SUBMIT QUERY <name> AS INSERT INTO ...` 是协议层的公共提交语句，CLI 和 Workbench 都经由它提交，引擎不提供私有提交通道。普通无界 SQL 始终保持客户端附着，升级版本不会悄悄改变同一条 SQL 的生命周期。
-2. **持续查询在 v0.3 交给服务态管理**。v0.2 的持续查询在客户端前台运行，随进程结束；v0.3 服务态为显式提交的持久作业提供名称、状态、`SHOW/DESCRIBE QUERY`、`PAUSE`、`RESUME`、`STOP`、恢复以及查询级指标。作业依赖的目录对象在 `DESCRIBE QUERY` 返回的定义中可见；删除被运行中作业引用的对象时，引擎拒绝并在结构化错误中列出依赖它的作业。
-3. **客户端使用标准列式协议**。服务态使用 Arrow Flight SQL；Python SDK、BI 工具和第三方应用通过 Flight SQL、ADBC 或 JDBC 连接，不增加私有协议。
-4. **首次运行不要求外部依赖**。服务态二进制内置目录和模型运行时；Kafka、对象存储和 Kubernetes 都是可选集成，不是启动前提。
-5. **Workbench 与服务态同期交付**。Workbench 是独立的轻量子项目，通过 Arrow Flight SQL 连接 `vqld`。它既使用公开协议，也用于持续验证协议是否覆盖完整的客户端需求。能力和边界见 3.8。
+1. **Validate in a notebook, then run the same script.** `vql run job.sql` executes in the foreground: batch from v0.1, streaming from v0.2, and always attached to the client. In v0.3, `vql submit job.sql [--name <job>]` executes the DDL statements and wraps the script's single unbounded Sink statement as `SUBMIT QUERY`; the filename supplies the default job name. `SUBMIT QUERY <name> AS INSERT INTO ...` is the public protocol statement used by CLI and Workbench. An ordinary unbounded SQL statement never becomes detached implicitly after an upgrade.
+2. **The service owns durable queries in v0.3.** Foreground v0.2 streams stop with the client. Explicitly submitted jobs gain a name, state, recovery, query-level metrics, and `SHOW/DESCRIBE QUERY`, `PAUSE`, `RESUME`, and `STOP`. `DESCRIBE QUERY` exposes dependencies. Dropping an object referenced by a running job fails with a structured error listing the dependent jobs.
+3. **Clients use standard columnar protocols.** The service speaks Arrow Flight SQL. Python, BI tools, and third-party applications connect through Flight SQL, ADBC, or JDBC; there is no private client protocol.
+4. **First launch has no mandatory external service.** Catalog and model runtime are built in. Kafka, object storage, and Kubernetes are optional integrations.
+5. **Workbench ships with the service.** It is a separate lightweight project and a normal Flight SQL client. This both enforces the public protocol boundary and validates that the protocol covers a real visual client.
 
-### 3.6 执行层关键设计（简述）
+### 3.6 Execution Requirements
 
-以下内容不在 PRD 中展开实现细节，但它们是上述用户体验成立的前提，也为后续技术设计提供约束：
+The implementation details live in [System Design](./design.md), but the following constraints are required for the product experience above:
 
-1. **优化器**：只实现用户显式 fps/time range 的采样与解码下推，以及对确定性模型调用的查询内公共表达式消除；
-2. **帧数据通路**：解码后的帧占用大量内存，1080p RGB 约为 6MB/帧，5fps 单流约为 30MB/s。`IMAGE` 列在查询计划中尽量使用引用或压缩表示并减少复制，解码延迟到推理或落盘前。
-3. **GPU 感知调度**:模型自动 batching、算子与模型的共置、背压;
-4. **流语义**:事件时间 + 水位线、断流重连;RTSP 为不可重放 live 源,投递语义尽力而为,断流/丢帧缺口如实反映在结果里,不伪造;
-5. **存储**:列式多模态格式(Parquet 与 Lance 随 v0.4 + 视频引用);
-6. **可观测**:每查询的推理次数、延迟等指标,v0.3 起经 Prometheus 指标端点暴露并支撑 Workbench 成本面板;
-7. **代码型函数执行**：计算量大的模型推理使用 `USING MODEL`，由引擎管理 GPU；代码型函数主要用于轻量的数据处理。Python UDF 根据产品形态采用不同的执行方式：库态在宿主 Python 进程中调用，通过 Arrow 批传递数据，并利用批处理和原生库降低 GIL 影响；v0.3 服务态使用进程外 Python worker，通过 Arrow IPC 通信，按函数隔离依赖，避免 worker 崩溃影响引擎，也可以通过多个 worker 提高并发。引擎内核不嵌入 Python 解释器，只有注册 Python 函数时才需要 Python 运行时。
+1. **Optimizer:** in the initial scope, push only user-declared fps/time ranges and decoding, plus query-local common-expression elimination for deterministic model calls.
+2. **Frame path:** decoded 1080p RGB is about 6 MB per frame; one 5 fps stream produces about 30 MB/s. `IMAGE` should remain a reference or compressed value through most of the plan, with decoding deferred until inference or persistence.
+3. **GPU-aware scheduling:** automatic batching, operator/model co-location, and backpressure.
+4. **Streaming semantics:** event time, watermarks, and reconnect behavior. RTSP is non-replayable and therefore best-effort; outages and dropped frames must appear as gaps rather than fabricated data.
+5. **Storage:** columnar multimodal output, with Parquet and Lance plus video references in v0.4.
+6. **Observability:** per-query inference count and latency; from v0.3, a Prometheus endpoint powers operational and Workbench cost views.
+7. **Code functions:** heavy inference uses `USING MODEL` so the engine can manage GPUs. In embedded mode, Python UDFs run in the host process and exchange Arrow batches. In the v0.3 service, Python UDFs run in isolated worker processes over Arrow IPC. The kernel never embeds a Python interpreter and needs Python only when a Python function is registered.
 
-### 3.7 非功能需求（NFR）
+### 3.7 Non-Functional Requirements
 
-| 类别 | 要求 |
+| Area | Requirement |
 |---|---|
-| **性能(MVP 基线)** | 单机 1×消费级 GPU:≥ 8 路 1080p@5fps 并发流上运行轻量检测 + 窗口聚合;批扫描吞吐以解码为瓶颈打满硬件;元数据/已落盘结果的交互查询 P95 < 1s |
-| **容错** | RTSP 为不可重放 live 源,投递语义尽力而为,缺口如实反映、不伪造;断流自动重连;v0.3 起服务态重启后持久查询自动恢复,不丢目录状态 |
-| **错误语义** | 单帧解码/推理失败默认不中断查询:该行结果置 NULL 并计入每查询的错误指标,失败率超阈值告警;严格模式 `on_error = 'fail'` 可选。模型输出的概率性(漏检/误检)不属于错误,由置信度阈值显式管理(见 2.5) |
-| **安全与隐私** | "数据不出域"是默认架构(引擎去数据旁,而非数据上云);模型来源哈希固定、防篡改;服务态(v0.3):TLS + 认证、表/流级权限,Python UDF 于进程外执行 |
-| **兼容性承诺** | SQL 方言与目录格式在 1.0 正式版之前不作稳定性承诺;`EXPLAIN` 输出与内部指标名不作为稳定接口。格式可变,但升级必须提供自动迁移:已有目录能被新版本直接打开,迁移失败可回滚,任何版本都不要求用户重建目录 |
+| **Performance (MVP baseline)** | On one machine with one consumer GPU: at least 8 concurrent 1080p@5fps streams running lightweight detection plus window aggregation; batch scans should saturate hardware with decoding as the bottleneck; interactive metadata and persisted-result queries must achieve P95 < 1s |
+| **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. From v0.3, durable service jobs recover after restart without losing Catalog state. |
+| **Error semantics** | A single decode or inference failure produces NULL for that row and increments query error metrics. Alert when the failure rate crosses a threshold. Optional strict mode is `on_error = 'fail'`. Model false positives and false negatives are not engine errors; users manage them with explicit thresholds. |
+| **Security and privacy** | Data stays in its domain by default. Pin and hash model sources. The v0.3 service adds TLS, authentication, relation-level authorization, and out-of-process Python UDFs. |
+| **Compatibility** | SQL and Catalog formats are unstable until 1.0; `EXPLAIN` text and internal metric names are not stable APIs. Upgrades must migrate existing catalogs automatically, roll back failed migrations, and never require a catalog rebuild. |
 
-### 3.8 Workbench（Web 工作台）
+### 3.8 Workbench
 
-Workbench 是 v0.3 与 `vqld` 服务态一同交付的 Web 图形界面，也是位于 `vql-workbench/` 的独立轻量子项目。它包含单页应用和配套后端，后端作为标准 Arrow Flight SQL 客户端连接 `vqld`。Workbench 与引擎之间只使用公开客户端协议，不依赖私有 API。
+Workbench ships with `vqld` in v0.3 as a separate lightweight project under `vql-workbench/`. Its SPA and small backend connect to `vqld` as standard Arrow Flight SQL clients and use no private engine API.
 
-**为什么需要 Workbench？** DBeaver 等通用 SQL 客户端可以通过 JDBC/ADBC 连接 `vqld`，但通常只会把 `IMAGE` 显示为二进制，把检测结果显示为结构体文本。视觉查询需要直接查看图片、检测框和实时画面，才能有效调试。Workbench 专注于多模态结果预览和视觉查询运维，不与通用 BI 工具竞争。
+Generic SQL clients can connect through JDBC or ADBC, but typically render `IMAGE` as binary and detection structs as text. Visual query development needs inline images, bounding boxes, and recent stream results. Workbench focuses on multimodal result inspection and query operations rather than general BI.
 
-**目标用户**包括数据分析师、工程师和平台运维人员。数据分析师可以直接在浏览器中查询，无需本地安装；工程师用它调试 SQL 和模型效果；运维人员用它监控持续查询和成本。
-
-**核心能力**:
-
-| 能力 | 说明 | 阶段 |
+| Capability | Contract | Release |
 |---|---|---|
-| SQL 编辑与执行 | VQL 语法高亮、目录感知补全、多语句脚本执行和查询历史。客户端通过 prepared schema metadata 识别语句类型和有界性；交互查询会在传输端限制返回行数，不改写 SQL，也不改变查询语义 | v0.3 |
-| 结果预览 | 表格分页;`IMAGE` 缩略图内联显示,点击后经 locator(Flight ticket)解引用取原图,解引用时重新授权;原图点查仅对持久数据有效(文件表、落盘表),live 流的实时预览只承诺缩略图,需要回查原图的行先经事件帧留存落盘(3.3.6);检测结果(`BOX2D`)叠加绘制在对应帧上,置信度滑杆前端过滤(调阈值不重跑查询);`VECTOR` 折叠显示 | v0.3 |
-| 流结果实时预览 | 实时滚动显示无界 SELECT 的最近 N 行结果；关闭页面时自动取消预览查询 | v0.3 |
-| 目录浏览 | 浏览表、流、模型、函数和 Sink，并查看 schema 与 DDL | v0.3 |
-| 持续查询运维 | 通过公开 SQL 显式提交持久作业，展示名称、定义、状态、推理量、延迟、丢帧和断流指标，并提供 `PAUSE`、`RESUME`、`STOP` 操作 | v0.3 |
-| 成本面板 | 读取引擎的 Prometheus 指标端点，展示每个查询的实际 GPU 时长和推理次数；无需部署 Prometheus server | v0.3 |
+| SQL editor and execution | VQL highlighting, Catalog-aware completion, multi-statement scripts, and history. Prepared schema metadata identifies statement type and boundedness. Interactive row limits are applied at transport, not by rewriting SQL. | v0.3 |
+| Result inspection | Paginated table; inline `IMAGE` thumbnails; click-through via a locator-backed Flight ticket with reauthorization; `BOX2D` overlays; client-side confidence filtering; collapsed `VECTOR`. Original-frame lookup is available only for persistent sources. Live preview guarantees thumbnails; evidence that needs later lookup must first be persisted. | v0.3 |
+| Live result preview | Rolling view of the most recent N rows from an unbounded SELECT; closing the page cancels the preview query | v0.3 |
+| Catalog browser | Browse tables, streams, models, functions, and Sinks with schema and DDL | v0.3 |
+| Continuous-query operations | Submit durable jobs through public SQL; show definition, state, inference volume, latency, dropped frames, and disconnections; expose `PAUSE`, `RESUME`, and `STOP` | v0.3 |
+| Cost view | Read the engine's Prometheus-format endpoint and show actual GPU time and inference calls per query without requiring a Prometheus server | v0.3 |
 
-**产品原则**:
+Workbench follows three rules:
 
-1. **所有功能都通过 SQL 或标准协议完成**：目录浏览使用 `SHOW`，持久提交使用 `SUBMIT QUERY`，详情使用 `DESCRIBE QUERY`，运维使用 `PAUSE`/`RESUME`/`STOP`，指标读取引擎的 Prometheus 标准格式端点。Workbench 读取版本化 capability、statement metadata 和结构化错误，不要求引擎提供私有管理 API。
-2. **保持无状态**：Workbench 不持久化业务数据。认证由引擎处理，保存的查询放在浏览器本地，因此 Workbench 进程可以随时重启或扩容。
-3. **独立发布**：Workbench 有自己的版本号和发布节奏，引擎不依赖 Workbench。两者的兼容范围跟随 SQL 方言和 Flight SQL 协议的稳定性承诺（3.7）。
+1. Every operation uses SQL or a standard protocol: `SHOW`, `SUBMIT QUERY`, `DESCRIBE QUERY`, `PAUSE`, `RESUME`, `STOP`, versioned capabilities, statement metadata, structured errors, and Prometheus-format metrics.
+2. Workbench is stateless. The engine authenticates users; saved queries remain in browser storage; the process can restart or scale freely.
+3. Workbench is released independently. The engine does not depend on it, and compatibility follows the SQL and Flight SQL stability policy in Section 3.7.
 
-技术设计见 [Workbench 设计](./proposals/0002-workbench.md)。
+See the [Workbench proposal](./proposals/2026-08-05-workbench.md) for the technical design.
 
 ---
 
-## 4. 产品边界与 MVP 范围
+## 4. Scope and Version Boundaries
 
-**非目标**：VisionQL 是查询与处理引擎，不是完整的行业应用。
+VisionQL is a query and processing engine, not a complete vertical application.
 
-- **不做模型训练和标注平台**：VisionQL 可以筛选和导出训练数据，例如检索 corner case，但不负责模型训练本身。
-- **不做视频存储系统（VMS）或流媒体服务器**：VisionQL 连接 RTSP 和对象存储等现有系统，不替代它们。
-- **不做面向最终用户的安防或审核应用**：VisionQL 为应用开发者提供引擎。场景包只包含模型、SQL 模板和面板。
+- It does not train models or provide a labeling platform. It can find and export training examples, including corner cases.
+- It is not a video management system or media server. It connects to existing RTSP and object-storage systems.
+- It is not an end-user security or moderation application. Scenario packages may include models, SQL templates, and dashboards, but applications remain separate.
 
-**v0.1 包含的能力**聚焦于库态单机处理图片与视频文件，纯批处理：
+**v0.1 is a single-node, embedded, batch-only release for images and recorded video:**
 
-- 类型系统 + IMAGE/VIDEO/BOX2D（`VECTOR` 类型随 v0.4 嵌入检索启用）
-- 图片与视频文件(批):图片/视频目录表(视频建表时按 fps 展开为帧表)、`UNNEST`
-- `CREATE MODEL` + `CREATE FUNCTION ... USING MODEL`(OBJECT_DETECTION 一类,含 1:1 语法糖)+ 库态 Python UDF
-- Sink:Console(前台调试用,`INSERT INTO` 形状不变只换 Sink);Kafka 随 v0.2、Parquet 与 Lance 随 v0.4 加入
-- 产品形态:库态(pip 包)+ SQL shell + `vql run job.sql` 脚本执行 + Python 库接口(`sess.sql()`、Arrow 结果交换、notebook 富显示、UDF 注册;链式 DataFrame 见 3.4,随 v0.3 交付)
-- 本地状态：Catalog、shell history 与缓存统一位于 `VQL_HOME`（默认 `$HOME/.vql`），其中 SQLite Catalog 位于 `$VQL_HOME/catalog/vql.db`；开发约定使用 `VQL_HOME=./data/.vql`，数据集独立放在 `./data/datasets/`
-- 优化：帧采样下推（实现相对简单，且效果容易验证）
+- `IMAGE`, `VIDEO`, `BOX2D`, nested types, and `UNNEST`; `VECTOR` waits for v0.4.
+- Image and video directory tables. Video is expanded by the table's declared fps.
+- One `OBJECT_DETECTION` model type through `CREATE MODEL` and `CREATE FUNCTION ... USING MODEL`, including one-to-one shorthand, plus in-process Python UDFs.
+- Console Sink for foreground debugging. Kafka arrives in v0.2; Parquet and Lance arrive together in v0.4.
+- Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. The chainable DataFrame API arrives in v0.3.
+- Catalog, shell history, and cache live under `VQL_HOME` (default `$HOME/.vql`). The SQLite Catalog is exactly `$VQL_HOME/catalog/vql.db`. Repository development uses `VQL_HOME=./data/.vql`; datasets live separately under `./data/datasets/`.
+- Explicit frame-sampling pushdown as the first optimizer feature.
 
-**明确安排在 v0.2 的能力**：库态流处理，把 v0.1 验证过的查询逻辑原样切换到实时流。RTSP 单流摄入、TUMBLE 窗口聚合（白名单为 `COUNT/SUM/AVG/MIN/MAX` 的可持久化标量类型）、Kafka Sink，以及持续查询的前台附着运行（随客户端进程结束，不承诺持久恢复）。投递语义：RTSP 为不可重放 live 源，尽力而为，断流/丢帧缺口如实反映。
+**v0.2 adds attached, embedded streaming.** It takes v0.1 query logic to one RTSP stream, adds `TUMBLE` with a bounded allowlist of `COUNT/SUM/AVG/MIN/MAX` over persistable scalar types, Kafka Sink, and foreground continuous execution tied to the client process. RTSP remains non-replayable and best-effort; outages and drops appear as gaps.
 
-**明确安排在 v0.3 的能力**：`vqld` 服务态（Flight SQL、TLS/认证、表/流级权限、持久作业管理与恢复）、Python DataFrame API（3.4）和 Workbench（Web 工作台）。
+**v0.3 adds the `vqld` service**, Flight SQL, TLS/authentication, relation-level authorization, durable job management and recovery, the Python DataFrame API, and Workbench.
 
-**明确安排在 v0.4 的能力**：跨模态检索（文搜图）与结果落盘。EMBEDDING 模型类型、`VECTOR` 类型、`<->` 暴力 TopK、Parquet 与 Lance 落盘（`IMAGE` 原生列存与向量列）以及 HNSW 向量索引，SQL 语义见 3.3.5。Parquet 与 Lance 同版本交付，两者共用同一套写出、CTAS 与逻辑类型恢复契约，分版本做会把 `IMAGE` 列存设计两遍。
+**v0.4 adds cross-modal retrieval and persisted results:** `EMBEDDING`, `VECTOR`, brute-force `<->` TopK, Parquet and Lance with native `IMAGE` and vector columns, and HNSW indexing. Parquet and Lance ship together against one output, CTAS, and logical-type recovery contract so `IMAGE` storage is designed only once.
 
-**其余方向暂不定义**：候选清单见 [Roadmap](../ROADMAP.md) 的"后续方向"一节，待前几个版本获得真实反馈后再规划，避免过早设计。
+Everything else remains intentionally undefined. Candidate directions live in the [Roadmap](../ROADMAP.md) and will be scheduled only after earlier releases produce real feedback.
 
-**MVP 验收场景**：以下两个场景合并覆盖全部 MVP 组件，确保每项实现都被真实流程使用。两者分属不同版本：场景 A 随批能力（v0.1）验收，场景 B 随流能力（v0.2）验收——场景 B 的断言是批流结果一致，批必须先成为可信参照，否则结果不一致时无从判断是哪一侧出错。版本划分见 [Roadmap](../ROADMAP.md)。
+**Acceptance scenarios:**
 
-- **场景 A（首次使用无需外部服务，v0.1）**：全程在本地运行。用户从图片目录建表，通过 Python UDF 过滤模糊图片，用 `detect` 筛选出包含指定目标的图片，结果直接显示在 Python 会话中。因为进程内 Python UDF 要求引擎与用户代码同进程，该场景在 Python 宿主（notebook 或 REPL）中完成，而不是 `vql shell`——CLI 遇到 Python UDF 会明确提示改用 Python 宿主（见[系统设计](./design.md) §10.3）。纯 SQL 的首用路径（3.2）在 shell 中完成，两条路径都要满足从 `pip install` 到第一个结果不超过 5 分钟。
-- **场景 B(批流一体,v0.2)**:以 3.2 的"每分钟人数"查询为基础:先在本地视频表上批量回算(即 3.2 旅程),再把同一条查询逻辑切换到 RTSP 流,以 `vql run` 前台运行并写入 Kafka,断言两者结果一致(相同模型与采样率);调试阶段以 console sink 查看 `UNNEST` 展开的检测明细。
+- **Scenario A — first value without external services (v0.1):** run locally in a Python host. Register an image directory, use a Python UDF to reject blurry images, run `detect` to select images containing a target object, and display the result in the Python session. An in-process UDF requires a notebook or REPL; `vql shell` must direct the user to a Python host. The pure-SQL first-run path in Section 3.2 runs in the shell. Both paths must produce a first result within five minutes of `pip install`.
+- **Scenario B — batch/stream parity (v0.2):** start with the per-minute people-count query in Section 3.2, run it over recorded video, then point the same logic at RTSP and use `vql run` to publish to Kafka. With the same model and sample rate, assert equivalent results. Use Console Sink during debugging to inspect `UNNEST` output. Batch is the trusted reference for the streaming comparison.
 
-场景 A 用于验证首次使用是否足够简单，场景 B 用于验证完整能力（含流处理和外部 Sink）。
+Scenario A proves that first use is simple. Scenario B proves the differentiated end-to-end streaming capability.
 
-## 5. 路线图
+## 5. Roadmap Summary
 
-当前只定义三个版本，之后的方向刻意不做提前设计：
-
-| 阶段 | 主题 | 关键交付 |
+| Release | Theme | Core deliverables |
 |---|---|---|
-| **v0.1(MVP)** | 单机批处理图片与视频文件 | 库态(pip 包)+ SQL + CLI、图片/视频目录表、检测模型、Python UDF、Console Sink、帧采样下推;验收场景 A 见第 4 节 |
-| **v0.2** | 批流一体 | RTSP 单流摄入与 TUMBLE 窗口聚合、Kafka Sink、持续查询前台附着运行;验收场景 B 见第 4 节 |
-| **v0.3** | 服务化与图形界面 | `vqld` 服务态(Flight SQL、TLS/认证、表/流级权限、显式 `SUBMIT QUERY` 持久作业与恢复)、Python DataFrame API(见 3.4)和 Workbench(Web 工作台,见 3.8) |
-| **v0.4** | 跨模态检索与结果落盘 | EMBEDDING 模型类型、`VECTOR` 类型与 `<->` 暴力 TopK、Parquet 与 Lance 落盘(IMAGE 原生列存与向量列)、HNSW 向量索引;SQL 语义见 3.3.5 |
+| **v0.1 (MVP)** | Single-node batch over images and recorded video | Embedded pip package, SQL, CLI, image/video directory tables, object detection, Python UDFs, Console Sink, sampling pushdown, Acceptance Scenario A |
+| **v0.2** | Unified batch and streaming | One RTSP source, `TUMBLE`, Kafka Sink, attached continuous execution, Acceptance Scenario B |
+| **v0.3** | Service and visual client | `vqld` with Flight SQL, TLS/authentication, relation-level authorization, explicit `SUBMIT QUERY`, durable jobs and recovery, Python DataFrame API, Workbench |
+| **v0.4** | Cross-modal retrieval and persistence | `EMBEDDING`, `VECTOR`, brute-force `<->` TopK, Parquet and Lance with native multimodal columns, HNSW |
 
-更远期的方向（优化器降本、集群与多租户、边缘协同等）待这些版本获得真实反馈后再定义。本表为产品级概要；完整交付清单、验收口径和候选方向维护于 [Roadmap](../ROADMAP.md)。
+Cost optimization, clustering, multi-tenancy, and edge coordination remain future candidates. The complete delivery and acceptance plan is maintained in the [Roadmap](../ROADMAP.md).
 
-## 6. 商业化路径
+## 6. Business Model
 
-VisionQL 通过开源引擎（Apache-2.0）建立用户和生态：引擎内核、库态、服务态和完整 SQL 语义全部开源，个人和小团队可以完整使用，长期目标是建立通用的视觉 SQL 使用方式。商业化围绕生产环境中的规模化运行展开（企业级治理、托管服务等），具体形态待开源版本验证产品价值后再定义。
+VisionQL will use an Apache-2.0 open-source engine to establish adoption and a common visual SQL ecosystem. The kernel, embedded and service forms, and complete SQL semantics remain open source so individuals and small teams can use the full product. Commercial offerings will focus on operating VisionQL at production scale—enterprise governance, managed services, and related needs—after the open-source releases validate product value.
 
-**首批用户策略**：与 2～3 家设计伙伴共同打磨一个重点场景，重点场景在安防/园区和内容审核之间选择，详见开放问题 1。开源发布时提供可以直接运行的场景示例。
+The first users will be two or three design partners working with the team on one focused scenario, selected between security/campuses and content moderation. The open-source launch will include a runnable example for that scenario.
 
-## 7. 成功指标
+## 7. Success Metrics
 
-**北极星指标：每周通过 VisionQL 查询处理的视频小时数**，其中批处理和流处理统一折算。这个指标同时反映使用范围和实际负载规模。
+**North-star metric: hours of video processed through VisionQL each week**, with batch and streaming normalized into one measure.
 
-| 维度 | 指标 |
+| Dimension | Metric |
 |---|---|
-| 激活 | 首次价值时间（TTFV）：从 `pip install` 到第一个查询结果少于 5 分钟，全程不依赖外部服务，口径见 3.2 五分钟旅程与第 4 节场景 A |
-| 效率 | 典型的“每分钟人数统计”任务少于 30 行代码；从零到上线少于 30 分钟 |
-| 成本 | 在可采样负载上，帧采样下推使 GPU 时长相对逐帧全量推理按采样比例线性降低 |
-| 正确性 | 使用相同模型和采样率时，窗口聚合结果与手写基线管道一致 |
-| 采用 | 开源后 90 天内，至少有 3 个真实外部场景端到端上线，至少 1 家设计伙伴开始承载生产流量 |
-| 留存 | 流查询平均持续在线超过 30 天；设计伙伴的周活跃查询数持续增长 |
+| Activation | Time to first value is under 5 minutes from `pip install`, with no external service; measured through Section 3.2 and Scenario A |
+| Efficiency | The standard per-minute people-count task uses fewer than 30 lines of code and goes from zero to running in under 30 minutes |
+| Cost | On workloads where sampling is valid, GPU time falls approximately in proportion to the declared sample-rate reduction versus full-frame inference |
+| Correctness | With the same model and sample rate, window aggregates match a hand-built baseline pipeline |
+| Adoption | Within 90 days of open-source launch, at least 3 real external scenarios run end to end and at least 1 design partner carries production traffic |
+| Retention | Streaming queries remain online for more than 30 days on average, and weekly active queries grow among design partners |
 
-## 8. 开放问题
+## 8. Open Questions
 
-以下问题将在设计评审和设计伙伴访谈后确定：
-
-1. **首个重点场景**：选择安防/园区，还是内容审核？前者更依赖私有化部署和渠道，但付费意愿较强；后者更偏云原生，决策链较短，数据量更大。这个选择会影响首批连接器和场景包的投入方向。
-2. **SQL 方言兼容范围**：类型名、函数命名和错误码需要在多大程度上遵循 PostgreSQL 习惯？这会直接影响现有生态工具的兼容成本。
-3. **置信度在聚合中的语义**：是否需要提供区间估计等专用原语，还是长期保持由用户在查询中明确指定阈值？
-4. **客户端协议中的 `IMAGE` 传输策略**：方向已确定——结果默认返回缩略图 + 引用，不内联原图字节；引用同时包含只展示的脱敏 `uri` 和绑定数据版本的不透明 `locator`，原图通过 Flight 原生的 ticket/DoGet 以 locator 解引用获取，解引用时重新授权（传输层机制，不占用 SQL 语法）。locator 只对持久数据有效：文件表和落盘表可随时解引用，live 流的瞬时帧不承诺可回取，需要回查的行先经事件帧留存落盘（3.3.6）。v0.3 Flight schema 冻结前仍需用 Workbench、Python 和 BI 客户端确认缩略图尺寸、内联字节上限与 locator TTL，详见 [Workbench 设计](./proposals/0002-workbench.md) §3.2。
+1. **Initial vertical:** security/campuses or content moderation? Security favors private deployment and has stronger willingness to pay but longer channel dependencies. Moderation is more cloud-native, has shorter buying paths, and often larger data volume. The answer determines early connector and scenario investment.
+2. **SQL compatibility:** how closely should type names, functions, and error codes follow PostgreSQL conventions? The decision affects compatibility with existing tools.
+3. **Confidence-aware aggregation:** should VisionQL eventually provide interval estimates or other dedicated primitives, or should users continue to set thresholds explicitly?
+4. **`IMAGE` transport:** the direction is fixed—return a thumbnail plus a reference by default, never inline original bytes implicitly. The reference includes a display-only sanitized `uri` and an opaque, version-bound `locator`. Original media is fetched through a Flight ticket/DoGet and reauthorized at dereference time. Locators apply only to persistent data. Live frames guarantee thumbnails only; anything requiring later retrieval must first be written by an evidence-retention query. Before the v0.3 Flight schema freezes, Workbench, Python, and BI client testing must determine thumbnail dimensions, inline-byte limits, and locator TTL. See the [Workbench proposal](./proposals/2026-08-05-workbench.md) §3.2.
 
 ---
 
-## 附录：SQL 保留字和新增语法
+## Appendix: VQL Syntax
 
-| 语法 | 类别 | 作用 |
+| Syntax | Category | Purpose |
 |---|---|---|
-| `CREATE STREAM ... FROM 'rtsp://...'` | DDL | 注册视频流 |
-| `CREATE TABLE ... USING IMAGES/VIDEOS` | DDL | 目录即表 |
-| `CREATE MODEL ... TYPE ... FROM ...` | DDL | 注册模型(资源层);可带 `FUNCTION` 子句顺带派生函数 |
-| `CREATE FUNCTION ... USING MODEL / LANGUAGE <lang> AS '<入口>' / AS (<表达式>)` | DDL | 注册函数(接口层):资源引用型 / 代码型 / SQL 宏 |
-| `ALTER MODEL ...` | DDL | 创建新的模型版本；只影响之后新规划的查询 |
-| `ALTER FUNCTION ... SET MODEL` | DDL | 为函数换绑模型；只影响之后新规划的查询 |
-| `CREATE SINK` | DDL | 声明查询结果的输出位置 |
-| `CREATE INDEX ... USING HNSW` | DDL | 向量索引,`ORDER BY <-> LIMIT` 自动改写为 ANN(v0.4) |
-| `TUMBLE(ts, interval)` | 时间分桶函数 | 滚动窗口,用于 GROUP BY,批流同形 |
-| `UNNEST(expr) AS x` | 关系化 | 检测结果数组 → 行(隐式关联) |
-| `COUNT_OBJECTS(dets, label, conf)` | 内置数组函数 | 按标签/置信度计数,免 lambda |
-| `<->`(等价 `L2_DISTANCE`) | 向量 | 跨模态相似检索(v0.4) |
-| `SUBMIT QUERY name AS INSERT INTO ...` | 运维 | v0.3 显式创建持久 Sink 作业,CLI 入口为 `vql submit job.sql`；普通无界 SQL 仍附着客户端 |
-| `SHOW/DESCRIBE QUERY / PAUSE / RESUME / STOP` | 运维 | 持久查询详情与状态管理(服务态) |
-| `EXPLAIN` | 运维 | 展示查询计划 |
+| `CREATE STREAM ... FROM 'rtsp://...'` | DDL | Register a video stream |
+| `CREATE TABLE ... USING IMAGES/VIDEOS` | DDL | Register a directory as a table |
+| `CREATE MODEL ... TYPE ... FROM ...` | DDL | Register a model resource; an optional `FUNCTION` clause derives a function |
+| `CREATE FUNCTION ... USING MODEL / LANGUAGE <lang> AS '<entry>' / AS (<expression>)` | DDL | Register a resource-backed function, code function, or SQL macro |
+| `ALTER MODEL ...` | DDL | Create a new model revision for queries planned afterward |
+| `ALTER FUNCTION ... SET MODEL` | DDL | Rebind a function for queries planned afterward |
+| `CREATE SINK` | DDL | Declare a result destination |
+| `CREATE INDEX ... USING HNSW` | DDL | Add a vector index; rewrite `ORDER BY <-> LIMIT` to ANN in v0.4 |
+| `TUMBLE(ts, interval)` | Time bucket | Define a tumbling window for batch or streaming `GROUP BY` |
+| `UNNEST(expr) AS x` | Relational | Expand an array of detections into rows |
+| `COUNT_OBJECTS(dets, label, conf)` | Built-in array function | Count by label and confidence without lambdas |
+| `<->` (equivalent to `L2_DISTANCE`) | Vector | Cross-modal similarity in v0.4 |
+| `SUBMIT QUERY name AS INSERT INTO ...` | Operations | Create a durable Sink job explicitly in v0.3; CLI entry point is `vql submit job.sql`; ordinary unbounded SQL stays attached |
+| `SHOW/DESCRIBE QUERY / PAUSE / RESUME / STOP` | Operations | Inspect and manage durable queries |
+| `EXPLAIN` | Operations | Show the query plan |
+
+## Changelog
+
+| Date | Change |
+|---|---|
+| 2026-08-07 | Initial product design |

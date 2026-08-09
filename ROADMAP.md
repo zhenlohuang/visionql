@@ -80,11 +80,11 @@ Parquet 与 Lance 一并在本版交付：两者共用同一套写出、`CREATE 
 
 - [ ] EMBEDDING 模型类型：同一模型派生多个函数（如 CLIP 的 `embed_image` / `embed_text`）
 - [ ] `VECTOR(n)` 类型、`<->`（`L2_DISTANCE`）与 `ORDER BY ... LIMIT` 暴力 TopK
-- [ ] Parquet Sink 与表 provider（[proposal 0003](./docs/proposals/0003-parquet-sink.md)）：批追加与流式滚动文件、`CREATE TABLE ... AS SELECT`、逻辑类型写出/读回
+- [ ] Parquet Sink 与表 provider（[Parquet Sink proposal](./docs/proposals/2026-08-06-parquet-sink.md)）：批追加与流式滚动文件、`CREATE TABLE ... AS SELECT`、逻辑类型写出/读回
 - [ ] Lance 存储与 Sink：`IMAGE` 原生列存、向量列，嵌入结果落盘复用
 - [ ] HNSW 向量索引：复用 Lance 原生索引，存在索引时 TopK 自动改写为 ANN；自动启用的规模阈值由实测确定并写入文档，在此之前只支持显式建索引
 
-**验收**：本地图片目录 → 嵌入 → 写入 Lance → 以文搜图返回 Top-20（PRD 3.3.5）；暴力 TopK 与 HNSW 各覆盖一档数据规模，规模口径随 [proposal 0004](./docs/proposals/0004-cross-modal-retrieval.md) 立项确定。
+**验收**：本地图片目录 → 嵌入 → 写入 Lance → 以文搜图返回 Top-20（PRD 3.3.5）；暴力 TopK 与 HNSW 各覆盖一档数据规模，规模口径随 [Cross-modal Retrieval proposal](./docs/proposals/2026-08-07-cross-modal-retrieval.md) 立项确定。
 
 ## 后续方向（暂无版本计划）
 

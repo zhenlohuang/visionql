@@ -1,25 +1,27 @@
 # VisionQL Proposals
 
-本目录存放 VisionQL 的子功能设计文档（proposal）。每个 proposal 对应一个**可独立开发、独立交付的 feature**，且尚未进入 [design.md](../design.md) 的当前范围；当前在建能力的完整设计（含图片/视频表、模型运行时、RTSP 与窗口、Console/Kafka）都在 design.md，产品需求见 [prd.md](../prd.md)。
+This directory contains focused designs for VisionQL features that can be developed and delivered independently but are not yet part of the current scope in [design.md](../design.md). The complete design for active work—including image and video tables, the model runtime, RTSP and windows, and Console/Kafka Sinks—remains in `design.md`. Product requirements are defined in [prd.md](../prd.md).
 
-## 索引
+## Index
 
-| 编号 | 标题 | 状态 | 目标版本 | 摘要 |
+| Created | Title | Status | Target version | Summary |
 |---|---|---|---|---|
-| [0001](./0001-vqld-service.md) | vqld 服务态 | Draft | v0.3 | Flight SQL 公开契约、媒体协议、持久作业、检查点与恢复 |
-| [0002](./0002-workbench.md) | Workbench（Web 工作台） | Draft | v0.3 | 多模态 SQL 客户端：编辑执行、结果预览、实时预览、目录浏览与作业运维 |
-| [0003](./0003-parquet-sink.md) | Parquet Sink | Draft | v0.4 | 结果落盘 Parquet：批追加与流式滚动文件 |
-| [0004](./0004-cross-modal-retrieval.md) | 跨模态检索（含 Lance 存储） | Draft | v0.4 | EMBEDDING 模型、VECTOR 距离 TopK、HNSW 索引与 Lance 存储 |
+| [2026-08-05](./2026-08-05-workbench.md) | Workbench | Draft | v0.3 | Multimodal SQL client for editing, result and live preview, catalog browsing, and job operations |
+| [2026-08-06](./2026-08-06-vqld-service.md) | vqld Service | Draft | v0.3 | Public Flight SQL contract, media protocol, durable jobs, checkpoints, and recovery |
+| [2026-08-06](./2026-08-06-parquet-sink.md) | Parquet Sink | Draft | v0.4 | Persist results through bounded appends and streaming rolling files |
+| [2026-08-07](./2026-08-07-cross-modal-retrieval.md) | Cross-modal Retrieval with Lance | Draft | v0.4 | `EMBEDDING`, vector Top-K, HNSW, and Lance storage |
 
-## 规划中（尚未立项，暂不建文件）
+## Planned but Not Yet Proposed
 
-- 进程外 Python UDF worker（v0.3）：进程内批量 Arrow ABI 见 design.md §7.4；进程外执行的详细设计待立项。
-- ROADMAP「后续方向」中的各项：排期后各开新 proposal。
+- Out-of-process Python UDF worker for v0.3. The in-process Arrow batch ABI is defined in [design.md](../design.md) §7.4; create a proposal when the worker work begins.
+- Items under “Future Directions” in the [Roadmap](../../ROADMAP.md). Create a proposal only after an item is scheduled.
 
-## 约定
+## Conventions
 
-- **文件名**：`NNNN-kebab-case.md`，四位编号从 0001 起连贯分配；行文中用编号引用（如 "proposal 0001"）。
-- **模板**：新 proposal 从 [0000-template.md](./0000-template.md) 复制。
-- **状态流转**：Draft →（评审通过）Accepted →（对应版本发布）Implemented；被替代时标 Superseded 并指向新编号。feature 进入 design.md 的当前范围后，内容整体并入 design.md、删除该文件，其余 proposal 依次前移保持编号连贯，并同步更新所有引用。
-- **与顶层设计的分界**：改动若触及全局不变量（类型三态、epoch 契约、定义快照语义、公开协议版本等），先修订 [design.md](../design.md) 并走评审；否则新开或修订 proposal 即可。
-- **索引维护**：本 README 是唯一索引，新增 proposal 时同步更新上表。
+- **Filename:** `YYYY-MM-DD-kebab-case.md`, using the proposal's creation date. Multiple proposals created on the same day are distinguished by their descriptive slug; dates are not identifiers and files are never renumbered.
+- **Template:** Start new proposals from [template.md](./template.md).
+- **Language:** Proposal documents, titles, metadata keys, and index entries are written in English.
+- **Front matter:** Include only `created_at`, `status`, `target_version`, and `updated_at`.
+- **Status:** `draft` → `accepted` → `implemented`; use `superseded` when another proposal replaces it and link the replacement in the document body. When a feature enters the current scope of `design.md`, merge its content there and remove the proposal without renaming any remaining files.
+- **System-design boundary:** If a change affects a global invariant—such as payload states, the epoch contract, definition snapshots, or a public protocol version—revise and review [design.md](../design.md) first. Otherwise, create or revise a proposal.
+- **Index maintenance:** This README is the only proposal index. Update the table whenever a proposal is added, renamed, or removed.

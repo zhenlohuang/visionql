@@ -1,9 +1,6 @@
 <div align="center">
   <h1>VisionQL — A Data Engine for Physical AI</h1>
   <p>
-    Query images and recorded video with SQL—locally, without a service.
-  </p>
-  <p>
     <a href="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml">
       <img alt="CI" src="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml/badge.svg?branch=main">
     </a>
@@ -23,14 +20,9 @@
   </p>
 </div>
 
-After registering a video table and a model-backed `detect` function, inference composes like ordinary SQL:
+## What is VisionQL
 
-```sql
-SELECT uri, ts,
-       COUNT_OBJECTS(detect(frame), 'person', 0.6) AS people
-FROM entrance_videos
-ORDER BY uri, ts;
-```
+VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL or the DataFrame API, users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
 > VisionQL v0.1 is a pre-1.0, local batch engine. Image sets and historical video are available now. RTSP streams, Kafka, `vqld`, Workbench, and vector search are roadmap items—not current functionality. See the [Roadmap](ROADMAP.md) for version boundaries.
