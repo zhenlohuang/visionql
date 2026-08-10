@@ -43,7 +43,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-For Python interface changes, run the API suite from the repository root after `maturin develop`:
+CI runs only these three gates on Linux. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
 
 ```bash
 python -m pip install pytest

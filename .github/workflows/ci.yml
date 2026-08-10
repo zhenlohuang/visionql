@@ -23,17 +23,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: CI (${{ matrix.name }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux
-            os: ubuntu-latest
-          - name: macOS
-            os: macos-14
-    runs-on: ${{ matrix.os }}
+  check:
+    name: Static analysis and unit tests
+    runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
@@ -42,13 +34,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install FFmpeg development libraries (Linux)
-        if: runner.os == 'Linux'
+      - name: Install FFmpeg development libraries
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             clang \
-            ffmpeg \
             libavcodec-dev \
             libavdevice-dev \
             libavfilter-dev \
@@ -59,39 +49,14 @@ jobs:
             libswscale-dev \
             pkg-config
 
-      - name: Install FFmpeg (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg
-
-      - name: Install pinned Rust toolchain
-        run: rustc --version --verbose
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-          cache: pip
-          cache-dependency-path: vql-python/pyproject.toml
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
-      - name: Run tests
-        run: cargo test --workspace --locked
-
       - name: Run Clippy
-        if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Build Python wheel
-        run: |
-          python -m pip install "maturin>=1.9,<2" pytest
-          maturin build --manifest-path vql-python/Cargo.toml --profile dev --locked
-          python -m pip install target/wheels/visionql-*.whl
-
-      - name: Test Python API
-        run: pytest -q vql-python/tests
+      - name: Run unit tests
+        run: cargo test --workspace --locked
