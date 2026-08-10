@@ -28,7 +28,7 @@ futures = "0.3.31"
 hf-hub = "0.4.3"
 image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
 object_store = "=0.13.2"
-ort = { version = "=2.0.0-rc.13", features = ["download-binaries", "coreml"] }
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
 percent-encoding = "2.3.2"
 pyo3 = "0.28.0"
 reedline = "0.49.0"
