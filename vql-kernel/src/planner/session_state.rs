@@ -14,7 +14,7 @@ use crate::functions::{
     to_jpeg_udf, tumble_udf,
 };
 use crate::media::MediaRuntime;
-use crate::models::model_function_udf;
+use crate::models::detect_objects_udf;
 use crate::planner::inference::VqlQueryPlanner;
 use crate::{ErrorCode, Result, VqlError};
 use std::sync::atomic::AtomicBool;
@@ -42,23 +42,9 @@ pub(crate) fn context_for_snapshot(
     context.register_udf(polygon_udf("st_polygon"));
     context.register_udf(st_contains_udf());
     context.register_udf(tumble_udf());
+    context.register_udf(detect_objects_udf());
     for (_, function) in snapshot.functions() {
         match &function.definition.implementation {
-            crate::catalog::FunctionImplementation::Model { model } => {
-                let model = snapshot.model(model).ok_or_else(|| {
-                    VqlError::new(
-                        ErrorCode::Catalog,
-                        format!(
-                            "function '{}' references missing model '{model}'",
-                            function.definition.name
-                        ),
-                    )
-                })?;
-                context.register_udf(model_function_udf(
-                    function.definition.clone(),
-                    model.definition.clone(),
-                ));
-            }
             crate::catalog::FunctionImplementation::Python { .. } => {
                 context.register_udf(python_function_udf(
                     function.definition.clone(),

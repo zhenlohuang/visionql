@@ -9,7 +9,7 @@
     {
       "status": "ok",
       "kind": "ddl",
-      "message": "created model 'detector' at revision 2 and function 'detect' at revision 3",
+      "message": "created model 'detector' at revision 2",
       "result": null
     },
     {

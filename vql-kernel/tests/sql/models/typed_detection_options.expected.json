@@ -14,18 +14,6 @@
     },
     {
       "status": "ok",
-      "kind": "ddl",
-      "message": "created function 'model_defaults' at revision 3",
-      "result": null
-    },
-    {
-      "status": "ok",
-      "kind": "ddl",
-      "message": "created function 'people' at revision 4",
-      "result": null
-    },
-    {
-      "status": "ok",
       "kind": "query",
       "message": null,
       "result": {
@@ -36,12 +24,12 @@
             "nullable": false
           },
           {
-            "name": "default_count",
+            "name": "excluded_count",
             "type": "INT64",
             "nullable": true
           },
           {
-            "name": "overridden_count",
+            "name": "people_count",
             "type": "INT64",
             "nullable": true
           }

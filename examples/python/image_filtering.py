@@ -1,4 +1,4 @@
-"""Filter local images with an Arrow Python UDF and an ONNX model function."""
+"""Filter local images with an Arrow Python UDF and typed ONNX inference."""
 
 from pathlib import Path
 
@@ -29,14 +29,19 @@ if __name__ == "__main__":
     session.sql(
         f"CREATE MODEL yolo26n TYPE OBJECT_DETECTION "
         f"FROM 'file://{model}' "
-        "WITH (processor='yolo26-detect-v1')"
-    ).collect()
-    session.sql(
-        "CREATE FUNCTION detect USING MODEL yolo26n "
-        "WITH (classes=['person'], min_confidence=0.6)"
+        "WITH ("
+        "runtime.kind='onnxruntime', "
+        "pre_processor.kind='vision.image_tensor@1', "
+        "pre_processor.options={input_name='images', width=640, height=640}, "
+        "post_processor.kind='vision.yolo_e2e@1', "
+        "post_processor.options={output_name='output0', labels='coco80'}"
+        ")"
     ).collect()
     result = session.sql(
-        "SELECT uri, COUNT_OBJECTS(detect(image), 'person', 0.6) AS people "
+        "SELECT uri, COUNT_OBJECTS("
+        "DETECT_OBJECTS('yolo26n', image, "
+        "classes => ['person'], min_confidence => 0.6), "
+        "'person', 0.6) AS people "
         "FROM product_photos WHERE quality(image) >= 0 ORDER BY uri"
     )
     print(result.show(20))

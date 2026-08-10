@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::catalog::{FunctionImplementation, ModelType, SinkKind, TableProviderKind};
+use crate::catalog::{ModelType, SinkKind, TableProviderKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateTable {
@@ -17,17 +17,7 @@ pub(crate) struct CreateModel {
     pub(crate) name: String,
     pub(crate) model_type: ModelType,
     pub(crate) source: String,
-    pub(crate) defaults: BTreeMap<String, serde_json::Value>,
-    pub(crate) function: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CreateFunction {
-    pub(crate) name: String,
-    pub(crate) parameters: Vec<(String, String)>,
-    pub(crate) return_type: Option<String>,
-    pub(crate) implementation: FunctionImplementation,
-    pub(crate) bindings: BTreeMap<String, serde_json::Value>,
+    pub(crate) options: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,9 +32,7 @@ pub(crate) enum ShowKind {
 pub(crate) enum VqlStatement {
     CreateTable(CreateTable),
     CreateModel(CreateModel),
-    AlterModel { name: String, source: String },
-    CreateFunction(CreateFunction),
-    AlterFunction { name: String, model: String },
+    CreateFunction { sql: String },
     CreateSink { name: String, kind: SinkKind },
     Drop { kind: ShowKind, name: String },
     Show(ShowKind),

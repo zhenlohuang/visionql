@@ -2,7 +2,7 @@
 created_at: 2026-08-05
 status: draft
 target_version: v0.3
-updated_at: 2026-08-09
+updated_at: 2026-08-10
 ---
 
 # Workbench
@@ -468,7 +468,7 @@ The engine returns only objects visible to the current principal. Workbench does
 
 ### 9.3 Object Detail
 
-Show only public, queryable information: schema, logical types, and nullability; source kind, sanitized location, event time, and watermark; Model type, pinned revision/hash summary, and constraints; Function revision, signature, stable `model_id`, and result-semantic parameters, with the Model head revision as a separate field; Sink format and sanitized target; and copyable sanitized DDL.
+Show only public, queryable information: schema, logical types, and nullability; source kind, sanitized location, event time, and watermark; Model type, source digest, Runtime kind/protocol, processor kinds, canonical schema, and constraints; Function signature, implementation language/body digest, and volatility; Sink format and sanitized target; and copyable sanitized DDL.
 
 v0.3 does not edit objects on the detail page. Generate SQL and return to Query for changes, preserving a declarative and reviewable path.
 
@@ -476,7 +476,7 @@ v0.3 does not edit objects on the detail page. Generate SQL and return to Query 
 
 ### 10.1 Jobs List
 
-At minimum, show attached/persistent lifecycle, name and query ID; `STARTING / RUNNING / PAUSED / RECOVERING / FAILED / STOPPED`; batch/stream mode, source kind and health, and delivery semantics; runtime, last update, definition revision, and latest error-code summary; input fps, inference fps, P95 latency, and dropped frames. A query may be `RUNNING` while its source is `DISCONNECTED`.
+At minimum, show attached/persistent lifecycle, name and query ID; `STARTING / RUNNING / PAUSED / RECOVERING / FAILED / STOPPED`; batch/stream mode, source kind and health, and delivery semantics; runtime, last update, Query Manifest identity, and latest error-code summary; input fps, inference fps, P95 latency, and dropped frames. A query may be `RUNNING` while its source is `DISCONNECTED`.
 
 Default to durable jobs, with an option to show attached queries visible to the current principal. Attached queries remain cancellable by their originating execution and do not show `PAUSE/RESUME`. Sort non-terminal jobs first, then newest update. Filtering and sorting apply only to fetched data. If results exceed one response, use public engine pagination parameters or filtering SQL; the BFF must not pretend it loaded everything.
 
@@ -484,11 +484,11 @@ Fetch list metrics once and merge by `query_id`, not once per row. Detail reuses
 
 ### 10.2 Detail Page
 
-First run `DESCRIBE QUERY '<query_id>'`, then `SHOW QUERY DEPENDENCIES '<query_id>'` for pinned Function, Model, source, and Sink revisions and semantic fingerprints. Never infer dependencies from saved SQL.
+First run `DESCRIBE QUERY '<query_id>'`, then `SHOW QUERY DEPENDENCIES '<query_id>'` for the resolved Function, Model, source, and Sink identities and semantic fingerprints in the Query Manifest. Never infer dependencies from saved SQL.
 
 Show four groups:
 
-1. **Definition:** name, lifecycle, read-only SQL, definition snapshot, model/function revisions, and complete object dependencies.
+1. **Definition:** name, lifecycle, read-only SQL, Query Manifest identity, resolved Model and Function fingerprints, and complete object dependencies.
 2. **Runtime:** last event time, watermark, epoch, and checkpoint where applicable.
 3. **Quality:** decode and inference errors, late rows, drop reasons, and source gaps.
 4. **Actual cost:** processed frames, inference count, actual batch size, GPU seconds, and P50/P95 inference latency.
@@ -498,7 +498,7 @@ If metrics are absent, show “No data” or “Unsupported,” never zero. Use 
 ### 10.3 Operations
 
 - `PAUSE`: confirm that pausing RTSP creates an unrecoverable gap.
-- `RESUME`: explain that the existing definition snapshot remains in use. If newer catalog revisions exist, the user must stop and explicitly submit a new job, which receives a new query ID.
+- `RESUME`: explain that the existing Query Manifest remains in use. If Catalog definitions have changed, the user must stop and explicitly submit a new job, which receives a new query ID and Manifest.
 - `STOP`: terminal and high-risk; require the query name or an explicit confirmation.
 - Keep an action pending until `SHOW QUERIES` observes the target state or the engine fails it.
 - Do not optimistically mutate state or mark a timed-out operation successful.
@@ -517,7 +517,7 @@ average_batch_size
 queue_wait_ms
 ```
 
-Planned `EXPLAIN` cost estimates are unscheduled optimizer work. A future capability must show estimated and actual values side by side with time range, model revision, and sampling rate; never merge them into a falsely precise number. Workbench does not convert GPU seconds to currency because pricing belongs to deployment or commercial configuration.
+Planned `EXPLAIN` cost estimates are unscheduled optimizer work. A future capability must show estimated and actual values side by side with time range, resolved Model fingerprint, and sampling rate; never merge them into a falsely precise number. Workbench does not convert GPU seconds to currency because pricing belongs to deployment or commercial configuration.
 
 ## 11. Sessions and Security
 
@@ -720,3 +720,4 @@ As defined in §1.1 and PRD §3.8, Workbench is not a notebook, general BI tool,
 |---|---|
 | 2026-08-06 | Migrated from workbench.md design v0.3.0 without changing its internal section structure |
 | 2026-08-09 | Converted metadata to front matter, adopted date-based naming, and translated to English |
+| 2026-08-10 | Aligned Catalog and continuous-query views with Query Manifests and typed Model metadata |

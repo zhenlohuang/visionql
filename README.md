@@ -13,7 +13,7 @@
   </p>
   <p>
     <a href="#quick-start">Quick start</a> ·
-    <a href="#run-visual-inference">Examples</a> ·
+    <a href="#examples">Examples</a> ·
     <a href="#python-api">Python</a> ·
     <a href="#architecture">Architecture</a> ·
     <a href="ROADMAP.md">Roadmap</a>
@@ -25,7 +25,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL or the DataFrame API, users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
-> VisionQL v0.1 is a pre-1.0, local batch engine. Image sets and historical video are available now. RTSP streams, Kafka, `vqld`, Workbench, and vector search are roadmap items—not current functionality. See the [Roadmap](ROADMAP.md) for version boundaries.
+> VisionQL v0.1 is pre-release. Image sets and historical video are implemented; the typed inference contract is being integrated before release. RTSP streams, Kafka, `vqld`, Workbench, and vector search remain later roadmap items. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
 
 ## Why VisionQL
 
@@ -81,42 +81,49 @@ LIMIT 5;
 
 VisionQL persists the table definition, so a new shell session can query `sample_images` without registering it again.
 
-## Run visual inference
+## Examples
 
-Complete [Build from source](#build-from-source) first so the sample videos, Rust workspace, and Python environment are ready. Then activate the environment and install the model export tools:
+### Typed visual inference
 
-```bash
-export VQL_HOME="$PWD/data/.vql"
-source .venv/bin/activate
-python -m pip install ultralytics huggingface_hub onnx
+The v0.1 contract registers one typed Model and calls the fixed built-in function selected by its `TYPE`. Inference remains visible to the optimizer; SQL/Python user functions use DataFusion's separate function extension path.
+
+```sql
+CREATE MODEL yolo
+TYPE OBJECT_DETECTION
+FROM 'file:///models/yolo.onnx'
+WITH (
+  runtime.kind = 'onnxruntime',
+  pre_processor.kind = 'vision.image_tensor@1',
+  pre_processor.options = {
+    input_name = 'images', width = 640, height = 640, resize = 'letterbox'
+  },
+  post_processor.kind = 'vision.yolo_e2e@1',
+  post_processor.options = {output_name = 'output0', labels = 'coco80'}
+);
+
+SELECT uri,
+       DETECT_OBJECTS(
+         'yolo',
+         image,
+         classes => ['person'],
+         min_confidence => 0.5
+       ) AS detections
+FROM sample_images;
 ```
 
-The examples use an official Ultralytics YOLO26 checkpoint exported explicitly to ONNX. Model preparation is separate from query execution: VisionQL does not embed PyTorch or execute model repository code.
-
-```bash
-python scripts/export_yolo26.py --size n
-
-cargo run -p vql-cli -- run examples/sql/video_people_count.sql
-```
-
-The built-in `yolo26-detect-v1` processor supplies the official end-to-end tensor and COCO label defaults. Model options can override processor defaults; function options can narrow classes and confidence for a specific query interface. The [model guide](data/models/README.md) documents the exact export contract.
-
-For a guided image workflow with a Python UDF and ONNX inference, see [`examples/python/image_filtering.py`](examples/python/image_filtering.py) and the [`examples` guide](examples/README.md).
+`runtime.kind` selects an implementation; `runtime.protocol` selects a supported wire protocol. Processor-specific fields stay inside `pre_processor.options` and `post_processor.options`. The checked-in inference implementation, SQL cases, and runnable examples use this contract.
 
 ### Model sources
 
 | Source | Example | Behavior |
 |---|---|---|
-| Local | `'./model.onnx'` or `'file:///models/model.onnx'` | Read in place; never copied to cache |
-| Hugging Face | `'hf://owner/repository@revision/model.onnx'` | Download one ONNX artifact into the content-addressed cache |
-| HTTP | `'endpoint://https://inference.example.com/detect'` | Send batched JPEG inputs to a synchronous endpoint |
+| Local bundle | `'./model.onnx'` or `'file:///models/model.gguf'` | Read in place and open only through a compatible Runtime |
+| Hugging Face bundle | `'hf://owner/repository@<commit>'` | Pin selected files and cache the complete bundle by digest |
+| Inference service | `'endpoint://http://triton-prod:8000'` | Bind through the Runtime's declared protocol, such as Triton KServe V2 |
 
-Set `HF_TOKEN` when accessing a private Hugging Face repository. HTTP endpoints receive and return JSON with one outer result row per input image:
+The Runtime registry is intentionally explicit: `onnxruntime` and Triton with `kserve_v2_http` are v0.1 paths; Triton gRPC, `vllm`, `sglang`, and `llama_cpp` are roadmap-gated, while `transformers` supports v0.4 embedding. `openai` may be a protocol for a compatible Runtime but is not a Runtime kind. ONNX, explicitly classified `.pt`/`.pth`, Safetensors, and GGUF are artifact forms rather than interchangeable loaders.
 
-- Request: `{"images":["<base64-jpeg>"]}`
-- Response: `{"detections":[[{"label":"person","confidence":0.8,"box":[0.1,0.2,0.3,0.4]}]]}`
-
-`box` is normalized `[x, y, width, height]` with a top-left origin. The default endpoint timeout is 30 seconds.
+Set `HF_TOKEN` when resolving a private Hugging Face bundle. Credentials are provided through secret configuration and never persisted in visible Model DDL.
 
 ## Python API
 
@@ -163,7 +170,7 @@ During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQ
 
 ## Runtime state
 
-VisionQL keeps local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The revisioned catalog makes table, model, and function definitions reusable across sessions.
+VisionQL keeps local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The Catalog makes table, model, and function definitions reusable across sessions; every planned query receives an immutable Query Manifest.
 
 | State or setting | Default and behavior |
 |---|---|
@@ -187,7 +194,7 @@ flowchart LR
     ARROW --> HOSTS
 ```
 
-The CLI and Python hosts share `vql-kernel`, which owns SQL planning, the revisioned catalog, DataFusion execution, media decoding, and model inference. For design rationale—including lazy media decoding, model-visible planning, and the future batch/stream boundary—read the [system design](docs/design.md).
+The CLI and Python hosts share `vql-kernel`, which owns SQL planning, the Catalog and Query Manifests, DataFusion execution, media decoding, and model inference. For design rationale—including lazy media decoding, optimizer-visible inference, and the future batch/stream boundary—read the [system design](docs/design.md).
 
 ## Documentation
 

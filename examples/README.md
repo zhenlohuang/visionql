@@ -62,7 +62,7 @@ cargo run -p vql-cli -- run examples/sql/video_people_count.sql
 ## Notebook
 
 [`notebook/image_filtering.ipynb`](notebook/image_filtering.ipynb) walks through an image table, a
-vectorized Arrow Python UDF, an ONNX model function, and an Arrow result in a notebook.
+vectorized Arrow Python UDF, typed ONNX inference, and an Arrow result in a notebook.
 
 ## Python
 
@@ -74,7 +74,6 @@ with Maturin, run:
 python examples/python/image_filtering.py
 ```
 
-All examples use the same `yolo26n.onnx` export. `CREATE MODEL ... WITH (...)` selects the built-in
-`yolo26-detect-v1` processor defaults, while `CREATE FUNCTION ... WITH (...)` narrows classes and
-confidence for each query interface. Remove `data/.vql/` when you intentionally want a fresh
-development catalog.
+All examples use the same `yolo26n.onnx` export. `CREATE MODEL ... WITH (...)` declares the Runtime,
+PreProcessor, and PostProcessor contract; each `DETECT_OBJECTS` call supplies query-specific classes
+and confidence. Remove `data/.vql/` when you intentionally want a fresh development catalog.

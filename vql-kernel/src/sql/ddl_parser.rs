@@ -3,8 +3,8 @@ use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 
 use std::collections::BTreeMap;
 
-use super::ast::{CreateFunction, CreateModel, CreateTable, ShowKind, VqlStatement};
-use crate::catalog::{FunctionImplementation, ModelType, SinkKind, TableProviderKind};
+use super::ast::{CreateModel, CreateTable, ShowKind, VqlStatement};
+use crate::catalog::{ModelType, SinkKind, TableProviderKind};
 use crate::{ErrorCode, Result, VqlError};
 
 pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
@@ -17,8 +17,11 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
     let tokens = significant_tokens(sql)?;
     let first = word(tokens.first()).unwrap_or_default();
     match first.as_str() {
+        "CREATE" if token_is(tokens.get(1), "FUNCTION") => Ok(VqlStatement::CreateFunction {
+            sql: sql.to_owned(),
+        }),
         "CREATE" => parse_create(&tokens),
-        "ALTER" => parse_alter(&tokens),
+        "ALTER" => invalid("ALTER is not supported; DROP and recreate the object"),
         "DROP" => parse_drop(&tokens),
         "SHOW" => parse_show(&tokens),
         "DESCRIBE" | "DESC" => parse_describe(&tokens),
@@ -50,7 +53,6 @@ fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
         )),
         Some("TABLE") => parse_create_table(tokens),
         Some("MODEL") => parse_create_model(tokens),
-        Some("FUNCTION") => parse_create_function(tokens),
         Some("SINK") => parse_create_sink(tokens),
         Some("STREAM") => Err(VqlError::feature(
             "CREATE STREAM is not available in v0.1",
@@ -187,10 +189,16 @@ fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
     expect_word(tokens.get(3), "TYPE")?;
     let model_type = match word(tokens.get(4)).as_deref() {
         Some("OBJECT_DETECTION") => ModelType::ObjectDetection,
-        Some("EMBEDDING") => {
+        Some("IMAGE_EMBEDDING") | Some("TEXT_EMBEDDING") => {
             return Err(VqlError::feature(
-                "EMBEDDING models are not available",
+                "embedding Model types are not available",
                 "v0.4",
+            ));
+        }
+        Some("IMAGE_CLASSIFICATION") | Some("TEXT_GENERATION") => {
+            return Err(VqlError::feature(
+                "this Model type is not available",
+                "未排期",
             ));
         }
         _ => return invalid("v0.1 supports TYPE OBJECT_DETECTION"),
@@ -198,160 +206,60 @@ fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
     expect_word(tokens.get(5), "FROM")?;
     let source = string_literal(tokens.get(6))?;
     let mut index = 7;
-    let mut defaults = BTreeMap::new();
-    let mut has_defaults = false;
-    let mut function = None;
-    while index < tokens.len() {
-        if token_is(tokens.get(index), "WITH") {
-            if has_defaults {
-                return invalid("CREATE MODEL has more than one WITH clause");
-            }
-            parse_model_parameters(tokens, &mut index, &mut defaults, "model parameter")?;
-            has_defaults = true;
-        } else if token_is(tokens.get(index), "FUNCTION") {
-            if function.is_some() {
-                return invalid("CREATE MODEL has more than one FUNCTION clause");
-            }
-            function = Some(identifier(tokens.get(index + 1), "function name")?);
-            index += 2;
-        } else {
-            return invalid("unexpected tokens after CREATE MODEL");
-        }
+    let mut options = BTreeMap::new();
+    if index < tokens.len() {
+        expect_word(tokens.get(index), "WITH")?;
+        parse_model_options(tokens, &mut index, &mut options)?;
+    }
+    if index != tokens.len() {
+        return invalid("unexpected tokens after CREATE MODEL");
     }
     Ok(VqlStatement::CreateModel(CreateModel {
         name,
         model_type,
         source,
-        defaults,
-        function,
+        options,
     }))
 }
 
-fn parse_create_function(tokens: &[Token]) -> Result<VqlStatement> {
-    let name = identifier(tokens.get(2), "function name")?;
-    let mut index = 3;
-    let mut parameters = Vec::new();
-    if tokens.get(index) == Some(&Token::LParen) {
-        index += 1;
-        while tokens.get(index) != Some(&Token::RParen) {
-            let parameter = identifier(tokens.get(index), "parameter name")?;
-            index += 1;
-            let data_type = identifier(tokens.get(index), "parameter type")?.to_ascii_uppercase();
-            index += 1;
-            parameters.push((parameter, data_type));
-            match tokens.get(index) {
-                Some(Token::Comma) => index += 1,
-                Some(Token::RParen) => {}
-                _ => return invalid("expected ',' or ')' in function parameters"),
-            }
-        }
-        index += 1;
-    }
-    let mut return_type = None;
-    if token_is(tokens.get(index), "RETURNS") {
-        index += 1;
-        return_type = Some(identifier(tokens.get(index), "return type")?.to_ascii_uppercase());
-        index += 1;
-    }
-    let implementation = if token_is(tokens.get(index), "USING") {
-        expect_word(tokens.get(index + 1), "MODEL")?;
-        let model = identifier(tokens.get(index + 2), "model name")?;
-        index += 3;
-        FunctionImplementation::Model { model }
-    } else if token_is(tokens.get(index), "LANGUAGE") {
-        expect_word(tokens.get(index + 1), "PYTHON")?;
-        expect_word(tokens.get(index + 2), "AS")?;
-        let entry = string_literal(tokens.get(index + 3))?;
-        index += 4;
-        FunctionImplementation::Python { entry }
-    } else if token_is(tokens.get(index), "AS") {
-        index += 1;
-        expect_token(tokens.get(index), Token::LParen, "'(' after AS")?;
-        index += 1;
-        let start = index;
-        let mut depth = 1usize;
-        while index < tokens.len() && depth > 0 {
-            match tokens.get(index) {
-                Some(Token::LParen) => depth += 1,
-                Some(Token::RParen) => depth -= 1,
-                _ => {}
-            }
-            if depth > 0 {
-                index += 1;
-            }
-        }
-        if depth != 0 {
-            return invalid("unterminated SQL macro expression");
-        }
-        let expression = tokens[start..index]
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(" ");
-        index += 1;
-        FunctionImplementation::SqlMacro { expression }
-    } else {
-        return invalid("expected USING MODEL, LANGUAGE PYTHON AS, or AS (<expression>)");
-    };
-    let mut bindings = BTreeMap::new();
-    if token_is(tokens.get(index), "WITH") {
-        parse_model_parameters(tokens, &mut index, &mut bindings, "function binding")?;
-    }
-    if index != tokens.len() {
-        return invalid("unexpected tokens after CREATE FUNCTION");
-    }
-    Ok(VqlStatement::CreateFunction(CreateFunction {
-        name,
-        parameters,
-        return_type,
-        implementation,
-        bindings,
-    }))
-}
-
-fn parse_model_parameters(
+fn parse_model_options(
     tokens: &[Token],
     index: &mut usize,
-    parameters: &mut BTreeMap<String, serde_json::Value>,
-    label: &str,
+    options: &mut BTreeMap<String, serde_json::Value>,
 ) -> Result<()> {
     *index += 1;
     expect_token(tokens.get(*index), Token::LParen, "'(' after WITH")?;
     *index += 1;
     while tokens.get(*index) != Some(&Token::RParen) {
-        let key = identifier(tokens.get(*index), label)?.to_ascii_lowercase();
-        *index += 1;
-        expect_token(tokens.get(*index), Token::Eq, "'=' after parameter name")?;
+        let key = dotted_identifier(tokens, index, "Model option")?;
+        expect_token(tokens.get(*index), Token::Eq, "'=' after Model option")?;
         *index += 1;
         let value = parse_json_value(tokens, index)?;
-        let key = canonical_model_parameter(&key).ok_or_else(|| {
-            VqlError::new(ErrorCode::InvalidOption, format!("unknown {label} '{key}'"))
-        })?;
-        if parameters.insert(key.to_owned(), value).is_some() {
+        if options.insert(key.clone(), value).is_some() {
             return Err(VqlError::new(
                 ErrorCode::InvalidOption,
-                format!("duplicate {label} '{key}'"),
+                format!("duplicate Model option '{key}'"),
             ));
         }
         match tokens.get(*index) {
             Some(Token::Comma) => *index += 1,
             Some(Token::RParen) => {}
-            _ => return invalid(format!("expected ',' or ')' after {label}")),
+            _ => return invalid("expected ',' or ')' after Model option"),
         }
     }
     *index += 1;
     Ok(())
 }
 
-fn canonical_model_parameter(name: &str) -> Option<&str> {
-    match name {
-        "processor" | "input_name" | "output_name" | "input_width" | "input_height"
-        | "output_format" | "labels" | "classes" | "min_confidence" | "nms_iou_threshold" => {
-            Some(name)
-        }
-        "nms_threshold" => Some("nms_iou_threshold"),
-        _ => None,
+fn dotted_identifier(tokens: &[Token], index: &mut usize, label: &str) -> Result<String> {
+    let mut parts = vec![identifier(tokens.get(*index), label)?.to_ascii_lowercase()];
+    *index += 1;
+    while tokens.get(*index) == Some(&Token::Period) {
+        *index += 1;
+        parts.push(identifier(tokens.get(*index), label)?.to_ascii_lowercase());
+        *index += 1;
     }
+    Ok(parts.join("."))
 }
 
 fn parse_json_value(tokens: &[Token], index: &mut usize) -> Result<serde_json::Value> {
@@ -362,30 +270,71 @@ fn parse_json_value(tokens: &[Token], index: &mut usize) -> Result<serde_json::V
         }
         Some(Token::Number(value, _)) => {
             *index += 1;
+            if !value.contains(['.', 'e', 'E']) {
+                let value = value.parse::<u64>().map_err(|error| {
+                    VqlError::new(ErrorCode::InvalidOption, "option must be numeric")
+                        .with_source(error)
+                })?;
+                return Ok(serde_json::json!(value));
+            }
             let value = value.parse::<f64>().map_err(|error| {
-                VqlError::new(ErrorCode::InvalidOption, "binding must be numeric")
-                    .with_source(error)
+                VqlError::new(ErrorCode::InvalidOption, "option must be numeric").with_source(error)
             })?;
-            Ok(serde_json::json!(value))
+            serde_json::Number::from_f64(value)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| VqlError::new(ErrorCode::InvalidOption, "option must be finite"))
         }
         Some(Token::LBracket) => {
             *index += 1;
             let mut values = Vec::new();
             while tokens.get(*index) != Some(&Token::RBracket) {
-                values.push(serde_json::Value::String(string_literal(
-                    tokens.get(*index),
-                )?));
-                *index += 1;
+                values.push(parse_json_value(tokens, index)?);
                 match tokens.get(*index) {
                     Some(Token::Comma) => *index += 1,
                     Some(Token::RBracket) => {}
-                    _ => return invalid("parameter must be an array of strings"),
+                    _ => return invalid("expected ',' or ']' in option array"),
                 }
             }
             *index += 1;
             Ok(serde_json::Value::Array(values))
         }
-        _ => invalid("unsupported binding value"),
+        Some(Token::LBrace) => {
+            *index += 1;
+            let mut values = serde_json::Map::new();
+            while tokens.get(*index) != Some(&Token::RBrace) {
+                let key = identifier(tokens.get(*index), "option object key")?.to_ascii_lowercase();
+                *index += 1;
+                expect_token(tokens.get(*index), Token::Eq, "'=' after option object key")?;
+                *index += 1;
+                let value = parse_json_value(tokens, index)?;
+                if values.insert(key.clone(), value).is_some() {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        format!("duplicate option object key '{key}'"),
+                    ));
+                }
+                match tokens.get(*index) {
+                    Some(Token::Comma) => *index += 1,
+                    Some(Token::RBrace) => {}
+                    _ => return invalid("expected ',' or '}' in option object"),
+                }
+            }
+            *index += 1;
+            Ok(serde_json::Value::Object(values))
+        }
+        Some(Token::Word(value)) if value.value.eq_ignore_ascii_case("true") => {
+            *index += 1;
+            Ok(serde_json::Value::Bool(true))
+        }
+        Some(Token::Word(value)) if value.value.eq_ignore_ascii_case("false") => {
+            *index += 1;
+            Ok(serde_json::Value::Bool(false))
+        }
+        Some(Token::Word(value)) if value.value.eq_ignore_ascii_case("null") => {
+            *index += 1;
+            Ok(serde_json::Value::Null)
+        }
+        _ => invalid("unsupported Model option value"),
     }
 }
 
@@ -404,29 +353,6 @@ fn parse_create_sink(tokens: &[Token]) -> Result<VqlStatement> {
         _ => return invalid("v0.1 supports TYPE console"),
     };
     Ok(VqlStatement::CreateSink { name, kind })
-}
-
-fn parse_alter(tokens: &[Token]) -> Result<VqlStatement> {
-    match word(tokens.get(1)).as_deref() {
-        Some("MODEL") if tokens.len() == 6 && token_is(tokens.get(3), "SET") => {
-            let name = identifier(tokens.get(2), "model name")?;
-            if !token_is(tokens.get(4), "FROM") && !token_is(tokens.get(4), "SOURCE") {
-                return invalid("expected ALTER MODEL <name> SET FROM '<source>'");
-            }
-            Ok(VqlStatement::AlterModel {
-                name,
-                source: string_literal(tokens.get(5))?,
-            })
-        }
-        Some("FUNCTION") if tokens.len() == 6 && token_is(tokens.get(3), "SET") => {
-            expect_word(tokens.get(4), "MODEL")?;
-            Ok(VqlStatement::AlterFunction {
-                name: identifier(tokens.get(2), "function name")?,
-                model: identifier(tokens.get(5), "model name")?,
-            })
-        }
-        _ => invalid("unsupported ALTER statement"),
-    }
 }
 
 fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
@@ -601,36 +527,42 @@ mod tests {
     }
 
     #[test]
-    fn parses_model_defaults_and_function_name() {
+    fn parses_namespaced_model_options() {
         let parsed = parse_statement(
             "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'file:///model.onnx' \
-             WITH (input_width=32, labels=['person'], min_confidence=0.4) FUNCTION detect",
+             WITH (runtime.kind='onnxruntime', \
+                   pre_processor.kind='vision.image_tensor@1', \
+                   pre_processor.options={input_name='images', width=32, height=24}, \
+                   post_processor.kind='vision.yolo_e2e@1', \
+                   post_processor.options={output_name='output0', labels=['person']})",
         )
         .unwrap();
         let VqlStatement::CreateModel(create) = parsed else {
             panic!("expected CREATE MODEL")
         };
 
-        assert_eq!(create.function.as_deref(), Some("detect"));
-        assert_eq!(create.defaults["input_width"], serde_json::json!(32.0));
-        assert_eq!(create.defaults["labels"], serde_json::json!(["person"]));
-        assert_eq!(create.defaults["min_confidence"], serde_json::json!(0.4));
+        assert_eq!(
+            create.options["runtime.kind"],
+            serde_json::json!("onnxruntime")
+        );
+        assert_eq!(
+            create.options["pre_processor.options"],
+            serde_json::json!({"input_name": "images", "width": 32, "height": 24})
+        );
+        assert_eq!(
+            create.options["post_processor.options"],
+            serde_json::json!({"output_name": "output0", "labels": ["person"]})
+        );
     }
 
     #[test]
-    fn parses_function_overrides_and_canonicalizes_legacy_nms_name() {
-        let parsed = parse_statement(
-            "CREATE FUNCTION people USING MODEL detector \
-             WITH (classes=['person'], nms_threshold=0.4)",
-        )
-        .unwrap();
-        let VqlStatement::CreateFunction(create) = parsed else {
+    fn parses_positional_sql_expression_function() {
+        let sql = "CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1";
+        let parsed = parse_statement(sql).unwrap();
+        let VqlStatement::CreateFunction { sql: parsed_sql } = parsed else {
             panic!("expected CREATE FUNCTION")
         };
-
-        assert_eq!(create.bindings["classes"], serde_json::json!(["person"]));
-        assert_eq!(create.bindings["nms_iou_threshold"], serde_json::json!(0.4));
-        assert!(!create.bindings.contains_key("nms_threshold"));
+        assert_eq!(parsed_sql, sql);
     }
 
     #[test]
@@ -641,6 +573,18 @@ mod tests {
             ("CREATE TABLE out USING PARQUET LOCATION './out'", "v0.4"),
             ("CREATE TABLE out AS SELECT 1", "v0.4"),
             ("CREATE INDEX idx USING HNSW", "v0.4"),
+            (
+                "CREATE MODEL clip TYPE IMAGE_EMBEDDING(512) FROM 'model.safetensors'",
+                "v0.4",
+            ),
+            (
+                "CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'model.onnx'",
+                "未排期",
+            ),
+            (
+                "CREATE MODEL generator TYPE TEXT_GENERATION FROM 'model.gguf'",
+                "未排期",
+            ),
             ("SELECT embedding <-> other FROM values", "v0.4"),
             ("SUBMIT QUERY q AS SELECT 1", "v0.2"),
             ("CREATE AGGREGATE FUNCTION f", "未排期"),

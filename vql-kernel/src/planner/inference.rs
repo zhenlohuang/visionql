@@ -4,18 +4,18 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arrow::array::{Array, ArrayRef, StructArray};
+use arrow::array::{Array, ArrayRef, StringArray, StructArray};
 use arrow::datatypes::{Field, Fields, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::common::{
-    Column, DFSchema, DFSchemaRef, DataFusionError, Result as DataFusionResult,
+    Column, DFSchema, DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue,
 };
 use datafusion::execution::context::{QueryPlanner, SessionState, TaskContext};
 use datafusion::logical_expr::expr_rewriter::NamePreserver;
 use datafusion::logical_expr::{
-    Expr, Extension, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
+    Expr, ExprSchemable, Extension, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
 };
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -27,8 +27,11 @@ use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::catalog::{DefinitionSnapshot, FunctionDef, FunctionImplementation, ModelDef};
-use crate::models::{ModelRuntime, append_detections, detection_builder, detections_type};
+use crate::catalog::{DefinitionSnapshot, ModelDef, ModelType};
+use crate::models::{
+    BoundInferenceParams, ModelRuntime, append_detections, bind_inference_params,
+    detection_builder, detections_type, semantic_fingerprint,
+};
 use crate::planner::sink::SinkExtensionPlanner;
 
 #[derive(Clone)]
@@ -37,8 +40,10 @@ struct InferenceNode {
     input_expr: Expr,
     output_name: String,
     schema: DFSchemaRef,
-    function: FunctionDef,
+    operation: String,
     model: ModelDef,
+    invocation: BoundInferenceParams,
+    invocation_fingerprint: String,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -50,8 +55,10 @@ impl InferenceNode {
         input: LogicalPlan,
         input_expr: Expr,
         output_name: String,
-        function: FunctionDef,
+        operation: String,
         model: ModelDef,
+        invocation: BoundInferenceParams,
+        invocation_fingerprint: String,
         runtime: Arc<ModelRuntime>,
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
@@ -70,8 +77,10 @@ impl InferenceNode {
             input_expr,
             output_name,
             schema,
-            function,
+            operation,
             model,
+            invocation,
+            invocation_fingerprint,
             runtime,
             fail_on_error,
             cancellation,
@@ -81,7 +90,7 @@ impl InferenceNode {
     fn comparison_key(&self) -> (&str, &str, &str, &Expr) {
         (
             &self.output_name,
-            &self.function.semantic_fingerprint,
+            &self.invocation_fingerprint,
             &self.model.semantic_fingerprint,
             &self.input_expr,
         )
@@ -92,7 +101,7 @@ impl Debug for InferenceNode {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("InferenceNode")
-            .field("function", &self.function.name)
+            .field("operation", &self.operation)
             .field("model", &self.model.name)
             .field("output", &self.output_name)
             .field("input_expr", &self.input_expr)
@@ -146,8 +155,15 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
     fn fmt_for_explain(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "InferenceNode: function={}, model={}, output={}, mutable_endpoint={}",
-            self.function.name, self.model.name, self.output_name, self.model.volatile
+            "InferenceNode: operation={}, model={}, runtime={}, protocol={}, pre_processor={}, post_processor={}, output={}, mutable_endpoint={}",
+            self.operation,
+            self.model.name,
+            self.model.runtime.kind,
+            self.model.runtime.protocol.as_deref().unwrap_or("embedded"),
+            self.model.pre_processor.kind,
+            self.model.post_processor.kind,
+            self.output_name,
+            self.model.volatile
         )
     }
 
@@ -165,8 +181,10 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
             inputs.remove(0),
             exprs.remove(0),
             self.output_name.clone(),
-            self.function.clone(),
+            self.operation.clone(),
             self.model.clone(),
+            self.invocation.clone(),
+            self.invocation_fingerprint.clone(),
             Arc::clone(&self.runtime),
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
@@ -196,27 +214,11 @@ pub(crate) fn extract_inference(
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
 ) -> crate::Result<LogicalPlan> {
-    let mut functions = HashMap::new();
-    for (name, function) in snapshot.functions() {
-        let FunctionImplementation::Model { model } = &function.definition.implementation else {
-            continue;
-        };
-        let model = snapshot.model(model).ok_or_else(|| {
-            crate::VqlError::new(
-                crate::ErrorCode::Catalog,
-                format!("function '{name}' references missing model '{model}'"),
-            )
-        })?;
-        functions.insert(
-            name.to_ascii_lowercase(),
-            (function.definition.clone(), model.definition.clone()),
-        );
-    }
     let mut volatile_id = 0_u64;
     plan.transform_up(|plan| {
         rewrite_plan_node(
             plan,
-            &functions,
+            snapshot,
             Arc::clone(&runtime),
             Arc::clone(&fail_on_error),
             cancellation.clone(),
@@ -229,7 +231,7 @@ pub(crate) fn extract_inference(
 
 fn rewrite_plan_node(
     plan: LogicalPlan,
-    functions: &HashMap<String, (FunctionDef, ModelDef)>,
+    snapshot: &DefinitionSnapshot,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -249,19 +251,50 @@ fn rewrite_plan_node(
             let Expr::ScalarFunction(call) = &expr else {
                 return Ok(Transformed::no(expr));
             };
-            let Some((function, model)) = functions.get(&call.name().to_ascii_lowercase()) else {
+            if !call.name().eq_ignore_ascii_case("detect_objects") {
                 return Ok(Transformed::no(expr));
-            };
+            }
             if inputs.len() != 1 {
+                return Err(DataFusionError::Plan(
+                    "DETECT_OBJECTS is only supported on single-input v0.1 plans".to_owned(),
+                ));
+            }
+            if !(2..=4).contains(&call.args.len()) {
                 return Err(DataFusionError::Plan(format!(
-                    "model function '{}' is only supported on single-input v0.1 plans",
-                    function.name
+                    "DETECT_OBJECTS expects model, image, and optional classes/min_confidence; got {} arguments",
+                    call.args.len()
                 )));
             }
-            let input_expr = call.args.first().cloned().ok_or_else(|| {
-                DataFusionError::Plan(format!("model function '{}' requires IMAGE", function.name))
+            let model_name = model_literal(&call.args[0])?;
+            let model = snapshot.model(&model_name).ok_or_else(|| {
+                DataFusionError::Plan(format!("model '{model_name}' does not exist"))
             })?;
-            let output_name = inference_output_name(function, model, &input_expr, volatile_id);
+            if model.definition.model_type != ModelType::ObjectDetection {
+                return Err(DataFusionError::Plan(format!(
+                    "DETECT_OBJECTS requires an OBJECT_DETECTION Model; '{}' has type {:?}",
+                    model.definition.name, model.definition.model_type
+                )));
+            }
+            let input_expr = call.args[1].clone();
+            let input_type = input_expr.get_type(inputs[0].schema())?;
+            if !crate::types::is_image_storage(&input_type) {
+                return Err(DataFusionError::Plan(format!(
+                    "DETECT_OBJECTS image argument must be IMAGE, got {input_type}"
+                )));
+            }
+            let classes = classes_literal(call.args.get(2))?;
+            let min_confidence = probability_literal(call.args.get(3))?;
+            let invocation = bind_inference_params(classes, min_confidence)
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+            let invocation_fingerprint = semantic_fingerprint(&invocation);
+            let model = model.definition.clone();
+            let output_name = inference_output_name(
+                "DETECT_OBJECTS",
+                &model,
+                &invocation_fingerprint,
+                &input_expr,
+                volatile_id,
+            );
             let already_extracted = !model.volatile
                 && inputs[0]
                     .schema()
@@ -274,8 +307,10 @@ fn rewrite_plan_node(
                         input,
                         input_expr,
                         output_name.clone(),
-                        function.clone(),
-                        model.clone(),
+                        "DETECT_OBJECTS".to_owned(),
+                        model,
+                        invocation,
+                        invocation_fingerprint,
                         Arc::clone(&runtime),
                         Arc::clone(&fail_on_error),
                         cancellation.clone(),
@@ -297,14 +332,16 @@ fn rewrite_plan_node(
 }
 
 fn inference_output_name(
-    function: &FunctionDef,
+    operation: &str,
     model: &ModelDef,
+    invocation_fingerprint: &str,
     input: &Expr,
     volatile_id: &mut u64,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(function.semantic_fingerprint.as_bytes());
+    digest.update(operation.as_bytes());
     digest.update(model.semantic_fingerprint.as_bytes());
+    digest.update(invocation_fingerprint.as_bytes());
     digest.update(format!("{input:?}").as_bytes());
     if model.volatile {
         digest.update(volatile_id.to_le_bytes());
@@ -316,6 +353,121 @@ fn inference_output_name(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("__vql_inference_{suffix}")
+}
+
+fn model_literal(expr: &Expr) -> DataFusionResult<String> {
+    let Expr::Literal(value, _) = strip_cast(expr) else {
+        return Err(DataFusionError::Plan(
+            "DETECT_OBJECTS model must be a non-NULL string literal".to_owned(),
+        ));
+    };
+    match value {
+        ScalarValue::Utf8(Some(value))
+        | ScalarValue::Utf8View(Some(value))
+        | ScalarValue::LargeUtf8(Some(value))
+            if !value.is_empty() =>
+        {
+            Ok(value.to_ascii_lowercase())
+        }
+        _ => Err(DataFusionError::Plan(
+            "DETECT_OBJECTS model must be a non-NULL string literal".to_owned(),
+        )),
+    }
+}
+
+fn classes_literal(expr: Option<&Expr>) -> DataFusionResult<Option<Vec<String>>> {
+    let Some(expr) = expr else {
+        return Ok(None);
+    };
+    match strip_cast(expr) {
+        Expr::Literal(ScalarValue::Null, _) => Ok(None),
+        Expr::Literal(ScalarValue::List(value), _) if value.is_null(0) => Ok(None),
+        Expr::Literal(ScalarValue::List(value), _) => {
+            let values = value.value(0);
+            let values = values
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "DETECT_OBJECTS classes must be a constant array of strings".to_owned(),
+                    )
+                })?;
+            Ok(Some(
+                (0..values.len())
+                    .map(|index| values.value(index).to_owned())
+                    .collect(),
+            ))
+        }
+        Expr::ScalarFunction(call) if call.name().eq_ignore_ascii_case("make_array") => call
+            .args
+            .iter()
+            .map(string_literal)
+            .collect::<DataFusionResult<Vec<_>>>()
+            .map(Some),
+        _ => Err(DataFusionError::Plan(
+            "DETECT_OBJECTS classes must be a constant array of strings".to_owned(),
+        )),
+    }
+}
+
+fn string_literal(expr: &Expr) -> DataFusionResult<String> {
+    match strip_cast(expr) {
+        Expr::Literal(ScalarValue::Utf8(Some(value)), _)
+        | Expr::Literal(ScalarValue::Utf8View(Some(value)), _)
+        | Expr::Literal(ScalarValue::LargeUtf8(Some(value)), _) => Ok(value.clone()),
+        _ => Err(DataFusionError::Plan(
+            "DETECT_OBJECTS classes must be a constant array of strings".to_owned(),
+        )),
+    }
+}
+
+fn probability_literal(expr: Option<&Expr>) -> DataFusionResult<Option<f32>> {
+    let Some(expr) = expr else {
+        return Ok(None);
+    };
+    let Expr::Literal(value, _) = strip_cast(expr) else {
+        return Err(DataFusionError::Plan(
+            "DETECT_OBJECTS min_confidence must be a constant number".to_owned(),
+        ));
+    };
+    let value = match value {
+        ScalarValue::Null => return Ok(None),
+        ScalarValue::Float32(Some(value)) => f64::from(*value),
+        ScalarValue::Float64(Some(value)) => *value,
+        ScalarValue::Decimal32(Some(value), _, scale) => {
+            f64::from(*value) * 10_f64.powi(-i32::from(*scale))
+        }
+        ScalarValue::Decimal64(Some(value), _, scale) => {
+            *value as f64 * 10_f64.powi(-i32::from(*scale))
+        }
+        ScalarValue::Decimal128(Some(value), _, scale) => {
+            *value as f64 * 10_f64.powi(-i32::from(*scale))
+        }
+        ScalarValue::Int8(Some(value)) => f64::from(*value),
+        ScalarValue::Int16(Some(value)) => f64::from(*value),
+        ScalarValue::Int32(Some(value)) => f64::from(*value),
+        ScalarValue::Int64(Some(value)) => *value as f64,
+        ScalarValue::UInt8(Some(value)) => f64::from(*value),
+        ScalarValue::UInt16(Some(value)) => f64::from(*value),
+        ScalarValue::UInt32(Some(value)) => f64::from(*value),
+        ScalarValue::UInt64(Some(value)) => *value as f64,
+        _ => {
+            return Err(DataFusionError::Plan(
+                "DETECT_OBJECTS min_confidence must be a constant number".to_owned(),
+            ));
+        }
+    };
+    Ok(Some(value as f32))
+}
+
+fn strip_cast(mut expr: &Expr) -> &Expr {
+    loop {
+        match expr {
+            Expr::Cast(value) => expr = &value.expr,
+            Expr::TryCast(value) => expr = &value.expr,
+            _ => return expr,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -368,8 +520,9 @@ impl ExtensionPlanner for InferenceExtensionPlanner {
             input_expr,
             node.schema.inner().clone(),
             node.output_name.clone(),
-            node.function.clone(),
+            node.operation.clone(),
             node.model.clone(),
+            node.invocation.clone(),
             Arc::clone(&node.runtime),
             Arc::clone(&node.fail_on_error),
             node.cancellation.clone(),
@@ -382,8 +535,9 @@ struct InferenceExec {
     input_expr: Arc<dyn PhysicalExpr>,
     schema: SchemaRef,
     output_name: String,
-    function: FunctionDef,
+    operation: String,
     model: ModelDef,
+    invocation: BoundInferenceParams,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -397,8 +551,9 @@ impl InferenceExec {
         input_expr: Arc<dyn PhysicalExpr>,
         schema: SchemaRef,
         output_name: String,
-        function: FunctionDef,
+        operation: String,
         model: ModelDef,
+        invocation: BoundInferenceParams,
         runtime: Arc<ModelRuntime>,
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
@@ -414,8 +569,9 @@ impl InferenceExec {
             input_expr,
             schema,
             output_name,
-            function,
+            operation,
             model,
+            invocation,
             runtime,
             fail_on_error,
             cancellation,
@@ -428,7 +584,7 @@ impl Debug for InferenceExec {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("InferenceExec")
-            .field("function", &self.function.name)
+            .field("operation", &self.operation)
             .field("model", &self.model.name)
             .field("output", &self.output_name)
             .finish_non_exhaustive()
@@ -443,8 +599,8 @@ impl DisplayAs for InferenceExec {
     ) -> std::fmt::Result {
         write!(
             formatter,
-            "InferenceExec: function={}, model={}, output={}",
-            self.function.name, self.model.name, self.output_name
+            "InferenceExec: operation={}, model={}, runtime={}, output={}",
+            self.operation, self.model.name, self.model.runtime.kind, self.output_name
         )
     }
 }
@@ -476,8 +632,9 @@ impl ExecutionPlan for InferenceExec {
             Arc::clone(&self.input_expr),
             Arc::clone(&self.schema),
             self.output_name.clone(),
-            self.function.clone(),
+            self.operation.clone(),
             self.model.clone(),
+            self.invocation.clone(),
             Arc::clone(&self.runtime),
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
@@ -493,8 +650,9 @@ impl ExecutionPlan for InferenceExec {
         let input_expr = Arc::clone(&self.input_expr);
         let schema = Arc::clone(&self.schema);
         let stream_schema = Arc::clone(&schema);
-        let function = self.function.clone();
+        let operation = self.operation.clone();
         let model = self.model.clone();
+        let invocation = self.invocation.clone();
         let runtime = Arc::clone(&self.runtime);
         let fail_on_error = Arc::clone(&self.fail_on_error);
         let cancellation = self.cancellation.clone();
@@ -512,12 +670,12 @@ impl ExecutionPlan for InferenceExec {
                     .downcast_ref::<StructArray>()
                     .ok_or_else(|| DataFusionError::Execution(format!(
                         "{} expects IMAGE",
-                        function.name
+                        operation
                     )))?;
                 let output = runtime
                     .infer(
-                        &function,
                         &model,
+                        &invocation,
                         images,
                         fail_on_error.load(Ordering::Relaxed),
                         cancellation.clone(),

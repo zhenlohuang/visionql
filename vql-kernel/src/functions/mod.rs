@@ -1,8 +1,10 @@
+mod factory;
 mod python_udf;
 mod to_jpeg;
 mod tumble;
 mod vision;
 
+pub(crate) use factory::{VqlFunctionFactory, VqlTypePlanner};
 pub(crate) use python_udf::python_function_udf;
 pub(crate) use to_jpeg::{materialize_encoded_images, to_jpeg_udf};
 pub(crate) use tumble::tumble_udf;

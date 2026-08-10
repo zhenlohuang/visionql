@@ -3,13 +3,18 @@ mod cache;
 mod definition;
 mod ort_backend;
 mod params;
+mod pipeline;
 mod resolver;
 mod runtime;
 mod scheduler;
+mod triton_backend;
 
 pub(crate) use definition::{resolve_model, semantic_fingerprint};
-pub(crate) use params::{effective_model_params, model_params_for_source};
-pub(crate) use runtime::{ModelCounters, ModelRuntime, model_function_udf};
+pub(crate) use params::{
+    BoundInferenceParams, ModelOutputFormat, ModelParams, bind_inference_params,
+    compile_model_params, model_specs_for_options,
+};
+pub(crate) use runtime::{ModelCounters, ModelRuntime, detect_objects_udf};
 
 use std::sync::Arc;
 

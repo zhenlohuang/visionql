@@ -147,9 +147,31 @@ pub(crate) fn python_function_udf(
         .collect::<Result<Vec<_>>>()?;
     let return_type = parse_data_type(&function.return_type)?;
     let handle = host.as_ref().map(|host| host.resolve(entry)).transpose()?;
+    let mut signature = Signature::exact(argument_types, Volatility::Volatile);
+    if function
+        .parameters
+        .iter()
+        .all(|(name, _)| !name.starts_with('$'))
+    {
+        signature = signature
+            .with_parameter_names(
+                function
+                    .parameters
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect(),
+            )
+            .map_err(|error| {
+                VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "invalid Python function parameters",
+                )
+                .with_source(error)
+            })?;
+    }
     Ok(ScalarUDF::new_from_impl(PythonFunction {
         function,
-        signature: Signature::exact(argument_types, Volatility::Volatile),
+        signature,
         return_type,
         host,
         handle,

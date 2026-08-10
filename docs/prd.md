@@ -105,8 +105,8 @@ VisionQL uses one unifying model: **visual data is represented as relations made
 | **Multimodal type system** | Extends standard SQL with `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)` (enabled for embedding search in v0.4), and nested `STRUCT` / `ARRAY` types |
 | **Table** | A bounded dataset. An image directory is one row per image. A video directory is expanded at its declared sample rate into one row per frame. |
 | **Stream** | An unbounded frame relation such as `(ts TIMESTAMP, frame IMAGE, ...)`, with event-time and watermark semantics |
-| **Model** | A resource implementation. An immutable revision fixes weights, processor, precision, backend, output schema, and other result-affecting settings. GPU placement, replicas, and dynamic batching are runtime deployment concerns. Queries do not call models directly, but each planned query pins a model revision. |
-| **Function** | The only model-facing interface callable from a query. It stores a signature, bound semantic parameters, determinism, and a stable `model_id` or code entry point. Implementations may use `USING MODEL`, `LANGUAGE PYTHON`, or a SQL macro. One model may back several functions. |
+| **Model** | A typed inference capability. `TYPE` fixes its built-in SQL function and canonical Arrow result; the definition selects an artifact or endpoint, Runtime, PreProcessor, and PostProcessor. A query names the Model through the built-in function's constant `model` argument, and planning copies the resolved definition into an immutable Query Manifest. |
+| **Function** | User-defined computation: a SQL expression function or a batched Python function. Function DDL reuses DataFusion's grammar and registry. A SQL function may wrap a typed inference call as an alias or preset. |
 | **Window** | A streaming aggregation boundary. `TUMBLE` is a time-bucketing scalar function used in `GROUP BY`; in batch mode it behaves as an ordinary time-bucketed aggregate. |
 | **Sink** | A destination such as Console, Kafka, Parquet, or Lance |
 
@@ -128,13 +128,20 @@ USING VIDEOS
 LOCATION './recordings/entrance/'
 WITH (fps = 5);
 
--- 2. Register a model and derive the query-facing detect function.
--- Functions are named for capabilities, so rebinding the model does not change queries.
+-- 2. Register one typed inference capability.
+-- TYPE fixes the DETECT_OBJECTS SQL interface and result schema.
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM './models/yolo26n.onnx'
-WITH (processor = 'yolo26-detect-v1')
-FUNCTION detect;
+WITH (
+  runtime.kind = 'onnxruntime',
+  pre_processor.kind = 'vision.image_tensor@1',
+  pre_processor.options = {
+    input_name = 'images', width = 640, height = 640, resize = 'letterbox'
+  },
+  post_processor.kind = 'vision.yolo_e2e@1',
+  post_processor.options = {output_name = 'output0', labels = 'coco80'}
+);
 
 -- 3. Count people in each frame and aggregate by minute.
 SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
@@ -142,14 +149,17 @@ SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        MAX(person_cnt) AS peak_people
 FROM (
   SELECT ts,
-         COUNT_OBJECTS(detect(frame), 'person', 0.6) AS person_cnt
+         COUNT_OBJECTS(
+           DETECT_OBJECTS('yolo26n', frame),
+           'person', 0.6
+         ) AS person_cnt
   FROM entrance_videos
 )
 GROUP BY 1;
 -- COUNT_OBJECTS(detections, label, confidence threshold) is a built-in array function.
 ```
 
-The workflow is roughly 15 lines of SQL and requires neither inference code nor a deployed service. The example ONNX artifact is exported explicitly from the official `Ultralytics/YOLO26` checkpoint; preparing a model is separate from query logic. The interval from `pip install` to the first result must remain under five minutes, which is the TTFV definition used in Section 7 and Acceptance Scenario A.
+The workflow stays below 30 non-comment SQL lines and requires neither inference code nor a deployed service. The example ONNX artifact is exported explicitly from the official `Ultralytics/YOLO26` checkpoint; preparing a model is separate from query logic. The interval from `pip install` to the first result must remain under five minutes, which is the TTFV definition used in Section 7 and Acceptance Scenario A.
 
 The same logic can later run against live video: replace the table in `FROM` with an RTSP stream registered by `CREATE STREAM`, then use `CREATE SINK` and `INSERT INTO` to publish continuously to Kafka. This is Acceptance Scenario B and the practical meaning of batch–stream unification. Attached streaming queries run in the foreground for development; production lifecycle behavior is defined in Section 3.5.
 
@@ -188,99 +198,91 @@ WITH (
 
 #### 3.3.2 Registering Models
 
-A **MODEL is a resource implementation**: it declares a task type and a reproducible implementation. Queries call functions, not models.
+A **MODEL is one typed inference capability**. Its `TYPE` fixes the callable SQL interface and canonical result; its source and `WITH` options describe how an artifact or endpoint implements that interface.
+
+| Model `TYPE` | Built-in SQL function | Canonical result | Availability |
+|---|---|---|---|
+| `OBJECT_DETECTION` | `DETECT_OBJECTS` over `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
+| `IMAGE_CLASSIFICATION` | `CLASSIFY_IMAGE` over `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Roadmap-gated |
+| `IMAGE_EMBEDDING(n)` | `EMBED_IMAGE` over `IMAGE` | `VECTOR(n)` | v0.4 |
+| `TEXT_EMBEDDING(n)` | `EMBED_TEXT` over `STRING` | `VECTOR(n)` | v0.4 |
+| `TEXT_GENERATION` | `GENERATE_TEXT` over `STRING` | `STRING` | Roadmap-gated |
+
+These are capability types rather than broad framework labels such as CV or LLM. The same physical bundle may be registered under multiple compatible types—for example, separate CLIP image- and text-embedding Models—while cache and session reuse remain internal optimizations.
 
 ```sql
--- Declare what the model is. Runtime placement and batch size require no DDL configuration.
+-- Local ONNX object detection.
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM 'file:///models/yolo26n.onnx'
-WITH (processor = 'yolo26-detect-v1');
-
--- EMBEDDING becomes available in v0.4.
-CREATE MODEL clip TYPE EMBEDDING FROM 'hf://openai/clip-vit-base-patch32';
-
--- Shorthand for the common one-model, one-function case.
-CREATE MODEL yolo26l
-TYPE OBJECT_DETECTION
-FROM 'file:///models/yolo26l.onnx'
-WITH (processor = 'yolo26-detect-v1')
-FUNCTION detect_l;
-
--- A model with a different ONNX interface can override adapter and post-processing defaults.
-CREATE MODEL custom_detector
-TYPE OBJECT_DETECTION
-FROM 'file:///models/custom-detector.onnx'
 WITH (
-  processor = 'yolo26-detect-v1',
-  input_name = 'images',
-  output_name = 'output0',
-  input_width = 640,
-  input_height = 640,
-  output_format = 'ultralytics_end_to_end',
-  labels = ['person', 'vehicle'],
-  min_confidence = 0.25
+  runtime.kind = 'onnxruntime',
+
+  pre_processor.kind = 'vision.image_tensor@1',
+  pre_processor.options = {
+    input_name = 'images',
+    width = 640,
+    height = 640,
+    resize = 'letterbox',
+    color_space = 'rgb',
+    layout = 'nchw'
+  },
+
+  post_processor.kind = 'vision.yolo_e2e@1',
+  post_processor.options = {
+    output_name = 'output0',
+    box_format = 'xyxy',
+    labels = 'coco80'
+  }
 );
 ```
 
-`CREATE MODEL ... WITH (...)` stores result-affecting defaults: processor, tensor names, dimensions, output format, labels, and post-processing thresholds. In v0.1, processor defaults are applied first and MODEL defaults second. Any deviation from the known interface must be explicit; VisionQL does not infer semantics from filenames or tensor shapes and does not require `visionql-manifest.json`.
+Model options are deliberately namespaced:
 
-The first built-in processor, `yolo26-detect-v1`, targets the end-to-end ONNX export of an official YOLO26 detection checkpoint: input `images`, output `output0`, resolution `640x640`, COCO's 80 labels, and `(N, 300, 6)` records shaped as `[x1, y1, x2, y2, confidence, class_id]`. The official Hugging Face repository provides a `.pt` checkpoint, which must be exported to ONNX with Ultralytics. VisionQL does not embed PyTorch.
+| Namespace | Responsibility |
+|---|---|
+| `runtime.*` | Select the implementation with `runtime.kind` and, for a service, its wire contract with `runtime.protocol`; binding fields such as a served model and immutable version live here too |
+| `pre_processor.*` | Select a versioned PreProcessor and provide all implementation-specific values in one `pre_processor.options = {...}` object |
+| `post_processor.*` | Select a versioned PostProcessor and provide all implementation-specific values in one `post_processor.options = {...}` object |
 
-Model identity is separate from deployment. `CREATE MODEL` does not accept device, replica, or dynamic-batch settings; the runtime owns those decisions because they do not change query results. The `WITH` clause accepts only processor parameters that do affect results. Unsupported settings such as multi-tenant `resource_group` must return an explicit capability error. The engine owns model download, version pinning, GPU placement, batching, and retry.
+`runtime.kind` is an implementation name such as `onnxruntime`, `triton`, `transformers`, `vllm`, `sglang`, or `llama_cpp`. `runtime.protocol` is orthogonal: examples include `kserve_v2_http`, `kserve_v2_grpc`, and `openai`. Thus `runtime.kind = 'sglang'` with `runtime.protocol = 'openai'` still selects the SGLang integration; `openai` is never a Runtime kind. Every type, Runtime, protocol, and processor combination is version-gated and validated before a usable Model is stored.
 
-#### 3.3.3 Registering Functions
+The `WITH` clause contains result-affecting implementation data, not deployment policy. Device placement, replicas, queue capacity, batch size, maximum wait, concurrency, timeout, and credentials belong to internal RuntimeConfig or the secret provider. Flat processor fields such as `pre_processor.width` are invalid. Unknown namespaces and unknown processor options fail rather than being silently retained.
 
-A **FUNCTION is the only callable interface in a query**.
+`FROM` identifies an artifact bundle or endpoint. ONNX graphs, explicitly classified `.pt`/`.pth` artifacts, Safetensors bundles, and GGUF bundles are inputs to compatible Runtimes; a file suffix is not a generic execution strategy. Remote bundles are pinned and content-addressed where possible. VisionQL neither infers a task, label map, tensor contract, or processor from filenames and shapes nor requires a public Profile, Adapter, or `visionql-manifest.json`.
 
-```sql
--- TYPE implies the standard signature, so the signature and RETURNS may be omitted.
--- OBJECT_DETECTION: (IMAGE) -> ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>
-CREATE FUNCTION detect USING MODEL yolo26n;
+The normal open-source integration path is intentionally short: pin the source revision or digest, select a compatible Runtime, select compatible PreProcessor and PostProcessor kinds, declare only their typed options, and pass one real-model conformance fixture. Common tensor contracts should require only Model DDL; a new reusable tensor family adds one narrow processor implementation. Arbitrary repository code runs only in an isolated `transformers` worker or behind Triton, vLLM, SGLang, or llama.cpp—not inside `vql-kernel`.
 
--- Derive a function with semantic overrides from the same model.
-CREATE FUNCTION person_det USING MODEL yolo26n
-WITH (
-  classes = ['person'],
-  min_confidence = 0.5
-);
+#### 3.3.3 Calling Models and Registering User Functions
 
--- One CLIP model exposes both image and text entry points in v0.4.
-CREATE FUNCTION embed_image(img IMAGE) RETURNS VECTOR(512) USING MODEL clip;
-CREATE FUNCTION embed_text(txt STRING) RETURNS VECTOR(512) USING MODEL clip;
-```
-
-Model parameters are defaults; Function parameters are overrides. Planning resolves `processor defaults < Model defaults < Function overrides`, validates the merged values against the model type and processor schema, and records them in the plan snapshot and semantic fingerprint. A Function may override only processor fields explicitly marked as overridable—not the artifact, Model `TYPE`, backend, precision, device, or batching policy.
-
-Every FUNCTION definition has five independent dimensions:
-
-```text
-CREATE [OR REPLACE] FUNCTION name [(param type, ...)] [RETURNS type]
-  <implementation clause>
-  [WITH (bound parameters)]
-```
-
-| Dimension | v0.1 | Extension point |
-|---|---|---|
-| **Shape** | Scalar function | `CREATE AGGREGATE FUNCTION`, `CREATE TABLE FUNCTION` |
-| **Signature** | Explicit or inferred from Model `TYPE` | Overloads |
-| **Implementation** | `USING MODEL m`, `LANGUAGE PYTHON AS '<entry>'`, or `AS (<expression>)` | Add resource kinds after `USING`; add languages after `LANGUAGE` |
-| **Bound parameters** | Processor overrides such as tensor names, classes, and thresholds | Validated by a processor-owned allowlist; cannot change artifact identity or runtime placement |
-| **Metadata** | Determinism, batching support, and cost inferred from implementation | Optimizer-only; no additional syntax |
+Inference uses the fixed built-in function owned by the Model type. Required arguments are positional: the Model name first, followed by the type-specific domain input. Optional semantic arguments use DataFusion's `=>` named-argument notation:
 
 ```sql
-CREATE FUNCTION detect USING MODEL yolo26n;
+SELECT DETECT_OBJECTS(
+  'yolo26n',
+  image,
+  classes => ['person'],
+  min_confidence => 0.5
+) AS detections
+FROM product_photos;
+```
+
+In v0.1, the first argument must be a non-NULL string literal naming a Model. Planning resolves it from the Catalog, validates that its Model type matches the built-in function, and stores the resolved Model in the Query Manifest; the string never becomes a per-row Arrow value or Runtime request field. Required domain arguments such as `image` or `prompt` may be arbitrary row expressions. Optional semantic arguments such as `classes` and thresholds must be named constants and follow all positional arguments. Dynamic model selection, prepared Model parameters, duplicate or unknown arguments, and type mismatches are planning errors.
+
+`CREATE FUNCTION` is reserved for genuine user-defined computation:
+
+```sql
+CREATE FUNCTION fahrenheit(DOUBLE)
+RETURNS DOUBLE
+RETURN $1 * 1.8 + 32;
 
 CREATE FUNCTION blur_score(img IMAGE) RETURNS FLOAT
 LANGUAGE PYTHON AS 'myops.quality:blur_score';
-
-CREATE FUNCTION is_large(b BOX2D) RETURNS BOOLEAN
-AS (b.w * b.h > 0.25);
 ```
 
-`USING` consistently means “backed by a registered resource or provider,” as in `USING IMAGES` and `USING HNSW`. `AS` introduces an implementation body, as in CTAS, a Python entry point, or a SQL macro.
+VisionQL reuses DataFusion's PostgreSQL-style `CREATE FUNCTION` grammar, `CreateFunction`, `FunctionFactory`, named arguments, and UDF registry. VisionQL adds durable Catalog storage and reconstructs the UDF for each Query Manifest; session registration is not the source of truth. SQL functions expand during planning, and Python functions use the batched Arrow ABI. A reusable inference alias or parameter preset may be an ordinary SQL expression function whose expanded body still becomes an explicit `Inference` node.
 
-This separation lets interfaces and implementations evolve independently, lets one weight artifact serve multiple functions, and lets the optimizer schedule and deduplicate expensive model calls without weakening the result contract. `ALTER MODEL` and `ALTER FUNCTION` create new revisions that affect only queries planned afterward. A running query remains pinned to the revisions selected during planning.
+`RETURNS` is required for Python functions. A SQL expression function may omit it when DataFusion can infer the body type; otherwise registration asks for an explicit return type.
 
 #### 3.3.4 Locating People in Video or a Stream
 
@@ -292,7 +294,7 @@ SELECT ts,
        det.box,
        det.confidence
 FROM cam_entrance,
-     UNNEST(detect(frame)) AS det
+     UNNEST(DETECT_OBJECTS('yolo26n', frame)) AS det
 WHERE det.label = 'person'
   AND det.confidence > 0.6;
 ```
@@ -301,7 +303,7 @@ WHERE det.label = 'person'
 -- Recorded video: the frame table uses the same query shape.
 SELECT f.uri, f.ts, det.box
 FROM traffic_videos AS f,
-     UNNEST(detect(f.frame)) AS det
+     UNNEST(DETECT_OBJECTS('yolo26n', f.frame)) AS det
 WHERE det.label = 'person';
 ```
 
@@ -313,7 +315,8 @@ WHERE det.label = 'person';
 -- Return the 20 images most similar to the text prompt.
 SELECT uri, image
 FROM product_photos
-ORDER BY embed_image(image) <-> embed_text('a worker wearing a red helmet')
+ORDER BY EMBED_IMAGE('clip_image', image)
+         <-> EMBED_TEXT('clip_text', 'a worker wearing a red helmet')
 LIMIT 20;
 ```
 
@@ -328,7 +331,8 @@ INSERT INTO people_per_minute SELECT ...;
 -- Retain evidence frames with the alert.
 INSERT INTO evidence  -- a Lance/Parquet table; native IMAGE storage arrives in v0.4
 SELECT ts, frame, det.box
-FROM cam_entrance, UNNEST(detect(frame)) AS det
+FROM cam_entrance,
+     UNNEST(DETECT_OBJECTS('yolo26n', frame)) AS det
 WHERE det.label = 'person' AND det.confidence > 0.9;
 ```
 
@@ -337,7 +341,7 @@ WHERE det.label = 'person' AND det.confidence > 0.9;
 Every extension must map to a mature extension point in the columnar query engine. VisionQL does not require a fork of that engine.
 
 1. **Extensions reduce to two standard mechanisms.**
-   - Vectorized scalar functions cover inference (`detect`, `embed_image`), array operations (`COUNT_OBJECTS`), and vector predicates (`L2_DISTANCE`). SQL macros are expanded at parse time and do not create runtime objects.
+   - Type-owned inference markers such as `DETECT_OBJECTS` are extracted into explicit `Inference` nodes. Ordinary vectorized functions cover array operations (`COUNT_OBJECTS`) and vector predicates (`L2_DISTANCE`); SQL expression functions expand during planning.
    - VQL DDL updates the Catalog or runtime. `CREATE STREAM/MODEL/FUNCTION/SINK` does not enter the relational plan. A video table expands frames inside its scan operator at the fps declared by the table.
 2. **No lambdas or higher-order functions.** Named functions such as `COUNT_OBJECTS(dets, label, min_conf)` keep expressions first-order and easier to analyze and push down.
 3. **`UNNEST` is the only row-expansion mechanism.** `FROM t, UNNEST(expr) AS x` maps to the engine's native unnest node without requiring general lateral joins.
@@ -351,7 +355,7 @@ SQL and the DataFrame API build the same logical plan. SQL remains the primary i
 
 In v0.1, the Python package provides `sess.sql()`, Arrow result exchange, rich notebook display, and Python UDF registration. The chainable API arrives in v0.3 after the logical plan has been validated by real v0.1 queries; exposing it earlier would freeze an immature internal representation as a public contract.
 
-The target API looks like this. `embed_image` and Lance output are v0.4 capabilities:
+The target API looks like this. Embedding and Lance output are v0.4 capabilities:
 
 ```python
 import visionql as vq
@@ -362,7 +366,13 @@ sess = vq.connect()
 counts = (
     sess.stream("cam_entrance")
         .with_column("person_cnt",
-                     vq.fn("count_objects")(vq.fn("detect")(vq.col("frame")), "person", 0.6))
+                     vq.fn("count_objects")(
+                         vq.fn("detect_objects")(
+                             "yolo26n", vq.col("frame")
+                         ),
+                         "person",
+                         0.6,
+                     ))
         .window(vq.tumble("1 minute"))
         .agg(avg_people=vq.avg("person_cnt"), peak_people=vq.max("person_cnt"))
 )
@@ -371,8 +381,12 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 # Batch: tag an image directory and persist the result.
 (
     sess.table("product_photos")
-        .with_column("tags", vq.fn("detect")(vq.col("image")))
-        .with_column("embedding", vq.fn("embed_image")(vq.col("image")))
+        .with_column("tags", vq.fn("detect_objects")(
+            "yolo26n", vq.col("image")
+        ))
+        .with_column("embedding", vq.fn("embed_image")(
+            "clip_image", vq.col("image")
+        ))
         .write.lance("s3://bucket/photo_index/")
 )
 ```
@@ -408,13 +422,13 @@ The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`.
 
 The implementation details live in [System Design](./design.md), but the following constraints are required for the product experience above:
 
-1. **Optimizer:** in the initial scope, push only user-declared fps/time ranges and decoding, plus query-local common-expression elimination for deterministic model calls.
+1. **Optimizer:** in the initial scope, push only user-declared fps/time ranges and decoding, plus query-local common-expression elimination for deterministic typed inference calls.
 2. **Frame path:** decoded 1080p RGB is about 6 MB per frame; one 5 fps stream produces about 30 MB/s. `IMAGE` should remain a reference or compressed value through most of the plan, with decoding deferred until inference or persistence.
 3. **GPU-aware scheduling:** automatic batching, operator/model co-location, and backpressure.
 4. **Streaming semantics:** event time, watermarks, and reconnect behavior. RTSP is non-replayable and therefore best-effort; outages and dropped frames must appear as gaps rather than fabricated data.
 5. **Storage:** columnar multimodal output, with Parquet and Lance plus video references in v0.4.
 6. **Observability:** per-query inference count and latency; from v0.3, a Prometheus endpoint powers operational and Workbench cost views.
-7. **Code functions:** heavy inference uses `USING MODEL` so the engine can manage GPUs. In embedded mode, Python UDFs run in the host process and exchange Arrow batches. In the v0.3 service, Python UDFs run in isolated worker processes over Arrow IPC. The kernel never embeds a Python interpreter and needs Python only when a Python function is registered.
+7. **Inference and code functions:** type-owned model calls become explicit `Inference` nodes so the engine can manage accelerators, batching, and backpressure. SQL expression and Python Function DDL reuse DataFusion's function extension points as ordinary UDFs. In embedded mode, Python UDFs run in the host process and exchange Arrow batches. In the v0.3 service, Python UDFs run in isolated worker processes over Arrow IPC. The kernel never embeds a Python interpreter and needs Python only when a Python function is registered.
 
 ### 3.7 Non-Functional Requirements
 
@@ -424,7 +438,7 @@ The implementation details live in [System Design](./design.md), but the followi
 | **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. From v0.3, durable service jobs recover after restart without losing Catalog state. |
 | **Error semantics** | A single decode or inference failure produces NULL for that row and increments query error metrics. Alert when the failure rate crosses a threshold. Optional strict mode is `on_error = 'fail'`. Model false positives and false negatives are not engine errors; users manage them with explicit thresholds. |
 | **Security and privacy** | Data stays in its domain by default. Pin and hash model sources. The v0.3 service adds TLS, authentication, relation-level authorization, and out-of-process Python UDFs. |
-| **Compatibility** | SQL and Catalog formats are unstable until 1.0; `EXPLAIN` text and internal metric names are not stable APIs. Upgrades must migrate existing catalogs automatically, roll back failed migrations, and never require a catalog rebuild. |
+| **Compatibility** | VisionQL v0.1 has not been released, so pre-release SQL and Catalog definitions carry no compatibility guarantee. Compatibility and automatic Catalog migration begin with released versions. `EXPLAIN` text and internal metric names are not stable APIs before 1.0. |
 
 ### 3.8 Workbench
 
@@ -463,7 +477,7 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 - `IMAGE`, `VIDEO`, `BOX2D`, nested types, and `UNNEST`; `VECTOR` waits for v0.4.
 - Image and video directory tables. Video is expanded by the table's declared fps.
-- One `OBJECT_DETECTION` model type through `CREATE MODEL` and `CREATE FUNCTION ... USING MODEL`, including one-to-one shorthand, plus in-process Python UDFs.
+- One `OBJECT_DETECTION` Model type called through `DETECT_OBJECTS('<model>', image, ...)`; local ONNX Runtime and remote Triton KServe V2 HTTP execution share the same typed pipeline. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
 - Console Sink for foreground debugging. Kafka arrives in v0.2; Parquet and Lance arrive together in v0.4.
 - Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. The chainable DataFrame API arrives in v0.3.
 - Catalog, shell history, and cache live under `VQL_HOME` (default `$HOME/.vql`). The SQLite Catalog is exactly `$VQL_HOME/catalog/vql.db`. Repository development uses `VQL_HOME=./data/.vql`; datasets live separately under `./data/datasets/`.
@@ -473,13 +487,13 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 **v0.3 adds the `vqld` service**, Flight SQL, TLS/authentication, relation-level authorization, durable job management and recovery, the Python DataFrame API, and Workbench.
 
-**v0.4 adds cross-modal retrieval and persisted results:** `EMBEDDING`, `VECTOR`, brute-force `<->` TopK, Parquet and Lance with native `IMAGE` and vector columns, and HNSW indexing. Parquet and Lance ship together against one output, CTAS, and logical-type recovery contract so `IMAGE` storage is designed only once.
+**v0.4 adds cross-modal retrieval and persisted results:** `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)`, their fixed `EMBED_IMAGE` / `EMBED_TEXT` calls, `VECTOR(n)`, brute-force `<->` TopK, Parquet and Lance with native `IMAGE` and vector columns, and HNSW indexing. Parquet and Lance ship together against one output, CTAS, and logical-type recovery contract so `IMAGE` storage is designed only once.
 
 Everything else remains intentionally undefined. Candidate directions live in the [Roadmap](../ROADMAP.md) and will be scheduled only after earlier releases produce real feedback.
 
 **Acceptance scenarios:**
 
-- **Scenario A — first value without external services (v0.1):** run locally in a Python host. Register an image directory, use a Python UDF to reject blurry images, run `detect` to select images containing a target object, and display the result in the Python session. An in-process UDF requires a notebook or REPL; `vql shell` must direct the user to a Python host. The pure-SQL first-run path in Section 3.2 runs in the shell. Both paths must produce a first result within five minutes of `pip install`.
+- **Scenario A — first value without external services (v0.1):** run locally in a Python host. Register an image directory, use a Python UDF to reject blurry images, call `DETECT_OBJECTS` with a local ONNX Model to select images containing a target object, and display the result in the Python session. An in-process UDF requires a notebook or REPL; `vql shell` must direct the user to a Python host. The pure-SQL first-run path in Section 3.2 runs in the shell. Both paths must produce a first result within five minutes of `pip install`.
 - **Scenario B — batch/stream parity (v0.2):** start with the per-minute people-count query in Section 3.2, run it over recorded video, then point the same logic at RTSP and use `vql run` to publish to Kafka. With the same model and sample rate, assert equivalent results. Use Console Sink during debugging to inspect `UNNEST` output. Batch is the trusted reference for the streaming comparison.
 
 Scenario A proves that first use is simple. Scenario B proves the differentiated end-to-end streaming capability.
@@ -491,7 +505,7 @@ Scenario A proves that first use is simple. Scenario B proves the differentiated
 | **v0.1 (MVP)** | Single-node batch over images and recorded video | Embedded pip package, SQL, CLI, image/video directory tables, object detection, Python UDFs, Console Sink, sampling pushdown, Acceptance Scenario A |
 | **v0.2** | Unified batch and streaming | One RTSP source, `TUMBLE`, Kafka Sink, attached continuous execution, Acceptance Scenario B |
 | **v0.3** | Service and visual client | `vqld` with Flight SQL, TLS/authentication, relation-level authorization, explicit `SUBMIT QUERY`, durable jobs and recovery, Python DataFrame API, Workbench |
-| **v0.4** | Cross-modal retrieval and persistence | `EMBEDDING`, `VECTOR`, brute-force `<->` TopK, Parquet and Lance with native multimodal columns, HNSW |
+| **v0.4** | Cross-modal retrieval and persistence | `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)`, `VECTOR(n)`, brute-force `<->` TopK, Parquet and Lance with native multimodal columns, HNSW |
 
 Cost optimization, clustering, multi-tenancy, and edge coordination remain future candidates. The complete delivery and acceptance plan is maintained in the [Roadmap](../ROADMAP.md).
 
@@ -529,10 +543,9 @@ The first users will be two or three design partners working with the team on on
 |---|---|---|
 | `CREATE STREAM ... FROM 'rtsp://...'` | DDL | Register a video stream |
 | `CREATE TABLE ... USING IMAGES/VIDEOS` | DDL | Register a directory as a table |
-| `CREATE MODEL ... TYPE ... FROM ...` | DDL | Register a model resource; an optional `FUNCTION` clause derives a function |
-| `CREATE FUNCTION ... USING MODEL / LANGUAGE <lang> AS '<entry>' / AS (<expression>)` | DDL | Register a resource-backed function, code function, or SQL macro |
-| `ALTER MODEL ...` | DDL | Create a new model revision for queries planned afterward |
-| `ALTER FUNCTION ... SET MODEL` | DDL | Rebind a function for queries planned afterward |
+| `CREATE MODEL ... TYPE ... FROM ... WITH (...)` | DDL | Register a typed inference capability with namespaced Runtime and processor options |
+| `DETECT_OBJECTS('<model>', image [, named options])` | Typed inference | Call an `OBJECT_DETECTION` Model; planning resolves the first positional argument and extracts an `Inference` node |
+| `CREATE FUNCTION ... RETURN <expression> / LANGUAGE PYTHON AS '<entry>'` | DDL | Register a DataFusion-backed SQL expression or batched Python function |
 | `CREATE SINK` | DDL | Declare a result destination |
 | `CREATE INDEX ... USING HNSW` | DDL | Add a vector index; rewrite `ORDER BY <-> LIMIT` to ANN in v0.4 |
 | `TUMBLE(ts, interval)` | Time bucket | Define a tumbling window for batch or streaming `GROUP BY` |
@@ -547,4 +560,5 @@ The first users will be two or three design partners working with the team on on
 
 | Date | Change |
 |---|---|
+| 2026-08-10 | Defined type-owned inference calls, namespaced Runtime and processor options, and DataFusion-backed SQL/Python Functions |
 | 2026-08-07 | Initial product design |

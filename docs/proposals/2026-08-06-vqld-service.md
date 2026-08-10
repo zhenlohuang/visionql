@@ -2,7 +2,7 @@
 created_at: 2026-08-06
 status: draft
 target_version: v0.3
-updated_at: 2026-08-09
+updated_at: 2026-08-10
 ---
 
 # vqld Service: Flight SQL, Durable Jobs, and Recovery
@@ -161,9 +161,9 @@ The coordinator selects a completed epoch as a checkpoint boundary based on elap
 
 1. Starting from the state restored from the current checkpoint, apply the epoch and produce closed-window output.
 2. Write output to the Sink and wait for every write acknowledgement.
-3. Atomically persist a new checkpoint containing the logical-plan hash, Catalog definition snapshot, watermark, normalized window state, every `WindowStateCodec` version, and the Sink delivery sequence.
+3. Atomically persist a new checkpoint containing the logical-plan hash, Query Manifest identity, watermark, normalized window state, every `WindowStateCodec` version, and the Sink delivery sequence.
 
-The checkpoint writes the normalized Arrow state defined in [design.md](../design.md) §5.4 and records operator ID, state-schema fingerprint, codec version, and engine state-format version. It does not call `state()` on the active accumulator. Recovery requires those fields to match the definition snapshot. Incompatibility moves the job to `state=FAILED, error_code=RECOVERY_INCOMPATIBLE`; it must not attempt best-effort deserialization.
+The checkpoint writes the normalized Arrow state defined in [design.md](../design.md) §5.4 and records operator ID, state-schema fingerprint, codec version, and engine state-format version. It does not call `state()` on the active accumulator. Recovery requires those fields to match the Query Manifest. Incompatibility moves the job to `state=FAILED, error_code=RECOVERY_INCOMPATIBLE`; it must not attempt best-effort deserialization.
 
 Recovery behavior is:
 
@@ -184,7 +184,7 @@ RUNNING / PAUSED / FAILED → STOPPED
 ```
 
 - `PAUSE` stops the source after the current epoch reaches a consistency boundary. Pausing RTSP creates an unrecoverable gap.
-- `RESUME` continues only from the original definition snapshot and never replans implicitly. To adopt a new Function or Model revision, stop the old job and explicitly submit the original SQL as a new job, which receives a new `query_id` and definition snapshot.
+- `RESUME` continues only from the original Query Manifest and never replans implicitly. To adopt changed Catalog definitions, stop the old job and explicitly submit the original SQL as a new job, which receives a new `query_id` and Query Manifest.
 - `STOP` is terminal. It releases model, source, and state resources while retaining job history.
 - On service startup, restore jobs in `RUNNING` or `RECOVERING`: recover window state from a checkpoint and reconnect RTSP at the live position.
 
@@ -194,9 +194,9 @@ The service adds one object to the Catalog objects in [design.md](../design.md) 
 
 | Object | Key contents |
 |---|---|
-| QueryJob | Name, SQL, definition snapshot, state, checkpoint location, owner |
+| QueryJob | Name, SQL, immutable Query Manifest, state, checkpoint location, owner |
 
-A `SUBMIT QUERY` name is immutable and unique within the owner's non-terminal jobs. State changes use only the server UUID. Durable jobs and checkpoints hold revision leases according to [design.md](../design.md) §4.3.
+A `SUBMIT QUERY` name is immutable and unique within the owner's non-terminal jobs. State changes use only the server UUID. Durable jobs and checkpoints hold Manifest leases according to [design.md](../design.md) §4.3.
 
 In addition to the embedded security constraints in [design.md](../design.md) §13, the service requires:
 
@@ -205,14 +205,14 @@ In addition to the embedded security constraints in [design.md](../design.md) §
 - `FRAME_AT` accepts only locators for registered sources. By default, the server blocks cloud metadata addresses, link-local addresses, and targets not explicitly allowed by configuration.
 - `IMAGE.uri` is a sanitized display value. `IMAGE.locator` is the media location that can be reauthorized. Neither contains underlying credentials.
 - Python UDFs run in an out-of-process worker with timeout, memory, and dependency controls. The worker is not a multi-tenant security sandbox.
-- v0.3 has no audit log, but execution context retains principal, query ID, and object-revision fields so provenance can be added later.
+- v0.3 has no audit log, but execution context retains principal, query ID, Query Manifest identity, and resolved object fingerprints so provenance can be added later.
 
 ## Relationship to the System Design
 
 - `vqld` is built on the process-agnostic kernel in [design.md](../design.md) §11.1; the `vql-server` crate boundary is in §14.
 - `IMAGE` transport follows the three payload states and locator invariants in §6.2, which also defines the fixed error-code set.
 - Checkpoint boundaries use the epoch consistency boundary in §5. The recovery ABI for window state is `WindowStateCodec` in §5.4.
-- Definition snapshots and revision leases follow §4.3 and §7.2.
+- Query Manifests and their leases follow §4.3 and §7.2.
 - At-least-once delivery corresponds to ADR-008 in §15.
 
 ## Testing and Acceptance
@@ -235,3 +235,4 @@ Test all specified metadata RPCs, statement/prepared transport mappings, `statem
 |---|---|
 | 2026-08-06 | Extracted from engine design v0.5.0 §5.6–§5.7 and §11.4–§11.6 |
 | 2026-08-09 | Converted metadata to front matter, adopted date-based naming, and translated to English |
+| 2026-08-10 | Aligned durable jobs, checkpoints, and dependencies with immutable Query Manifests |

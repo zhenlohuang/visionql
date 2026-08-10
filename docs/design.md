@@ -44,7 +44,7 @@ The product non-goals are in PRD Section 4. This design also excludes the follow
 | Job coordinator | The streaming runtime component that sequences epochs, window state, and Sink acknowledgements |
 | Media reference | Logical coordinates for an image or video frame; it contains no decoded pixels |
 | Frame arena | An arena of decoded frames valid only within one process and one epoch |
-| Definition snapshot | The exact Table, Model, Function, and Sink revisions resolved when a query is planned |
+| Query Manifest | The immutable, fully resolved Table, Stream, Model, user-defined Function, and Sink specifications captured when a query is planned; internal Catalog generations are implementation details |
 
 ---
 
@@ -54,12 +54,12 @@ The product non-goals are in PRD Section 4. This design also excludes the follow
 |---|---|---|
 | G1 | Batch and streaming share SQL and DataFrame semantics | Maintain one `VqlLogicalPlan`. Infer boundedness during analysis and choose a batch plan or streaming job graph only during physical compilation. |
 | G2 | The product works after `pip install`, with no service | The kernel cannot listen on a port or require an external metadata service. Local state uses SQLite, and CLI and Python embed the same kernel. |
-| G3 | Model calls are optimizable | A `USING MODEL` function is extracted into an explicit `Inference` node at planning time; it never runs as an opaque row-at-a-time UDF. |
+| G3 | Model calls are optimizable | A type-owned built-in inference call is resolved against a constant Model name and extracted into an explicit `Inference` node; it never runs as an opaque row-at-a-time UDF. |
 | G4 | Large images do not bounce between operators as pixel copies | `IMAGE` carries a reference by default. Pixels exist only in a bounded frame arena, tensor buffer, or explicit IPC/persistence boundary. |
 | G5 | Streaming has event time and honest delivery semantics | Watermarks, source offsets, and frame leases live in the epoch control plane, not in rows that a Filter could discard. |
 | G6 | One bad row does not stop a query by default | Decode or inference failure keeps the input row, writes NULL to the affected result, and records a structured error metric. Strict mode fails the query. |
 | G7 | Results remain consumable by the Arrow ecosystem | Multimodal values use standard Arrow storage types with extension metadata. Process-local memory never crosses a process boundary, and clients that do not recognize the extension can still read its storage type. |
-| G8 | Future features do not distort the mainline | Model types, processors, backends, sources, Sinks, and logical nodes extend through narrow traits or registries. Unsupported features fail explicitly. |
+| G8 | Future features do not distort the mainline | Model types, PreProcessors, Runtimes, PostProcessors, sources, Sinks, and logical nodes extend through narrow traits or registries. Unsupported features fail explicitly. |
 
 Three implementation rules follow:
 
@@ -83,7 +83,7 @@ flowchart TB
     subgraph CORE["Engine kernel"]
         ENTRY["Engine / Session API"]
         SQL["VQL parsing and semantic analysis"]
-        CAT["Catalog and definition snapshots"]
+        CAT["Catalog and Query Manifests"]
         PLAN["VqlLogicalPlan and optimizer"]
         BCOMP["Batch plan compiler"]
         SCOMP["Streaming job compiler"]
@@ -124,13 +124,13 @@ flowchart TB
 |---|---|---|
 | `Engine` / `Session` | Assembly of Catalog, planner, runtimes, and configuration; SQL and DataFrame entry points | Signals, ports, user authentication |
 | VQL front end | Script splitting, VQL DDL parsing, syntax normalization, unified logical-plan construction | I/O other than executing DDL |
-| Catalog | Transactional persistence of object revisions, dependencies, schemas, model hashes, and job definitions | Video bytes, model weights, or plaintext credentials |
-| Planner | Type checks, boundedness and replayability inference, function resolution, inference extraction, streamability checks | GPU placement or model loading |
+| Catalog | Transactional persistence of current definitions, internal generations, dependencies, schemas, model bundle digests, and job definitions | Video bytes, model weights, or plaintext credentials |
+| Planner | Type checks, boundedness and replayability inference, typed inference and UDF resolution, Query Manifest construction, inference extraction, streamability checks | GPU placement or model loading |
 | Batch compiler | Lowering a bounded logical plan to a DataFusion `ExecutionPlan` | Watermarks or recovery |
 | Streaming compiler | Splitting a continuous query into sources, bounded data fragments, stateful operators, and a Sink | Reimplementing expression evaluation |
 | Job coordinator | Driving epochs in order; advancing control state; cancellation; Sink acknowledgement | Interpreting SQL expressions |
 | Media runtime | Probe, read, decode, sample, frame arena, and encode | Model preprocessing or post-processing |
-| Model runtime | Artifact resolution, processors, device sessions, batch scheduling, and inference | SQL semantics or Catalog authorization |
+| Model runtime | Artifact resolution, PreProcessor/Runtime/PostProcessor registries, sessions, bounded scheduling, and inference | SQL semantics or Catalog authorization |
 | Connectors | Reading images, video, and RTSP; writing Console and Kafka | Rewriting query plans |
 
 ### 3.3 Batch and Streaming Paths
@@ -170,7 +170,7 @@ PlanProperties {
   event_time: None | { column, watermark_delay },
   ordering: ...,
   image_access: MetadataOnly | Encoded | Pixels,
-  definition_snapshot: CatalogGeneration,
+  query_manifest: QueryManifestId,
 }
 ```
 
@@ -179,7 +179,8 @@ PlanProperties {
 ```text
 SQL / DataFrame
   → syntax normalization
-  → name, type, and Catalog revision resolution
+  → name, type, and Catalog definition resolution
+  → Query Manifest construction
   → VqlLogicalPlan
   → boundedness, event-time, and replayability analysis
   → inference extraction and common-expression elimination
@@ -192,18 +193,18 @@ SQL / DataFrame
 
 Planning reads only the Catalog and lightweight metadata. Object listing, model download, video probing, and network connection wait until execution so `EXPLAIN` and completion cannot trigger expensive I/O.
 
-### 4.3 Definition Snapshots
+### 4.3 Query Manifests
 
-Catalog objects have a stable ID, immutable revisions, and a mutable head:
+Planning reads the Catalog in one transaction and emits an immutable Query Manifest. The Manifest, rather than mutable session registration or a public revision object, is the execution source of truth:
 
-- `CREATE` writes the first revision. `ALTER` and `CREATE OR REPLACE` append a revision and advance the head for queries planned afterward.
-- `USING MODEL` binds a stable `model_id`. In one Catalog read transaction, the planner resolves the Function revision and the Model head visible at that point.
-- The plan records Table, Function, Model, and Sink revision IDs plus bound parameters and a model semantic fingerprint. The fingerprint includes at least the artifact hash or immutable endpoint revision/config hash, processor ID and version, precision, backend kind and version, and output schema.
-- A bounded query holds its snapshot through execution. A continuous query holds it for its entire lifetime.
-- `ALTER FUNCTION ... SET MODEL` creates a Function revision bound to another `model_id`; it also affects only future plans.
-- Prepared statements and running queries are never replanned automatically. Prepare again, or cancel and restart a continuous query, to observe a new revision.
-- `DROP` moves the name head to a tombstone. A query lease or unexpired locator lease prevents physical collection of the revision, but revoked authorization takes effect immediately.
-- `EXPLAIN`, `SHOW QUERIES`, and error logs display the revisions actually used.
+- It records fully resolved Table, Stream, Model, user-defined Function, and Sink specifications plus the internal Catalog generation used to construct them.
+- Each typed inference entry records the built-in operation, constant semantic arguments, domain input expressions, and a resolved Model snapshot. The Model snapshot includes type, source identity and bundle digest, Runtime kind and protocol, processor kinds and resolved options, canonical schemas, determinism, and batching ownership.
+- Each user-defined Function entry records its DataFusion signature, normalized language/body, volatility, and implementation digest.
+- A bounded query holds one Manifest through execution. A continuous query holds it for its entire lifetime. Replacing a Catalog definition affects only plans created afterward.
+- Prepared statements and running queries are never replanned automatically. Prepare again, or cancel and restart a continuous query, to observe a replacement.
+- Internal generation or revision numbers support transactions, snapshot reads, leases, and garbage collection, but there is no public Model-revision or Function-revision lifecycle.
+- `DROP` prevents new planning. A Manifest or unexpired locator lease may delay physical collection, but revoked authorization takes effect immediately.
+- `EXPLAIN`, `SHOW QUERIES`, and error logs expose the resolved identities and semantic fingerprints actually used, not mutable Catalog heads.
 
 ### 4.4 Allowlist for Unbounded Plans
 
@@ -425,12 +426,12 @@ Batch video normally fuses read, decode, and preprocessing inside `InferenceExec
 
 ### 7.1 Parser Boundary
 
-VQL reuses the sqlparser-rs tokenizer and standard SQL AST, with a dedicated parser for extensions:
+VQL reuses the sqlparser-rs tokenizer and DataFusion SQL AST, with a dedicated parser only for VisionQL extensions:
 
 1. Split a complete script while respecting strings, comments, and quoted identifiers.
-2. Send `CREATE STREAM/MODEL/FUNCTION/SINK`, `ALTER`, and `SHOW` to the VQL DDL parser.
-3. Send SELECT, INSERT, and standard DDL to the standard SQL parser.
-4. Normalize constructs such as `.center` and `TUMBLE` at the AST or logical-plan layer.
+2. Send `CREATE STREAM/MODEL/SINK` and VisionQL operational statements to the VQL DDL parser.
+3. Send SELECT, INSERT, standard DDL, and `CREATE FUNCTION` through the DataFusion-supported grammar. A VisionQL `FunctionFactory` validates and persists supported Function definitions.
+4. Normalize constructs such as `.center`, `TUMBLE`, and typed inference markers at the AST or logical-plan layer.
 5. Pass normalized relational expressions to the DataFusion planner interface.
 
 Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs golden tests. Unquoted identifiers fold to lowercase, double-quoted identifiers preserve case, and string literals use single quotes.
@@ -439,10 +440,9 @@ Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs 
 |---|---|
 | `CREATE TABLE ... USING IMAGES/VIDEOS` | Create an external image or video table (Section 8.2) |
 | `CREATE STREAM ... FROM 'rtsp://...'` | Create one RTSP stream (Section 8.3) |
-| `CREATE MODEL ... [FUNCTION f]` | Create a Model and optionally derive one Function in the same transaction |
-| `ALTER MODEL ...` | Append a Model revision and advance the stable `model_id` head without changing planned queries |
-| `CREATE FUNCTION ...` | Create a Model-backed function, Python function, or SQL macro |
-| `ALTER FUNCTION ... SET MODEL` | Append a Function revision without changing running queries |
+| `CREATE MODEL ... TYPE ... FROM ... WITH (...)` | Create one typed inference capability |
+| `CREATE FUNCTION ... RETURN <expression>` | Create a DataFusion-backed SQL expression function |
+| `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` | Create a batched Python function; executable only from a Python host |
 | `CREATE SINK ...` | Create a Console or Kafka Sink |
 
 `DROP`, `SHOW`, `DESCRIBE`, and `SHOW CREATE` use the same VQL DDL path. `SHOW CREATE` must be sanitized and parseable. Statements outside Section 1.2 fail without registering placeholders.
@@ -466,70 +466,94 @@ SQLite is the default Catalog, at exactly `$VQL_HOME/catalog/vql.db`.
 
 | Object | Stored definition |
 |---|---|
-| Table | Provider, location, options, Arrow schema, revision, credential reference |
-| Stream | Connector, sanitized endpoint, fps, event-time policy, watermark, revision |
-| Model | Type, immutable source revision, content hash, processor, precision, backend, output schema, declarative constraints |
-| Function | Signature, implementation kind, stable `model_id` or code entry, bound parameters, determinism |
+| Table | Provider, location, options, Arrow schema, internal generation, credential reference |
+| Stream | Connector, sanitized endpoint, fps, event-time policy, watermark, internal generation |
+| Model | Type and structural parameters; source identity and bundle digest; normalized Runtime, PreProcessor, and PostProcessor specifications; canonical schemas; determinism |
+| Function | DataFusion signature, normalized SQL expression or Python entry point, volatility, implementation digest |
 | Sink | Connector, format, options, credential reference |
 
 Catalog constraints:
 
-- Every DDL statement commits in one SQLite transaction. `CREATE MODEL ... FUNCTION f` creates both objects atomically.
-- Internal foreign keys use stable IDs and revision IDs, never mutable names.
-- A Function references a stable `model_id`; a plan references immutable revisions. One field never mixes head and pinned-revision semantics.
+- Every DDL statement commits in one SQLite transaction. Model and Function definitions are independent Catalog objects.
+- Internal foreign keys and generations support snapshot reads and leases but are never exposed as a public revision API.
+- A typed inference call is query syntax, not a Function object. Its constant Model name is resolved while constructing the Query Manifest.
 - Table, Stream, and View share the relation namespace. Model, Function, and Sink each have their own namespace. Section 7.1 defines unquoted-name identity.
 - Schemas use Arrow IPC. The Catalog stores its format version and migration history.
 - Passwords, tokens, S3 secrets, and signed URLs are never stored; only secret references are allowed.
-- `DROP` creates a tombstone and prevents new planning. A revision lease delays physical collection until the query ends but never prolongs permission; a newly attempted media read fails after revocation.
+- `DROP` prevents new planning. An internal generation lease delays physical collection until the query ends but never prolongs permission; a newly attempted media read fails after revocation.
 
-### 7.3 MODEL and FUNCTION
+### 7.3 Typed Model Contract
 
-MODEL describes a resource implementation. FUNCTION defines the query interface. A Function revision stores a stable `model_id`; planning pins the visible Model head and merged parameters.
+A MODEL is one typed inference capability backed by an artifact bundle or endpoint. `TYPE` is the sole authority for its built-in SQL function, domain input, semantic arguments, and canonical Arrow result. There is no generic CV or LLM type.
 
-| Model `TYPE` | Standard signature |
-|---|---|
-| `OBJECT_DETECTION` | `(IMAGE) -> ARRAY<STRUCT<label, confidence, box>>` |
+| Model `TYPE` | Built-in function | Domain input | Canonical result | Availability |
+|---|---|---|---|---|
+| `OBJECT_DETECTION` | `DETECT_OBJECTS` | `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
+| `IMAGE_CLASSIFICATION` | `CLASSIFY_IMAGE` | `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Roadmap-gated |
+| `IMAGE_EMBEDDING(n)` | `EMBED_IMAGE` | `IMAGE` | `VECTOR(n)` | v0.4 |
+| `TEXT_EMBEDDING(n)` | `EMBED_TEXT` | `STRING` | `VECTOR(n)` | v0.4 |
+| `TEXT_GENERATION` | `GENERATE_TEXT` | `STRING` | `STRING` | Roadmap-gated |
 
-Parameter resolution follows one rule:
+One source bundle may be registered under multiple compatible capability types. For example, CLIP image and text embedding are two Models with different fixed interfaces; artifact-cache or Runtime-session reuse is an internal optimization.
 
-```text
-EffectiveParams
-  = ProcessorDefaults
-  + ModelDefaultParams
-  + FunctionOverrides
+Required inference arguments are positional: the Model name comes first, followed by the Model type's domain inputs. Optional semantic arguments use DataFusion's `=>` named-argument notation and must follow every positional argument:
+
+```sql
+SELECT DETECT_OBJECTS(
+  'yolo',
+  image,
+  classes => ['person'],
+  min_confidence => 0.5
+)
+FROM photos;
 ```
 
-Later layers override earlier ones. The Catalog stores Model defaults and Function overrides, not a third public merged definition. Planning resolves one Model revision, merges and validates once, and writes immutable `EffectiveParams` into the internal snapshot.
+Planning enforces these rules:
 
-| Parameter layer | Examples | Ownership |
+- The first positional argument is a non-NULL Model-name string literal resolved in the current Catalog transaction. It is copied into the Query Manifest and never enters an Arrow batch or Runtime request. Prepared parameters, expressions, column references, and per-row Model selection are rejected in v0.1.
+- Remaining required positional arguments are type-owned domain inputs such as `image` or `prompt` and may be arbitrary row expressions.
+- Optional type-owned semantic arguments such as `classes`, thresholds, and generation controls use `name => constant` notation after all positional arguments. The VQL normalizer binds them against the type-owned schema, fills omitted defaults, and emits a fully ordered marker before DataFusion type planning.
+- The built-in function, Model type, domain argument types, and canonical output must match exactly. Unknown or duplicate arguments fail planning.
+- Built-in inference functions are typed planner markers. Planning must extract them into `Inference`; their scalar execution method fails defensively if an unextracted call reaches execution.
+
+Model options use dotted framework namespaces and structured processor options:
+
+```text
+model_option_key := identifier ('.' identifier)*
+processor_options := '{' [option_entry (',' option_entry)* [',']] '}'
+option_entry := identifier '=' constant_value
+```
+
+| Namespace | Owner | Representative fields |
 |---|---|---|
-| Artifact identity | Source, content hash, Model `TYPE`, backend, precision | Model only; a Function cannot override it |
-| Processor adaptation | Processor, input/output names, dimensions, output format, labels | Model defaults; Function overrides only fields permitted by the processor schema |
-| Result semantics | Classes, minimum confidence, NMS IoU threshold | Model defaults with allowlisted Function overrides |
-| Runtime placement | Device, replicas, dynamic batch, queue weight | Internal RuntimeConfig only; never appears in either DDL |
+| `runtime.*` | Runtime implementation and binding | `kind`, `protocol`, served model/version, artifact subtype |
+| `pre_processor.*` | PreProcessor implementation | `kind`, `options` |
+| `post_processor.*` | PostProcessor implementation | `kind`, `options` |
 
-Specific v0.1 contracts:
+The parser normalizes dotted keys and object literals into one nested Catalog structure. `pre_processor.kind` and `post_processor.kind` are versioned registry identifiers; every implementation-specific field lives inside its complete `options` object. Flat spellings such as `pre_processor.width`, unknown fields, missing required fields, duplicate keys, and scalar/namespace prefix conflicts fail registration. A processor kind may be omitted only when `TYPE + runtime.kind` selects exactly one compatible default; the resolved kind and version are always written to the Query Manifest.
 
-- `yolo26-detect-v1` uses input `images`, output `output0`, dimensions `640x640`, output format `ultralytics_end_to_end`, and COCO's 80 labels. The end-to-end output is `(N, 300, 6)` with `[x1, y1, x2, y2, confidence, class_id]` and does not receive another NMS pass.
-- The ONNX resolver resolves artifacts only. It never infers processor, layout, or label semantics from a filename or tensor shape. A different interface must be declared in `CREATE MODEL`.
-- Model revisions store artifact revision/hash, defaults, and Model-only fields. Function revisions store signature, stable `model_id`, and overrides.
-- A Function override cannot change Model `TYPE` or its standard result schema. The processor schema declares type, default, required status, and overridability for each field; unknown fields fail.
-- Artifact hash, processor ID/version, and merged `EffectiveParams` enter the semantic fingerprint, inference-deduplication key, and audit snapshot. RuntimeConfig does not.
-- `CREATE MODEL ... FUNCTION f` is exactly an atomic Model creation plus a Function with no overrides.
+`runtime.kind` selects an implementation such as `onnxruntime`, `triton`, `transformers`, `vllm`, `sglang`, or `llama_cpp`. `runtime.protocol` selects a protocol supported by that implementation, such as `kserve_v2_http`, `kserve_v2_grpc`, or `openai`; `openai` is not a Runtime kind. Unsupported kind/protocol pairs fail before Catalog commit.
 
-`ALTER MODEL` advances its head only if the new revision is compatible with the task type, input modality, output schema, and parameter schemas of all referenced Function heads. Check and update occur in one transaction. An incompatible upgrade requires a new Model ID and explicit migration through `ALTER FUNCTION ... SET MODEL` or a new Function revision.
+Device selection, replicas, queue capacity, batch size, maximum wait, request concurrency, timeouts, and credentials are not Model options. They belong to internal RuntimeConfig or secret-provider state because they are placement and scheduling concerns. Public Profiles, Adapters, Model revisions, and Deployment objects are deliberately absent.
 
-A pinned local or ONNX artifact may be `deterministic`. An endpoint without an immutable revision is `volatile` and cannot be deduplicated, constant-folded, or cached. A pinned endpoint that passes capability and regression checks may be `stable_within_query`, which permits query-local deduplication only.
+The semantic fingerprint includes the Model type and structural parameters, source bundle digest or immutable endpoint revision, result-affecting Runtime binding, resolved processor kinds/versions/options, built-in operation and semantic arguments, canonical schemas, and determinism. RuntimeConfig does not enter semantic identity. An unpinned endpoint is `volatile`; it cannot be constant-lifted, deduplicated, or cached as if immutable.
 
-### 7.4 Function Implementations
+### 7.4 User-defined Functions and DataFusion Reuse
+
+`CREATE FUNCTION` supports only genuine user-defined computation:
 
 | Syntax | Planning and execution |
 |---|---|
-| `USING MODEL` | Register a signature and model binding; extract calls into `Inference` during planning |
-| `LANGUAGE PYTHON AS 'module:function'` | Register a batched Arrow ABI; executable only from a Python host |
-| `AS (<expression>)` | SQL macro expanded hygienically before planning with a recursion-depth check; no runtime function object |
+| `CREATE FUNCTION ... RETURN <expression>` | Persist a normalized SQL expression function and expand it hygienically during planning with a recursion-depth check |
+| `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` | Persist a batched Arrow ABI; executable only from a Python host |
 
-A Python UDF receives one `pyarrow.Array` per argument and returns an equal-length, type-compatible `pyarrow.Array`. `IMAGE` crosses the language boundary in encoded form; the SDK supplies batch decode helpers. Row-at-a-time callbacks are not supported. Model inference uses `USING MODEL`.
+The statement router uses DataFusion's PostgreSQL-style function grammar, `CreateFunction` representation, named-argument support, and UDF registry. A VisionQL `FunctionFactory` validates the supported language or body, constructs the UDF, and persists the normalized definition. Query Manifest construction recreates the equivalent DataFusion UDF, so session-local registration is never durable state.
+
+Python functions require an explicit `RETURNS` type. SQL expression functions may omit it when DataFusion can derive the body type from positional parameter types and registered built-ins. This permits a compact inference preset such as `CREATE FUNCTION detect_people(IMAGE) RETURN DETECT_OBJECTS('yolo', $1, classes => ['person'])`; macro expansion still exposes the typed inference marker to the planner.
+
+A Python UDF receives one `pyarrow.Array` per argument and returns an equal-length, type-compatible `pyarrow.Array`. `IMAGE` crosses the language boundary in encoded form; the SDK supplies batch decode helpers. Row-at-a-time callbacks are not supported.
+
+Model inference does not use `FunctionFactory`, `ScalarUDF`, or `AsyncUDF`. A SQL expression function may wrap a typed inference call to provide a reusable name or constant-argument preset; after expansion, the call still becomes an explicit `Inference` node.
 
 ### 7.5 Syntax Normalization
 
@@ -540,12 +564,16 @@ A Python UDF receives one `pyarrow.Array` per argument and returns an equal-leng
 | `FROM t, UNNEST(expr)` | Native DataFusion unnest node; the only row-expansion mechanism |
 | `CREATE ...` | Catalog or runtime operation, absent from the relational plan |
 
-Processor parameters such as `classes` and `min_confidence` filter elements within a detection array. They are not converted into a row-level Filter that could discard the frame.
+Inference-call parameters such as `classes` and `min_confidence` are owned by the Model type and filter elements within one detection result. They are not processor DDL options and are not converted into a row-level Filter that could discard the frame.
 
 ### 7.6 Built-in Functions
 
 | Function | Signature | Contract |
 |---|---|---|
+| `DETECT_OBJECTS` | `(model STRING, image IMAGE [, named options])` → canonical detection array | v0.1 typed planner marker; the first argument resolves to an `OBJECT_DETECTION` Model and the call must become `Inference` |
+| `CLASSIFY_IMAGE` | `(model STRING, image IMAGE [, named options])` → canonical classification array | Roadmap-gated typed planner marker |
+| `EMBED_IMAGE` / `EMBED_TEXT` | `(model STRING, IMAGE)` / `(model STRING, STRING)` → `VECTOR(n)` | v0.4 typed planner markers; dimension comes from Model `TYPE` |
+| `GENERATE_TEXT` | `(model STRING, prompt STRING [, named options])` → `STRING` | Roadmap-gated bounded final-text marker |
 | `COUNT_OBJECTS` | `(detections, label STRING, min_confidence FLOAT) -> BIGINT` | Count matching array elements without expansion or whole-frame removal |
 | `BOX_CENTER` | `(BOX2D) -> POINT2D` | Function form of `box.center` |
 | `POLYGON` / `ST_POLYGON` | `(STRING) -> POLYGON` | Parse constants during planning; require closure, finite values, and `[0,1]` coordinates |
@@ -636,8 +664,8 @@ Event time and reconnect behavior:
 
 | Order | Rule | Purpose |
 |---|---|---|
-| R1 | SQL macro expansion and type checking | Establish valid semantics |
-| R2 | Extract model calls; deduplicate and constant-lift only deterministic or stable-within-query calls | Make inference schedulable without changing volatile call count or order |
+| R1 | SQL expression-function expansion and type checking | Establish valid semantics before inference extraction |
+| R2 | Resolve and extract typed inference calls; deduplicate and constant-lift only deterministic or stable-within-query calls | Make inference schedulable without changing volatile call count or order |
 | R3 | Column pruning and `image_access` analysis | Avoid media reads and decode when pixels are unused |
 | R4 | Time-predicate pushdown | Read only requested video intervals |
 | R5 | Explicit sampling pushdown | Move Table and Stream `fps` into the media layer |
@@ -647,22 +675,22 @@ Window size never implies a sample rate. User-declared fps is part of result sem
 
 ### 9.2 Extracting Inference
 
-The planner scans Projection, Filter, and aggregate inputs for model-function calls:
+After expanding SQL expression functions, the planner scans Projection, Filter, and aggregate inputs for type-owned inference markers:
 
-1. Replace each call with an internal column reference.
-2. Insert `Inference` at the earliest point where all inputs exist and semantics remain unchanged.
-3. Deduplicate only when Function revision, Model semantic fingerprint, input expression, and parameters match exactly and determinism is `deterministic` or `stable_within_query`. Preserve every `volatile` call and its order.
-4. Evaluate a constant-argument model call once as a query-init expression only under the same determinism rule.
-5. Never share raw model output across different Function revisions; their post-processing contracts may differ.
+1. Require constant Model and semantic arguments, resolve the Model, validate the complete type/processor/Runtime contracts, and copy the resolved specification into the Query Manifest.
+2. Replace each marker with an internal column reference and insert `Inference` at the earliest point where every domain input exists and semantics remain unchanged.
+3. Deduplicate only when the built-in operation, Model semantic fingerprint, all domain input expressions, and semantic arguments match exactly and determinism is `deterministic` or `stable_within_query`. Preserve every `volatile` call and its order.
+4. Evaluate a constant-domain-input inference call, such as a text query embedding, once as a query-init expression only under the same determinism rule.
+5. Never share raw Runtime output across different resolved processor contracts; only canonical, semantically identical inference results are shareable.
 
 ### 9.3 `EXPLAIN`
 
 `EXPLAIN` shows at least:
 
-- definition snapshot and query mode;
+- Query Manifest identity and query mode;
 - logical plan plus batch plan or streaming job graph;
 - video time range, source fps, and expected sampled fps;
-- Model revision, input volume, and deduplication at each inference node;
+- Model type and resolved source identity, Runtime kind/protocol, processor kinds, batching owner, input volume, volatility, and deduplication at each inference node;
 - whether decode is required and which `IMAGE` form is used;
 - stateful operators, watermark delay, delivery semantics, and unsupported items for streaming.
 
@@ -672,67 +700,130 @@ It describes work; it does not invent uncalibrated GPU-time or cost estimates.
 
 ## 10. Model Runtime and Inference
 
-### 10.1 Runtime Interfaces
+### 10.1 Compiled Pipeline and Interfaces
 
-```rust
-trait ModelBackend {
-    fn load(&self, spec: &ResolvedModel) -> Result<ModelSession>;
-}
-
-trait ModelSession {
-    async fn infer(&self, batch: TensorBatch, cancel: CancellationToken)
-        -> Result<RawModelOutput>;
-}
-
-trait Processor {
-    fn preprocess(&self, images: &DecodedBatch, buffers: &mut TensorBuffers)
-        -> Result<TensorBatch>;
-    fn postprocess(&self, raw: RawModelOutput, params: &BoundParams)
-        -> Result<ArrayRef>;
-}
-```
-
-VisionQL provides ONNX Runtime and HTTP endpoint backends. A processor owns resize, normalization, coordinate restoration, and bound parameters. It applies NMS only to traditional raw output; YOLO26 end-to-end output is not passed through NMS again. A backend owns only the model session and tensor I/O.
-
-### 10.2 Artifact Resolution and Integrity
-
-- Independent resolvers handle `file://`, `hf://`, and `endpoint://`.
-- `$VQL_HOME/cache` is the cache namespace. v0.1 defines only `models/`; it does not cache datasets, query output, or decoded frames.
-- Only downloaded artifacts enter `$VQL_HOME/cache/models/<content-hash>/`. A local `file://` artifact is read in place, while `endpoint://` creates no cache entry.
-- Content hashes cover downloaded ONNX artifacts only. Declarative Model parameters stay in the Catalog and are not copied into an artifact directory.
-- Download to a temporary file in the destination directory and atomically rename it. Existing content by hash is reusable. The Catalog stores original source, resolved path, and content hash—not model bytes.
-- Offline use can rely on local paths or a prewarmed cache.
-- Endpoint authentication is injected by secret reference and never appears in visible DDL.
-
-Processor schema plus `EffectiveParams` determines whether a model can run; `TYPE OBJECT_DETECTION` alone never implies a tensor layout. The public configuration surface is limited to Model defaults and Function overrides. `visionql-manifest.json` is not a product contract. A known resolver may provide defaults; an arbitrary ONNX model declares any different tensor names, static shapes, and output format explicitly. Future graph introspection may verify metadata but must not guess processors or label semantics.
-
-VisionQL does not embed PyTorch or execute arbitrary repository code. Development tooling exports the official `Ultralytics/YOLO26` `.pt` checkpoint to ONNX before registration. `hf://` applies only to repositories that already contain an ONNX artifact. Missing artifacts or invalid merged parameters produce a specific error. Remote models should declare a revision; otherwise they are `mutable_endpoint`, receive an `EXPLAIN` warning, and cannot be cached across queries.
-
-### 10.3 `InferenceExec` Batch Path
+Every typed call compiles to one validated pipeline:
 
 ```text
-reference/encoded IMAGE
-  → asynchronous read
-  → decode
-  → batched preprocessing
-  → model scheduler queue
-  → asynchronous inference
-  → post-processing
-  → nullable Arrow result column
+TYPE canonical input RecordBatch
+  → PreProcessor
+  → RuntimeRequestBatch
+  → RuntimeSession
+  → RuntimeResponseBatch
+  → PostProcessor
+  → TYPE canonical Arrow result
 ```
 
-Output order matches input order. Cancelling the stream removes requests that have not been submitted, discards results from submitted requests, and releases all resources.
+The internal interfaces separate domain semantics from execution protocols:
 
-Batch video usually needs no frame arena because `InferenceExec` can fuse read, decode, and preprocessing.
+```rust
+trait PreProcessor {
+    fn domain_input(&self) -> &ArrowSignature;
+    fn runtime_output(&self) -> &RuntimeContract;
+    fn process(
+        &self,
+        input: &RecordBatch,
+        context: &InvokeContext,
+    ) -> Result<PreprocessedBatch>;
+}
 
-### 10.4 Scheduling and Batching
+trait ModelRuntime {
+    async fn open(&self, spec: &ResolvedRuntimeSpec)
+        -> Result<Arc<dyn RuntimeSession>>;
+}
 
-- Each `ModelInstanceKey`—Model semantic fingerprint, EffectiveParams fingerprint, device, and runtime-config generation—owns one queue.
-- Requests enter weighted-fair `interactive`, `stream`, and `batch` classes. A stream request may carry a deadline; batch work cannot starve the stream SLO indefinitely.
-- Dispatch when `max_batch`, the earliest deadline, or `max_wait` is reached. Batch size, wait time, and GPU choice are runtime settings.
-- Preallocate and reuse tensor buffers for the maximum in-flight batch count. A full queue makes the submitter await and propagates backpressure.
-- The default is one device. If memory is insufficient, fail at load time with the Model, estimated need, and optional endpoint alternative. Do not implement an unvalidated runtime LRU eviction policy.
-- Record actual batch distribution, queue time, inference time, and device utilization for cost observability.
+trait RuntimeSession {
+    fn input_contract(&self) -> &RuntimeContract;
+    fn output_contract(&self) -> &RuntimeContract;
+    fn batching_owner(&self) -> BatchingOwner;
+    async fn infer(
+        &self,
+        batch: RuntimeRequestBatch,
+        cancel: CancellationToken,
+    ) -> Result<RuntimeResponseBatch>;
+}
+
+trait PostProcessor {
+    fn runtime_input(&self) -> &RuntimeContract;
+    fn domain_output(&self) -> &DataType;
+    fn process(
+        &self,
+        output: RuntimeResponseBatch,
+        pre_context: &PreProcessContext,
+        params: &BoundInferenceParams,
+    ) -> Result<ArrayRef>;
+}
+```
+
+Registration and planning validate every adjacent contract: Model-type input against PreProcessor input, PreProcessor output against Runtime input, Runtime output against PostProcessor input, and PostProcessor output against the canonical Model-type result. No component may rely on an unchecked tensor name, dtype, shape, or response field.
+
+A CV PreProcessor resolves and decodes `IMAGE`, converts color and dtype, resizes/crops/pads, normalizes, changes layout, and constructs named tensor batches. It returns row-aligned context such as original dimensions and letterbox transforms. Text PreProcessors construct a protocol request or invoke a tokenizer in an isolated worker while enforcing prompt and payload limits.
+
+A PostProcessor converts Runtime output to the canonical Arrow result. Detection implementations decode tensors, apply activation or NMS only when required, resolve labels, and restore coordinates. Embedding implementations validate dimension `n` and declared pooling/normalization. Generation implementations validate the protocol response and return bounded final text. Inference-call parameters are defined by Model `TYPE`; processors may consume only that allowlist.
+
+### 10.2 Runtime Registry and Batching Ownership
+
+A Runtime loads an artifact bundle or binds a service endpoint. It deals only in declared Runtime contracts and does not infer whether bytes represent detections, vectors, or generated text.
+
+| `runtime.kind` | Source | Allowed `runtime.protocol` | Batching owner | Delivery |
+|---|---|---|---|---|
+| `onnxruntime` | Local or cached ONNX graph | omitted | VisionQL queues requests; ONNX Runtime executes tensor batches | v0.1 |
+| `triton` | Triton endpoint and model version | `kserve_v2_http`; `kserve_v2_grpc` is roadmap-gated | Triton owns model instances and dynamic batching; VisionQL owns bounded concurrency and backpressure | v0.1 HTTP |
+| `transformers` | Pinned Hugging Face or local bundle | omitted; internal worker protocol | Isolated worker owns PyTorch/Transformers and model-native processing | v0.4 embedding |
+| `vllm` | vLLM endpoint and served model | `openai` | vLLM owns continuous batching; VisionQL owns bounded concurrency and backpressure | Roadmap-gated |
+| `sglang` | SGLang endpoint and served model | `openai` | SGLang owns continuous batching; VisionQL owns bounded concurrency and backpressure | Roadmap-gated |
+| `llama_cpp` | Local GGUF bundle or llama-server endpoint | omitted for embedded execution; `openai` for llama-server | llama.cpp owns tokenization and generation | Roadmap-gated |
+
+Triton uses the selected KServe V2 protocol and validates server model metadata against the compiled processor contracts before inference. v0.1 implements the HTTP/JSON tensor contract; gRPC uses the same Runtime boundary when scheduled. VisionQL does not manage Triton repositories or deployments. The vLLM and SGLang integrations are separate Runtime implementations even when both use the OpenAI-compatible protocol: discovery, capabilities, errors, cancellation, and response validation remain implementation-specific.
+
+Each Runtime reports whether batching is VisionQL-owned or service-owned. VisionQL never places a second dynamic-batching queue in front of Triton, vLLM, SGLang, or llama-server. It still applies bounded concurrency, deadlines, cancellation, memory reservation, and backpressure.
+
+### 10.3 Artifact Bundles and Open-source Models
+
+`FROM` identifies a complete artifact bundle or an endpoint, not necessarily one file. Independent resolvers handle `file://`, `hf://`, and `endpoint://`. A resolver selects required files, pins an immutable source revision when possible, computes a digest for the complete bundle, and never guesses task or tensor semantics.
+
+| Artifact form | Required interpretation | Compatible execution paths |
+|---|---|---|
+| ONNX | Portable graph plus declared labels, tokenizer, or processor assets | `onnxruntime`; Triton ONNX backend |
+| `.pt` / `.pth` | Explicit TorchScript, exported-program, or weights-bundle subtype; the suffix alone is insufficient | `transformers`; compatible Triton backend |
+| Safetensors | Weights bundled with architecture, configuration, tokenizer, and processor assets | `transformers`, `vllm`, `sglang` |
+| GGUF | llama.cpp-compatible weights and metadata | `llama_cpp` embedded execution or llama-server |
+
+Unsafe pickle loading and repository `trust_remote_code` are disabled by default. Third-party model code requires a pinned source and an explicitly trusted isolated worker environment; `vql-kernel` never imports it.
+
+Remote bundles are downloaded to a temporary path and atomically installed under `$VQL_HOME/cache/models/<bundle-digest>/`. Local files remain in place and endpoints create no cache entry. The Catalog stores source identity, selected files, immutable revision, and bundle digest rather than model bytes. Offline execution uses local files or a prewarmed cache. Credentials are resolved through the secret provider and never appear in `SHOW CREATE`.
+
+Integrating an open-source model follows five steps:
+
+1. Pin its source revision or bundle digest.
+2. Select a Runtime that supports the artifact or endpoint protocol.
+3. Select PreProcessor and PostProcessor implementations compatible with the Model type and Runtime contracts.
+4. Declare their typed options in the Model definition.
+5. Pass processor contract tests and one real-model conformance fixture.
+
+A familiar model family should need only Model DDL. A new reusable tensor layout adds one narrow processor implementation and focused fixtures. Model-specific arbitrary code remains in an isolated worker or a supported external inference service.
+
+### 10.4 `InferenceExec`, Scheduling, and Failure
+
+The physical operator evaluates only domain arguments into a temporary Arrow `RecordBatch`; the resolved Model and constant semantic arguments remain in its immutable spec:
+
+```text
+domain Arrow values
+  → materialize/decode as required
+  → PreProcessor
+  → local scheduler or bounded remote submission
+  → RuntimeSession
+  → PostProcessor
+  → nullable canonical Arrow result column
+```
+
+The compiled pipeline carries a stable row identifier. It must produce exactly one value, NULL, or row error for every input row and restore input order even when a remote service completes requests out of order. Batch video usually needs no frame arena because read, decode, and preprocessing can be fused inside `InferenceExec`.
+
+For VisionQL-owned batching, each pipeline/session key—Model semantic fingerprint, device, and RuntimeConfig generation—owns one bounded queue. Requests enter weighted-fair `interactive`, `stream`, and `batch` classes and dispatch on `max_batch`, earliest deadline, or `max_wait`. Tensor buffers are preallocated and reused; a full queue awaits capacity and propagates backpressure. Service-owned batching bypasses this queue and uses bounded request concurrency instead.
+
+NULL domain inputs produce NULL results. A row-level preprocessing or post-processing error follows `vql.on_error`: NULL by default or query failure in strict mode. A Runtime failure affecting a whole batch is attributed to every affected row before the same policy is applied. Cancellation removes queued work, sends protocol cancellation when supported, discards late responses, and releases decoded images, tensors, request payloads, and output buffers.
+
+All preprocessing tensors, encoded request payloads, Runtime queues, and post-processing buffers reserve memory through the engine pool. Prompt and payload size limits are checked before allocation. Metrics record batching owner, actual batch distribution, queue or service wait, preprocessing, inference, post-processing, cancellation, failures, and device utilization where available.
 
 ---
 
@@ -801,10 +892,10 @@ At minimum, expose:
 
 - query: input/output rows, epoch latency, end-to-end latency, error rows, late rows, state memory, and Sink retries;
 - media: input bitrate, decode fps, sampled fps, dropped frames by reason, disconnect count, and gap duration;
-- model: queue depth, wait time, batch distribution, inference count, P50/P95, and device memory;
+- model: Runtime kind/protocol, batching owner, queue depth or remote concurrency, wait time, batch distribution, inference count, stage P50/P95, and device memory where available;
 - resources: current and peak value for every reservation.
 
-Embedded mode exposes metrics through results, foreground output, and tracing logs. Logs include `query_id`, `epoch_id`, object revisions, and stable error codes.
+Embedded mode exposes metrics through results, foreground output, and tracing logs. Logs include `query_id`, `epoch_id`, Query Manifest identity, resolved Model fingerprint, and stable error codes.
 
 ### 12.4 Error Classes
 
@@ -824,10 +915,10 @@ Stable codes are separate from prose messages. Clients react to codes, never err
 
 - `vql-kernel` listens on no network port by default.
 - Outbound connections occur only for user-declared endpoint Models, object storage, Kafka, RTSP, and model download.
-- Model weights are pinned by revision and hash and verified at load time.
+- Model bundles are pinned by immutable revision and complete digest where the source permits it and are verified at load time.
 - Catalog output, logs, and `SHOW CREATE` sanitize URIs and secret references.
 - Network reads pass through URL-scheme and destination policy; an ordinary query cannot inject an arbitrary URL.
-- Execution context retains query ID and object revisions.
+- Execution context retains the query ID and immutable Query Manifest identity.
 
 ---
 
@@ -839,14 +930,14 @@ visionql/
 ├── vql-kernel/
 │   └── src/
 │       ├── types/                # Arrow types, error codes, shared configuration
-│       ├── catalog/              # object revisions, SQLite, dependencies
+│       ├── catalog/              # definitions, internal generations, SQLite, dependencies
 │       ├── sql/                  # VQL parser and normalization
 │       ├── planner/              # logical plan, analysis, optimization, mode selection
 │       ├── execution/
 │       │   ├── batch/            # DataFusion physical plans and extension operators
 │       │   └── stream/           # epochs, coordinator, TUMBLE, checkpoint interfaces
 │       ├── media/                # FFmpeg, image codecs, FrameArena
-│       ├── models/               # backends, processors, scheduler
+│       ├── models/               # type registry, processors, runtimes, scheduler
 │       └── connectors/           # Tables, Streams, and Sinks
 ├── vql-cli/                      # shell / run
 ├── vql-python/                   # PyO3 and Python UDF host
@@ -889,13 +980,13 @@ Boundary rules:
 | ADR-003 | Epoch streaming with bounded DataFusion fragments | Filter cannot swallow watermark or source progress; asynchronous inference and release have a clear barrier |
 | ADR-004 | Standard Arrow storage for `IMAGE`, with reference, arena, and encoded forms | Avoids pixel copies while preserving IPC and fallback readability |
 | ADR-005 | Release FrameArena as one epoch lease | Lifetime does not depend on surviving rows, so Filter cannot leak references |
-| ADR-006 | Extract model functions into explicit `Inference` nodes | Enables asynchronous batching, deduplication, later cascades/caches, and cost measurement |
-| ADR-007 | Pin Catalog revisions per query | Prevents DDL from silently changing a running result and supports audit and recovery |
+| ADR-006 | Extract type-owned inference calls into explicit `Inference` nodes | Enables asynchronous batching, deduplication, later cascades/caches, and cost measurement |
+| ADR-007 | Build one immutable Query Manifest per planned query | Prevents DDL from silently changing a running result without exposing a public revision lifecycle |
 | ADR-008 | Delivery follows source replayability; RTSP is best-effort | Makes no guarantee that the physical source cannot satisfy |
 | ADR-009 | SQLite Catalog; runtime bytes stay outside it | Preserves zero-dependency startup with transactions and migration support |
 | ADR-011 | Reuse epoch plan templates but instantiate a fresh physical tree | A fresh TaskContext cannot reset every operator; new trees prevent channel, state, and cancellation leakage |
 | ADR-012 | Allowlisted `WindowStateCodec` with normalized Arrow state | DataFusion accumulator snapshots may consume internal state; VisionQL needs a versioned recovery ABI |
-| ADR-013 | Function binds stable Model ID; plan pins Model revision; media locator pins source revision | New queries can follow upgrades while running queries and media access remain reproducible |
+| ADR-013 | Model `TYPE` owns the inference interface; user Functions reuse DataFusion's SQL/Python extension path | Keeps inference optimizer-visible and avoids duplicate ownership of model signatures and parameters |
 
 ADR-010 and ADR-014 are reserved for public-protocol decisions in [proposals/](./proposals/README.md) and are not reused.
 
@@ -914,6 +1005,7 @@ ADR-010 and ADR-014 are reserved for public-protocol decisions in [proposals/](.
 - [Apache DataFusion: Custom Table Providers](https://datafusion.apache.org/library-user-guide/custom-table-providers.html)
 - [Apache DataFusion: ExecutionPlan API](https://docs.rs/datafusion/latest/datafusion/physical_plan/trait.ExecutionPlan.html)
 - [Apache DataFusion: Unbounded Data Sources](https://datafusion.apache.org/user-guide/sql/ddl.html#example-unbounded-data-sources)
+- [Apache DataFusion: Adding User-defined Functions](https://datafusion.apache.org/library-user-guide/functions/adding-udfs.html)
 - [Apache Arrow: Extension Types and Columnar Format](https://arrow.apache.org/docs/format/Columnar.html#extension-types)
 
 ---
@@ -922,6 +1014,6 @@ ADR-010 and ADR-014 are reserved for public-protocol decisions in [proposals/](.
 
 | Date | Change |
 |---|---|
-| 2026-08-08 | Consolidated model adaptation in Model defaults and Function overrides instead of `visionql-manifest.json` |
+| 2026-08-10 | Defined type-owned inference calls, immutable Query Manifests, DataFusion-backed user Functions, and the PreProcessor/Runtime/PostProcessor pipeline |
 | 2026-08-08 | Defined `VQL_HOME`, downloaded-model caching, the separate dataset directory, and scenario-oriented examples; performance testing remains separate |
 | 2026-08-07 | Initial system design |

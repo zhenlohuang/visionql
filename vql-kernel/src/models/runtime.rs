@@ -15,13 +15,17 @@ use datafusion::logical_expr::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::backend::{EndpointBackend, MockBackend, ModelBackend};
-use super::ort_backend::OrtBackend;
+use super::backend::{MockBackend, ModelBackend};
+use super::ort_backend::OrtRuntime;
+use super::pipeline::{
+    BatchingOwner, CompiledPipeline, ImageTensorPreProcessor, RuntimeSession, YoloPostProcessor,
+};
 use super::scheduler::ModelScheduler;
-use super::{Detection, detections_type, effective_model_params, semantic_fingerprint};
-use crate::catalog::{CatalogStore, FunctionDef, ModelDef, ModelParams, TableProviderKind};
+use super::triton_backend::TritonRuntime;
+use super::{BoundInferenceParams, Detection, ModelParams, compile_model_params, detections_type};
+use crate::catalog::{CatalogStore, ModelDef, TableProviderKind};
 use crate::media::{DecodedFrame, MediaRuntime};
-use crate::types::{image_storage_fields, parse_locator};
+use crate::types::parse_locator;
 use crate::{ErrorCode, Result, VqlError};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -78,34 +82,60 @@ impl ModelRuntime {
         let mut schedulers = self.schedulers.lock().map_err(|_| {
             VqlError::new(ErrorCode::Internal, "model scheduler cache was poisoned")
         })?;
-        let key = format!(
-            "{}:{}",
-            model.semantic_fingerprint,
-            semantic_fingerprint(params)
-        );
+        let key = model.semantic_fingerprint.clone();
         if let Some(scheduler) = schedulers.get(&key) {
             return Ok(Arc::clone(scheduler));
         }
-        let backend: Arc<dyn ModelBackend> = if model.source.starts_with("mock://") {
-            Arc::new(MockBackend::new(
-                params
-                    .labels
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "object".to_owned()),
-            ))
-        } else if model.source.starts_with("endpoint://") {
-            Arc::new(EndpointBackend::new(&model.source)?)
-        } else {
-            Arc::new(OrtBackend::new(
-                Path::new(&model.resolved_source),
-                params.clone(),
-            )?)
-        };
+        let (backend, batching_owner): (Arc<dyn ModelBackend>, BatchingOwner) =
+            if model.source.starts_with("mock://") {
+                (
+                    Arc::new(MockBackend::new(
+                        params
+                            .labels
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "object".to_owned()),
+                    )),
+                    BatchingOwner::VisionQl,
+                )
+            } else {
+                let runtime: Arc<dyn RuntimeSession> = if model.runtime.kind == "triton" {
+                    let model_name = model.runtime.options["model_name"]
+                        .as_str()
+                        .expect("validated Triton model name");
+                    let model_version = model
+                        .runtime
+                        .options
+                        .get("model_version")
+                        .and_then(serde_json::Value::as_str);
+                    Arc::new(TritonRuntime::new(
+                        &model.source,
+                        model_name,
+                        model_version,
+                    )?)
+                } else if model.runtime.kind == "onnxruntime" {
+                    Arc::new(OrtRuntime::new(Path::new(&model.resolved_source))?)
+                } else {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        format!("unsupported Runtime '{}'", model.runtime.kind),
+                    ));
+                };
+                let batching_owner = runtime.batching_owner();
+                let pipeline = CompiledPipeline::new(
+                    Arc::new(ImageTensorPreProcessor::new(params.clone())),
+                    runtime,
+                    Arc::new(YoloPostProcessor::new(params.clone())),
+                );
+                (Arc::new(pipeline), batching_owner)
+            };
         let scheduler = Arc::new(ModelScheduler::new(
             backend,
             16,
-            Duration::from_millis(5),
+            match batching_owner {
+                BatchingOwner::VisionQl => Duration::from_millis(5),
+                BatchingOwner::Service => Duration::ZERO,
+            },
             64,
         ));
         schedulers.insert(key, Arc::clone(&scheduler));
@@ -152,13 +182,13 @@ impl ModelRuntime {
 
     pub(crate) fn infer(
         &self,
-        function: &FunctionDef,
         model: &ModelDef,
+        invocation: &BoundInferenceParams,
         images: &StructArray,
         fail_on_error: bool,
         cancel: CancellationToken,
     ) -> Result<Vec<Option<Vec<Detection>>>> {
-        let params = effective_model_params(&model.params, &function.bindings)?;
+        let params = compile_model_params(model)?;
         let mut decoded = Vec::new();
         let mut positions = Vec::new();
         let mut output = vec![None; images.len()];
@@ -199,8 +229,8 @@ impl ModelRuntime {
                         detections
                             .into_iter()
                             .filter(|detection| {
-                                detection.confidence >= params.min_confidence
-                                    && params
+                                detection.confidence >= invocation.min_confidence
+                                    && invocation
                                         .classes
                                         .as_ref()
                                         .is_none_or(|classes| classes.contains(&detection.label))
@@ -224,35 +254,29 @@ impl ModelRuntime {
 }
 
 #[derive(Debug)]
-struct ModelFunction {
-    signature: Signature,
-    function: FunctionDef,
-    model: ModelDef,
-}
+struct DetectObjects(Signature);
 
-impl PartialEq for ModelFunction {
-    fn eq(&self, other: &Self) -> bool {
-        self.function.semantic_fingerprint == other.function.semantic_fingerprint
-            && self.model.semantic_fingerprint == other.model.semantic_fingerprint
+impl PartialEq for DetectObjects {
+    fn eq(&self, _other: &Self) -> bool {
+        true
     }
 }
 
-impl Eq for ModelFunction {}
+impl Eq for DetectObjects {}
 
-impl Hash for ModelFunction {
+impl Hash for DetectObjects {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.function.semantic_fingerprint.hash(state);
-        self.model.semantic_fingerprint.hash(state);
+        "detect_objects".hash(state);
     }
 }
 
-impl ScalarUDFImpl for ModelFunction {
+impl ScalarUDFImpl for DetectObjects {
     fn name(&self) -> &str {
-        &self.function.name
+        "detect_objects"
     }
 
     fn signature(&self) -> &Signature {
-        &self.signature
+        &self.0
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
@@ -263,28 +287,28 @@ impl ScalarUDFImpl for ModelFunction {
         &self,
         _args: ScalarFunctionArgs,
     ) -> datafusion::common::Result<ColumnarValue> {
-        exec_err!(
-            "model function '{}' reached execution without InferenceNode extraction",
-            self.function.name
-        )
+        exec_err!("DETECT_OBJECTS reached execution without InferenceNode extraction")
     }
 }
 
-pub(crate) fn model_function_udf(function: FunctionDef, model: ModelDef) -> ScalarUDF {
-    ScalarUDF::new_from_impl(ModelFunction {
-        signature: Signature::one_of(
-            vec![TypeSignature::Exact(vec![DataType::Struct(
-                image_storage_fields(),
-            )])],
-            if model.volatile {
-                Volatility::Volatile
-            } else {
-                Volatility::Immutable
-            },
-        ),
-        function,
-        model,
-    })
+pub(crate) fn detect_objects_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(DetectObjects(
+        Signature::one_of(
+            vec![
+                TypeSignature::Any(2),
+                TypeSignature::Any(3),
+                TypeSignature::Any(4),
+            ],
+            Volatility::Volatile,
+        )
+        .with_parameter_names(vec![
+            "model".to_owned(),
+            "image".to_owned(),
+            "classes".to_owned(),
+            "min_confidence".to_owned(),
+        ])
+        .expect("DETECT_OBJECTS parameter names match its signatures"),
+    ))
 }
 
 fn safe_path(root: &str, relative: &str) -> Result<PathBuf> {

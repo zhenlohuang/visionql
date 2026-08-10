@@ -7,25 +7,23 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
+use datafusion::execution::context::SessionContext;
+use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::catalog::{
-    FunctionDef, FunctionImplementation, ObjectKind, SinkDef, TableDef, TableProviderKind,
-};
+use crate::catalog::{FunctionImplementation, ObjectKind, SinkDef, TableDef, TableProviderKind};
 use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
+use crate::functions::{VqlFunctionFactory, VqlTypePlanner, count_objects_udf};
 use crate::media::{MediaCounters, MediaRuntime};
 use crate::models::{
-    ModelCounters, effective_model_params, model_params_for_source, resolve_model,
-    semantic_fingerprint,
+    ModelCounters, compile_model_params, detect_objects_udf, model_specs_for_options, resolve_model,
 };
 use crate::planner::{context_for_snapshot, plan_statement, wrap_console_sink};
-use crate::sql::{
-    CreateFunction, CreateModel, CreateTable, ShowKind, VqlStatement, parse_statement,
-};
+use crate::sql::{CreateModel, CreateTable, ShowKind, VqlStatement, parse_statement};
 use crate::types::{image_field, is_image_storage};
 use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
 
@@ -365,15 +363,7 @@ impl Session {
         match parse_statement(sql)? {
             VqlStatement::CreateTable(create) => self.create_table(create).map(Statement::Ddl),
             VqlStatement::CreateModel(create) => self.create_model(create).map(Statement::Ddl),
-            VqlStatement::AlterModel { name, source } => {
-                self.alter_model(&name, &source).map(Statement::Ddl)
-            }
-            VqlStatement::CreateFunction(create) => {
-                self.create_function(create).map(Statement::Ddl)
-            }
-            VqlStatement::AlterFunction { name, model } => {
-                self.alter_function(&name, &model).map(Statement::Ddl)
-            }
+            VqlStatement::CreateFunction { sql } => self.create_function(&sql).map(Statement::Ddl),
             VqlStatement::CreateSink { name, kind } => {
                 self.create_sink(&name, kind).map(Statement::Ddl)
             }
@@ -505,148 +495,44 @@ impl Session {
     }
 
     fn create_model(&self, create: CreateModel) -> Result<DdlResult> {
-        let params = model_params_for_source(&create.source, &create.defaults)?;
+        let (runtime, pre_processor, post_processor) =
+            model_specs_for_options(create.model_type, &create.source, &create.options)?;
         let model = resolve_model(
             &create.name,
             create.model_type,
             &create.source,
-            params,
+            runtime,
+            pre_processor,
+            post_processor,
             self.engine.inner.config.model_cache_dir(),
         )?;
-        if let Some(function_name) = create.function {
-            let function = model_function_definition(&function_name, &model.name);
-            let (model_revision, function_revision) = self
-                .engine
-                .inner
-                .catalog
-                .create_model_with_function(&model, &function)?;
-            Ok(message_result(format!(
-                "created model '{}' at revision {model_revision} and function '{}' at revision {function_revision}",
-                model.name, function.name
-            )))
-        } else {
-            let revision = self.engine.inner.catalog.create_model(&model)?;
-            Ok(message_result(format!(
-                "created model '{}' at revision {revision}",
-                model.name
-            )))
-        }
-    }
-
-    fn alter_model(&self, name: &str, source: &str) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
-        let current = snapshot.model(name).ok_or_else(|| {
-            VqlError::new(
-                ErrorCode::NotFound,
-                format!("model '{name}' does not exist"),
-            )
-        })?;
-        let model = resolve_model(
-            name,
-            current.definition.model_type,
-            source,
-            current.definition.params.clone(),
-            self.engine.inner.config.model_cache_dir(),
-        )?;
-        let revision = self.engine.inner.catalog.alter_model(&model)?;
+        compile_model_params(&model)?;
+        let revision = self.engine.inner.catalog.create_model(&model)?;
         Ok(message_result(format!(
-            "altered model '{}' at revision {revision}",
+            "created model '{}' at revision {revision}",
             model.name
         )))
     }
 
-    fn create_function(&self, create: CreateFunction) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
-        let (parameters, return_type) = match &create.implementation {
-            FunctionImplementation::Model { model } => {
-                let model = snapshot.model(model).ok_or_else(|| {
-                    VqlError::new(
-                        ErrorCode::NotFound,
-                        format!("model '{model}' does not exist"),
-                    )
-                })?;
-                if !create.parameters.is_empty()
-                    && create.parameters != vec![("img".to_owned(), "IMAGE".to_owned())]
-                {
-                    return Err(VqlError::new(
-                        ErrorCode::InvalidOption,
-                        "OBJECT_DETECTION functions have signature (IMAGE)",
-                    ));
-                }
-                effective_model_params(&model.definition.params, &create.bindings)?;
-                (
-                    vec![("img".to_owned(), "IMAGE".to_owned())],
-                    "DETECTIONS".to_owned(),
-                )
-            }
-            FunctionImplementation::Python { .. } | FunctionImplementation::SqlMacro { .. } => {
-                if !create.bindings.is_empty() {
-                    return Err(VqlError::new(
-                        ErrorCode::InvalidOption,
-                        "WITH model parameters are only valid for model-backed functions",
-                    ));
-                }
-                let return_type = create.return_type.clone().ok_or_else(|| {
-                    VqlError::new(
-                        ErrorCode::InvalidOption,
-                        "Python and SQL macro functions require RETURNS",
-                    )
-                })?;
-                (create.parameters.clone(), return_type)
-            }
-        };
-        let mut function = FunctionDef {
-            name: create.name.to_ascii_lowercase(),
-            implementation: create.implementation,
-            parameters,
-            return_type,
-            bindings: create.bindings,
-            semantic_fingerprint: String::new(),
-        };
-        function.semantic_fingerprint = semantic_fingerprint(&function);
+    fn create_function(&self, sql: &str) -> Result<DdlResult> {
+        let factory = Arc::new(VqlFunctionFactory::default());
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_type_planner(Arc::new(VqlTypePlanner))
+            .with_function_factory(Some(factory.clone()))
+            .build();
+        let context = SessionContext::new_with_state(state);
+        context.register_udf(detect_objects_udf());
+        context.register_udf(count_objects_udf());
+        self.engine
+            .inner
+            .runtime
+            .block_on(context.sql(sql))
+            .map_err(function_ddl_error)?;
+        let function = factory.take_definition()?;
         let revision = self.engine.inner.catalog.create_function(&function)?;
         Ok(message_result(format!(
             "created function '{}' at revision {revision}",
-            function.name
-        )))
-    }
-
-    fn alter_function(&self, name: &str, model: &str) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
-        let model_definition = snapshot.model(model).ok_or_else(|| {
-            VqlError::new(
-                ErrorCode::NotFound,
-                format!("model '{model}' does not exist"),
-            )
-        })?;
-        let current = snapshot.function(name).ok_or_else(|| {
-            VqlError::new(
-                ErrorCode::NotFound,
-                format!("function '{name}' does not exist"),
-            )
-        })?;
-        if !matches!(
-            current.definition.implementation,
-            FunctionImplementation::Model { .. }
-        ) {
-            return Err(VqlError::new(
-                ErrorCode::InvalidOption,
-                "only model-backed functions can SET MODEL",
-            ));
-        }
-        effective_model_params(
-            &model_definition.definition.params,
-            &current.definition.bindings,
-        )?;
-        let mut function = current.definition.clone();
-        function.implementation = FunctionImplementation::Model {
-            model: model.to_ascii_lowercase(),
-        };
-        function.semantic_fingerprint = String::new();
-        function.semantic_fingerprint = semantic_fingerprint(&function);
-        let revision = self.engine.inner.catalog.alter_function(&function)?;
-        Ok(message_result(format!(
-            "altered function '{}' at revision {revision}",
             function.name
         )))
     }
@@ -755,7 +641,6 @@ impl Session {
                 .functions()
                 .map(|(name, value)| {
                     let implementation = match &value.definition.implementation {
-                        FunctionImplementation::Model { .. } => "MODEL",
                         FunctionImplementation::Python { .. } => "PYTHON",
                         FunctionImplementation::SqlMacro { .. } => "SQL_MACRO",
                     };
@@ -883,6 +768,20 @@ impl Session {
     }
 }
 
+fn function_ddl_error(error: datafusion::common::DataFusionError) -> VqlError {
+    match error {
+        datafusion::common::DataFusionError::External(source) => {
+            match source.downcast::<VqlError>() {
+                Ok(error) => *error,
+                Err(source) => VqlError::new(ErrorCode::InvalidSql, source.to_string()),
+            }
+        }
+        datafusion::common::DataFusionError::Context(_, source)
+        | datafusion::common::DataFusionError::Diagnostic(_, source) => function_ddl_error(*source),
+        source => VqlError::new(ErrorCode::InvalidSql, source.to_string()).with_source(source),
+    }
+}
+
 fn normalize_location(location: &str) -> Result<PathBuf> {
     let path = Path::new(location);
     let path = if path.is_absolute() {
@@ -914,21 +813,6 @@ fn message_result(message: String) -> DdlResult {
         message,
         batches: vec![batch],
     }
-}
-
-fn model_function_definition(name: &str, model: &str) -> FunctionDef {
-    let mut function = FunctionDef {
-        name: name.to_ascii_lowercase(),
-        implementation: FunctionImplementation::Model {
-            model: model.to_ascii_lowercase(),
-        },
-        parameters: vec![("img".to_owned(), "IMAGE".to_owned())],
-        return_type: "DETECTIONS".to_owned(),
-        bindings: Default::default(),
-        semantic_fingerprint: String::new(),
-    };
-    function.semantic_fingerprint = semantic_fingerprint(&function);
-    function
 }
 
 fn named_objects_result(rows: Vec<(String, String, i64)>) -> Result<DdlResult> {
@@ -1022,22 +906,67 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_referenced_model_preserves_catalog_integrity() {
+    fn typed_models_do_not_create_function_dependencies() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         session
             .sql(
                 "CREATE MODEL detector TYPE OBJECT_DETECTION \
-                 FROM 'mock://person' FUNCTION detect",
+                 FROM 'mock://person'",
             )
             .unwrap();
 
-        let error = session.sql("DROP MODEL detector").unwrap_err();
+        let result = session.sql("DROP MODEL detector").unwrap();
 
-        assert_eq!(error.code, ErrorCode::InvalidOption);
-        assert!(error.message.contains("referenced by function(s): detect"));
+        assert!(matches!(result, Statement::Ddl(_)));
         assert!(session.sql("SELECT 1").unwrap().collect().is_ok());
+    }
+
+    #[test]
+    fn structured_model_config_reopens_from_catalog() {
+        let temp = tempdir().unwrap();
+        let catalog = temp.path().join("catalog.db");
+        {
+            let engine = Engine::new(EngineConfig::new(&catalog)).unwrap();
+            let session = engine.session().build().unwrap();
+            session
+                .sql(
+                    "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' \
+                     WITH (runtime.kind='onnxruntime', \
+                           pre_processor.options={input_name='pixels', width=320, height=192}, \
+                           post_processor.options={output_name='detections', labels=['person']})",
+                )
+                .unwrap();
+        }
+
+        let engine = Engine::new(EngineConfig::new(&catalog)).unwrap();
+        let snapshot = engine.inner.catalog.snapshot().unwrap();
+        let model = &snapshot.model("detector").unwrap().definition;
+
+        assert_eq!(model.runtime.kind, "onnxruntime");
+        assert_eq!(model.pre_processor.kind, "vision.image_tensor@1");
+        assert_eq!(model.pre_processor.options["width"], serde_json::json!(320));
+        assert_eq!(model.post_processor.kind, "vision.yolo_e2e@1");
+        assert_eq!(
+            model.post_processor.options["labels"],
+            serde_json::json!(["person"])
+        );
+    }
+
+    #[test]
+    fn model_backed_create_function_syntax_is_not_accepted() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+
+        let error = session
+            .sql("CREATE FUNCTION detect USING MODEL detector")
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+        let functions = session.sql("SHOW FUNCTIONS").unwrap().collect().unwrap();
+        assert_eq!(functions[0].num_rows(), 0);
     }
 
     #[test]
@@ -1046,7 +975,7 @@ mod tests {
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         session
-            .sql("CREATE FUNCTION plus_one(x BIGINT) RETURNS BIGINT AS (x + 1)")
+            .sql("CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1")
             .unwrap();
 
         let batches = session
@@ -1060,6 +989,55 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(values.value(0), "plus_one(1)");
+
+        let batches = session
+            .sql("SELECT plus_one(41) AS answer")
+            .unwrap()
+            .collect()
+            .unwrap();
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 42);
+    }
+
+    #[test]
+    fn sql_expression_function_can_wrap_typed_inference() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        RgbImage::from_pixel(8, 8, Rgb([10, 20, 30]))
+            .save(photos.join("one.png"))
+            .unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}';
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';
+                 CREATE FUNCTION detect_people(IMAGE)
+                 RETURN DETECT_OBJECTS(
+                   'detector', $1,
+                   classes => ['person'], min_confidence => 0.5
+                 );",
+                photos.display()
+            ))
+            .unwrap();
+
+        let batches = session
+            .sql("SELECT COUNT_OBJECTS(detect_people(image), 'person', 0.5) AS people FROM photos")
+            .unwrap()
+            .collect()
+            .unwrap();
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+
+        assert_eq!(values.value(0), 1);
     }
 
     #[test]
@@ -1076,7 +1054,7 @@ mod tests {
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
                  CREATE MODEL detector TYPE OBJECT_DETECTION
-                 FROM 'mock://person' FUNCTION detect;",
+                 FROM 'mock://person';",
                 photos.display()
             ))
             .unwrap();
@@ -1084,7 +1062,7 @@ mod tests {
         let batches = session
             .sql(
                 "SELECT f.uri, det.label
-                 FROM photos AS f, UNNEST(detect(f.image)) AS u(det)",
+                 FROM photos AS f, UNNEST(DETECT_OBJECTS('detector', f.image)) AS u(det)",
             )
             .unwrap()
             .collect()
@@ -1279,19 +1257,19 @@ mod tests {
         session
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
-                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' FUNCTION detect;",
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';",
                 photos.display()
             ))
             .unwrap();
         let statement = session
-            .sql("SELECT COUNT_OBJECTS(detect(image), 'person', 0.6) AS people FROM photos")
+            .sql("SELECT COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.6) AS people FROM photos")
             .unwrap();
         let Statement::Query(query) = &statement else {
             panic!("model SELECT must produce a query");
         };
         let logical = query.dataframe.logical_plan().display_indent().to_string();
         assert!(logical.contains("InferenceNode"));
-        assert!(!logical.contains("detect("));
+        assert!(!logical.contains("detect_objects("));
         let physical = engine
             .inner
             .runtime
@@ -1306,8 +1284,8 @@ mod tests {
 
         let deduplicated = session
             .sql(
-                "SELECT COUNT_OBJECTS(detect(image), 'person', 0.6), \
-                        COUNT_OBJECTS(detect(image), 'person', 0.8) FROM photos",
+                "SELECT COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.6), \
+                        COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.8) FROM photos",
             )
             .unwrap();
         let Statement::Query(query) = &deduplicated else {
@@ -1329,13 +1307,15 @@ mod tests {
         session
             .sql(
                 "CREATE MODEL remote TYPE OBJECT_DETECTION \
-                 FROM 'endpoint://http://127.0.0.1:9/infer' FUNCTION remote_detect",
+                 FROM 'endpoint://http://127.0.0.1:9' \
+                 WITH (runtime.kind='triton', runtime.protocol='kserve_v2_http', \
+                       runtime.model_name='remote')",
             )
             .unwrap();
         let volatile = session
             .sql(
-                "SELECT remote_detect(image) AS first, \
-                        remote_detect(image) AS second FROM photos",
+                "SELECT DETECT_OBJECTS('remote', image) AS first, \
+                        DETECT_OBJECTS('remote', image) AS second FROM photos",
             )
             .unwrap();
         let Statement::Query(query) = volatile else {
@@ -1370,7 +1350,8 @@ mod tests {
             let _ = stream.read(&mut buffer);
             accepted_tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(500));
-            let body = r#"{"detections":[[]]}"#;
+            let body =
+                r#"{"outputs":[{"name":"output0","shape":[1,0,6],"datatype":"FP32","data":[]}]}"#;
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1390,11 +1371,15 @@ mod tests {
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
                  CREATE MODEL remote TYPE OBJECT_DETECTION
-                 FROM 'endpoint://http://{address}/infer' FUNCTION detect;",
+                 FROM 'endpoint://http://{address}'
+                 WITH (runtime.kind='triton', runtime.protocol='kserve_v2_http',
+                       runtime.model_name='remote');",
                 photos.display()
             ))
             .unwrap();
-        let Statement::Query(query) = session.sql("SELECT detect(image) FROM photos").unwrap()
+        let Statement::Query(query) = session
+            .sql("SELECT DETECT_OBJECTS('remote', image) FROM photos")
+            .unwrap()
         else {
             panic!("model SELECT must produce a query");
         };

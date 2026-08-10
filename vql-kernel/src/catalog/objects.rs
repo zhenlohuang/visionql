@@ -54,166 +54,20 @@ pub(crate) enum ModelType {
     ObjectDetection,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ModelOutputFormat {
-    XywhNormalized,
-    UltralyticsRaw,
-    #[default]
-    #[serde(rename = "ultralytics_end_to_end", alias = "ultralytics_nms")]
-    UltralyticsEndToEnd,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RuntimeSpec {
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) protocol: Option<String>,
+    #[serde(default)]
+    pub(crate) options: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ModelParams {
-    pub(crate) processor: String,
-    #[serde(default = "default_input_name")]
-    pub(crate) input_name: String,
-    #[serde(default = "default_output_name")]
-    pub(crate) output_name: String,
-    #[serde(default = "default_input_width")]
-    pub(crate) input_width: u32,
-    #[serde(default = "default_input_height")]
-    pub(crate) input_height: u32,
+pub(crate) struct ProcessorSpec {
+    pub(crate) kind: String,
     #[serde(default)]
-    pub(crate) labels: Vec<String>,
-    #[serde(default)]
-    pub(crate) classes: Option<Vec<String>>,
-    #[serde(default)]
-    pub(crate) output_format: ModelOutputFormat,
-    #[serde(default = "default_min_confidence", alias = "confidence_threshold")]
-    pub(crate) min_confidence: f32,
-    #[serde(default = "default_nms_iou_threshold")]
-    pub(crate) nms_iou_threshold: f32,
-}
-
-fn default_input_name() -> String {
-    "images".to_owned()
-}
-
-fn default_output_name() -> String {
-    "output0".to_owned()
-}
-
-const fn default_input_width() -> u32 {
-    640
-}
-
-const fn default_input_height() -> u32 {
-    640
-}
-
-const fn default_min_confidence() -> f32 {
-    0.25
-}
-
-const fn default_nms_iou_threshold() -> f32 {
-    0.45
-}
-
-impl Default for ModelParams {
-    fn default() -> Self {
-        Self {
-            processor: "yolo26-detect-v1".to_owned(),
-            input_name: default_input_name(),
-            output_name: default_output_name(),
-            input_width: default_input_width(),
-            input_height: default_input_height(),
-            labels: coco_detection_labels(),
-            classes: None,
-            output_format: ModelOutputFormat::default(),
-            min_confidence: default_min_confidence(),
-            nms_iou_threshold: default_nms_iou_threshold(),
-        }
-    }
-}
-
-fn coco_detection_labels() -> Vec<String> {
-    [
-        "person",
-        "bicycle",
-        "car",
-        "motorcycle",
-        "airplane",
-        "bus",
-        "train",
-        "truck",
-        "boat",
-        "traffic light",
-        "fire hydrant",
-        "stop sign",
-        "parking meter",
-        "bench",
-        "bird",
-        "cat",
-        "dog",
-        "horse",
-        "sheep",
-        "cow",
-        "elephant",
-        "bear",
-        "zebra",
-        "giraffe",
-        "backpack",
-        "umbrella",
-        "handbag",
-        "tie",
-        "suitcase",
-        "frisbee",
-        "skis",
-        "snowboard",
-        "sports ball",
-        "kite",
-        "baseball bat",
-        "baseball glove",
-        "skateboard",
-        "surfboard",
-        "tennis racket",
-        "bottle",
-        "wine glass",
-        "cup",
-        "fork",
-        "knife",
-        "spoon",
-        "bowl",
-        "banana",
-        "apple",
-        "sandwich",
-        "orange",
-        "broccoli",
-        "carrot",
-        "hot dog",
-        "pizza",
-        "donut",
-        "cake",
-        "chair",
-        "couch",
-        "potted plant",
-        "bed",
-        "dining table",
-        "toilet",
-        "tv",
-        "laptop",
-        "mouse",
-        "remote",
-        "keyboard",
-        "cell phone",
-        "microwave",
-        "oven",
-        "toaster",
-        "sink",
-        "refrigerator",
-        "book",
-        "clock",
-        "vase",
-        "scissors",
-        "teddy bear",
-        "hair drier",
-        "toothbrush",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+    pub(crate) options: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,8 +77,9 @@ pub(crate) struct ModelDef {
     pub(crate) source: String,
     pub(crate) resolved_source: String,
     pub(crate) artifact_hash: Option<String>,
-    #[serde(default, alias = "manifest")]
-    pub(crate) params: ModelParams,
+    pub(crate) runtime: RuntimeSpec,
+    pub(crate) pre_processor: ProcessorSpec,
+    pub(crate) post_processor: ProcessorSpec,
     pub(crate) semantic_fingerprint: String,
     #[serde(default)]
     pub(crate) volatile: bool,
@@ -233,7 +88,6 @@ pub(crate) struct ModelDef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum FunctionImplementation {
-    Model { model: String },
     Python { entry: String },
     SqlMacro { expression: String },
 }
@@ -244,8 +98,6 @@ pub(crate) struct FunctionDef {
     pub(crate) implementation: FunctionImplementation,
     pub(crate) parameters: Vec<(String, String)>,
     pub(crate) return_type: String,
-    #[serde(default)]
-    pub(crate) bindings: BTreeMap<String, serde_json::Value>,
     pub(crate) semantic_fingerprint: String,
 }
 
@@ -279,38 +131,4 @@ pub(crate) fn decode_schema(bytes: &[u8]) -> Result<SchemaRef> {
         .with_source(error)
     })?;
     Ok(Arc::new(reader.schema().as_ref().clone()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn legacy_manifest_catalog_json_loads_as_model_params() {
-        let definition: ModelDef = serde_json::from_value(serde_json::json!({
-            "name": "detector",
-            "model_type": "OBJECT_DETECTION",
-            "source": "file:///model.onnx",
-            "resolved_source": "/model.onnx",
-            "artifact_hash": "abc",
-            "manifest": {
-                "processor": "yolo-detect-v1",
-                "input_name": "images",
-                "output_name": "detections",
-                "input_width": 32,
-                "input_height": 32,
-                "labels": ["person"],
-                "output_format": "xywh_normalized",
-                "confidence_threshold": 0.6,
-                "nms_iou_threshold": 0.4
-            },
-            "semantic_fingerprint": "legacy",
-            "volatile": false
-        }))
-        .unwrap();
-
-        assert_eq!(definition.params.labels, vec!["person"]);
-        assert_eq!(definition.params.min_confidence, 0.6);
-        assert_eq!(definition.params.classes, None);
-    }
 }

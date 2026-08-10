@@ -54,7 +54,16 @@ Because every image ships ground truth, detection results are checkable rather t
 plausible. `manifest.json` carries the per-image counts by class name, so a query like
 
 ```sql
-SELECT uri, COUNT_OBJECTS(detect(image), 'person', 0.6) AS people FROM photos ORDER BY uri
+SELECT uri,
+       COUNT_OBJECTS(
+         DETECT_OBJECTS(
+           'yolo26n', image,
+           classes => ['person'], min_confidence => 0.6
+         ),
+         'person', 0.6
+       ) AS people
+FROM photos
+ORDER BY uri
 ```
 
 can be compared against `datasets.coco128.files[].ground_truth.person`. Label files sit in

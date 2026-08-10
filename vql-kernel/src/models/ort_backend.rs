@@ -1,31 +1,29 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use image::{DynamicImage, GenericImage, Rgb, RgbImage, imageops::FilterType};
 use ort::session::Session;
 use ort::value::Tensor;
 
-use super::Detection;
-use super::backend::ModelBackend;
-use crate::catalog::{ModelOutputFormat, ModelParams};
+use super::pipeline::{
+    BatchingOwner, ImageTransform, RuntimeRequestBatch, RuntimeResponseBatch, RuntimeSession,
+    TensorBatch,
+};
+use super::{Detection, ModelOutputFormat, ModelParams};
 use crate::{ErrorCode, Result, VqlError};
 
-pub(crate) struct OrtBackend {
+pub(super) struct OrtRuntime {
     session: Mutex<Session>,
-    params: ModelParams,
 }
 
-impl std::fmt::Debug for OrtBackend {
+impl std::fmt::Debug for OrtRuntime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OrtBackend")
-            .field("processor", &self.params.processor)
-            .finish_non_exhaustive()
+        formatter.debug_struct("OrtRuntime").finish_non_exhaustive()
     }
 }
 
-impl OrtBackend {
-    pub(crate) fn new(path: &Path, params: ModelParams) -> Result<Self> {
+impl OrtRuntime {
+    pub(super) fn new(path: &Path) -> Result<Self> {
         #[cfg(target_os = "macos")]
         let coreml = Session::builder()
             .ok()
@@ -51,72 +49,73 @@ impl OrtBackend {
         };
         Ok(Self {
             session: Mutex::new(session),
-            params,
         })
     }
+}
 
-    fn infer_batch(&self, images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>> {
-        if images.is_empty() {
-            return Ok(Vec::new());
-        }
-        let batch_size = images.len();
-        let width = self.params.input_width as usize;
-        let height = self.params.input_height as usize;
-        let plane = width * height;
-        let mut input = vec![0_f32; batch_size * 3 * plane];
-        let mut transforms = Vec::with_capacity(batch_size);
-        for (batch_index, image) in images.iter().enumerate() {
-            let (pixels, scale, pad_x, pad_y) =
-                letterbox(image, self.params.input_width, self.params.input_height);
-            let offset = batch_index * 3 * plane;
-            for (index, pixel) in pixels.pixels().enumerate() {
-                input[offset + index] = f32::from(pixel[0]) / 255.0;
-                input[offset + plane + index] = f32::from(pixel[1]) / 255.0;
-                input[offset + 2 * plane + index] = f32::from(pixel[2]) / 255.0;
-            }
-            transforms.push(ImageTransform {
-                original_width: image.width() as f32,
-                original_height: image.height() as f32,
-                input_width: self.params.input_width as f32,
-                input_height: self.params.input_height as f32,
-                scale,
-                pad_x,
-                pad_y,
-            });
-        }
-        let tensor = Tensor::<f32>::from_array(([batch_size, 3, height, width], input)).map_err(
-            |error| {
-                VqlError::new(ErrorCode::Execution, "failed to build ONNX input tensor")
-                    .with_source(error)
-            },
-        )?;
+impl RuntimeSession for OrtRuntime {
+    fn kind(&self) -> &str {
+        "onnxruntime"
+    }
+
+    fn batching_owner(&self) -> BatchingOwner {
+        BatchingOwner::VisionQl
+    }
+
+    fn infer(&self, batch: RuntimeRequestBatch) -> Result<RuntimeResponseBatch> {
+        let input_name = batch.input.name;
+        let shape = batch
+            .input
+            .shape
+            .iter()
+            .map(|value| {
+                usize::try_from(*value).map_err(|_| {
+                    VqlError::new(
+                        ErrorCode::Execution,
+                        "ONNX input shape must be non-negative",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let tensor = Tensor::<f32>::from_array((shape, batch.input.values)).map_err(|error| {
+            VqlError::new(ErrorCode::Execution, "failed to build ONNX input tensor")
+                .with_source(error)
+        })?;
         let mut session = self
             .session
             .lock()
             .map_err(|_| VqlError::new(ErrorCode::Internal, "ONNX session lock was poisoned"))?;
         let outputs = session
-            .run(ort::inputs![self.params.input_name.as_str() => tensor])
+            .run(ort::inputs![input_name.as_str() => tensor])
             .map_err(|error| {
                 VqlError::new(ErrorCode::Execution, "ONNX inference failed").with_source(error)
             })?;
-        let output = outputs.get(&self.params.output_name).ok_or_else(|| {
-            VqlError::new(
-                ErrorCode::Execution,
-                format!("ONNX output '{}' is missing", self.params.output_name),
-            )
-        })?;
-        let (shape, values) = output.try_extract_tensor::<f32>().map_err(|error| {
-            VqlError::new(
-                ErrorCode::Execution,
-                "ONNX detection output must be float32",
-            )
-            .with_source(error)
-        })?;
-        parse_batched_output(shape, values, &self.params, &transforms)
+        let mut response = BTreeMap::new();
+        for output_name in batch.output_names {
+            let output = outputs.get(&output_name).ok_or_else(|| {
+                VqlError::new(
+                    ErrorCode::Execution,
+                    format!("ONNX output '{output_name}' is missing"),
+                )
+            })?;
+            let (shape, values) = output.try_extract_tensor::<f32>().map_err(|error| {
+                VqlError::new(ErrorCode::Execution, "ONNX output must be float32")
+                    .with_source(error)
+            })?;
+            response.insert(
+                output_name.clone(),
+                TensorBatch {
+                    name: output_name,
+                    shape: shape.to_vec(),
+                    values: values.to_vec(),
+                },
+            );
+        }
+        Ok(RuntimeResponseBatch { outputs: response })
     }
 }
 
-fn parse_batched_output(
+pub(super) fn parse_batched_output(
     shape: &[i64],
     values: &[f32],
     params: &ModelParams,
@@ -232,7 +231,8 @@ fn tensor_element_count(shape: &[i64]) -> Option<usize> {
 
 fn finalize_detections(mut detections: Vec<Detection>, params: &ModelParams) -> Vec<Detection> {
     detections.retain(|detection| {
-        detection.confidence >= params.min_confidence
+        detection.confidence > 0.0
+            && detection.confidence.is_finite()
             && detection.x.is_finite()
             && detection.y.is_finite()
             && detection.w.is_finite()
@@ -252,17 +252,6 @@ fn finalize_detections(mut detections: Vec<Detection>, params: &ModelParams) -> 
         }
     }
     kept
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ImageTransform {
-    original_width: f32,
-    original_height: f32,
-    input_width: f32,
-    input_height: f32,
-    scale: f32,
-    pad_x: f32,
-    pad_y: f32,
 }
 
 fn parse_xywh_normalized(
@@ -403,30 +392,8 @@ fn class_label(params: &ModelParams, class: f32) -> String {
 fn unsupported_shape<T>(shape: &[i64], format: ModelOutputFormat) -> Result<T> {
     Err(VqlError::new(
         ErrorCode::Execution,
-        format!("ONNX {format:?} detection output has unsupported shape {shape:?}"),
+        format!("Runtime {format:?} detection output has unsupported shape {shape:?}"),
     ))
-}
-
-impl ModelBackend for OrtBackend {
-    fn infer(&self, images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>> {
-        self.infer_batch(images)
-    }
-}
-
-fn letterbox(image: &DynamicImage, width: u32, height: u32) -> (RgbImage, f32, f32, f32) {
-    let scale = (width as f32 / image.width() as f32).min(height as f32 / image.height() as f32);
-    let resized_width = (image.width() as f32 * scale).round() as u32;
-    let resized_height = (image.height() as f32 * scale).round() as u32;
-    let resized = image
-        .resize_exact(resized_width, resized_height, FilterType::Triangle)
-        .to_rgb8();
-    let pad_x = (width - resized_width) / 2;
-    let pad_y = (height - resized_height) / 2;
-    let mut output = RgbImage::from_pixel(width, height, Rgb([114, 114, 114]));
-    output
-        .copy_from(&resized, pad_x, pad_y)
-        .expect("letterbox dimensions fit");
-    (output, scale, pad_x as f32, pad_y as f32)
 }
 
 fn intersection_over_union(left: &Detection, right: &Detection) -> f32 {
@@ -447,6 +414,10 @@ fn intersection_over_union(left: &Detection, right: &Detection) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::backend::ModelBackend;
+    use crate::models::pipeline::{CompiledPipeline, ImageTensorPreProcessor, YoloPostProcessor};
+    use image::DynamicImage;
+    use std::sync::Arc;
 
     fn transform() -> ImageTransform {
         ImageTransform {
@@ -556,7 +527,11 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("set VQL_YOLO26_ONNX to an exported YOLO26 ONNX model");
         let params = ModelParams::default();
-        let backend = OrtBackend::new(&path, params).expect("load YOLO ONNX model");
+        let backend = CompiledPipeline::new(
+            Arc::new(ImageTensorPreProcessor::new(params.clone())),
+            Arc::new(OrtRuntime::new(&path).expect("load YOLO ONNX model")),
+            Arc::new(YoloPostProcessor::new(params)),
+        );
 
         let output = backend
             .infer(vec![DynamicImage::new_rgb8(640, 480)])

@@ -66,10 +66,6 @@ impl DefinitionSnapshot {
             .map(|(name, value)| (name.as_str(), value))
     }
 
-    pub(crate) fn function(&self, name: &str) -> Option<&SnapshotObject<FunctionDef>> {
-        self.functions.get(&name.to_ascii_lowercase())
-    }
-
     pub(crate) fn sinks(&self) -> impl Iterator<Item = (&str, &SnapshotObject<SinkDef>)> {
         self.sinks
             .iter()

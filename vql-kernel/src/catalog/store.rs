@@ -7,8 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::migrations;
 use super::objects::{
-    FunctionDef, FunctionImplementation, ModelDef, ObjectKind, SinkDef, TableDef, decode_schema,
-    encode_schema,
+    FunctionDef, ModelDef, ObjectKind, SinkDef, TableDef, decode_schema, encode_schema,
 };
 use super::snapshot::{DefinitionSnapshot, SnapshotObject, SnapshotTable};
 use crate::{ErrorCode, Result, VqlError};
@@ -126,37 +125,6 @@ impl CatalogStore {
         self.create_object("model", ObjectKind::Model, &definition.name, definition)
     }
 
-    pub(crate) fn create_model_with_function(
-        &self,
-        model: &ModelDef,
-        function: &FunctionDef,
-    ) -> Result<(i64, i64)> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        ensure_absent(&transaction, "model", ObjectKind::Model, &model.name)?;
-        ensure_absent(
-            &transaction,
-            "function",
-            ObjectKind::Function,
-            &function.name,
-        )?;
-        let model_revision =
-            insert_object(&transaction, "model", ObjectKind::Model, &model.name, model)?;
-        let function_revision = insert_object(
-            &transaction,
-            "function",
-            ObjectKind::Function,
-            &function.name,
-            function,
-        )?;
-        transaction.commit()?;
-        Ok((model_revision, function_revision))
-    }
-
-    pub(crate) fn alter_model(&self, definition: &ModelDef) -> Result<i64> {
-        self.alter_object("model", ObjectKind::Model, &definition.name, definition)
-    }
-
     pub(crate) fn create_function(&self, definition: &FunctionDef) -> Result<i64> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
@@ -166,23 +134,7 @@ impl CatalogStore {
             ObjectKind::Function,
             &definition.name,
         )?;
-        ensure_function_model_exists(&transaction, definition)?;
         let revision = insert_object(
-            &transaction,
-            "function",
-            ObjectKind::Function,
-            &definition.name,
-            definition,
-        )?;
-        transaction.commit()?;
-        Ok(revision)
-    }
-
-    pub(crate) fn alter_function(&self, definition: &FunctionDef) -> Result<i64> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        ensure_function_model_exists(&transaction, definition)?;
-        let revision = alter_object_in_transaction(
             &transaction,
             "function",
             ObjectKind::Function,
@@ -206,60 +158,7 @@ impl CatalogStore {
     }
 
     pub(crate) fn drop_model(&self, name: &str) -> Result<i64> {
-        let name = name.to_ascii_lowercase();
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let exists = transaction
-            .query_row(
-                "SELECT 1 FROM objects WHERE namespace='model' AND kind='model' AND name=?1",
-                [&name],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !exists {
-            return Err(VqlError::new(
-                ErrorCode::NotFound,
-                format!("model '{name}' does not exist"),
-            ));
-        }
-
-        let dependencies = {
-            let mut statement = transaction.prepare(
-                "SELECT o.name, r.definition_json
-                 FROM objects o JOIN revisions r ON r.id=o.head_revision
-                 WHERE o.namespace='function' AND o.kind='function'
-                 ORDER BY o.name",
-            )?;
-            let rows = statement.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut dependencies = Vec::new();
-            for row in rows {
-                let (function_name, definition_json) = row?;
-                let definition: FunctionDef = serde_json::from_str(&definition_json)?;
-                if matches!(
-                    definition.implementation,
-                    FunctionImplementation::Model { model } if model.eq_ignore_ascii_case(&name)
-                ) {
-                    dependencies.push(function_name);
-                }
-            }
-            dependencies
-        };
-        if !dependencies.is_empty() {
-            return Err(VqlError::new(
-                ErrorCode::InvalidOption,
-                format!(
-                    "cannot drop model '{name}'; referenced by function(s): {}",
-                    dependencies.join(", ")
-                ),
-            ));
-        }
-
-        let revision = drop_object_in_transaction(&transaction, "model", ObjectKind::Model, &name)?;
-        transaction.commit()?;
-        Ok(revision)
+        self.drop_object("model", ObjectKind::Model, name)
     }
 
     pub(crate) fn table_at_revision(&self, revision: i64) -> Result<TableDef> {
@@ -309,21 +208,6 @@ impl CatalogStore {
         Ok(revision)
     }
 
-    fn alter_object<T: serde::Serialize>(
-        &self,
-        namespace: &str,
-        kind: ObjectKind,
-        name: &str,
-        definition: &T,
-    ) -> Result<i64> {
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        let revision =
-            alter_object_in_transaction(&transaction, namespace, kind, name, definition)?;
-        transaction.commit()?;
-        Ok(revision)
-    }
-
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.connection
             .lock()
@@ -353,67 +237,6 @@ fn ensure_absent(
         ));
     }
     Ok(())
-}
-
-fn ensure_function_model_exists(
-    transaction: &rusqlite::Transaction<'_>,
-    definition: &FunctionDef,
-) -> Result<()> {
-    let FunctionImplementation::Model { model } = &definition.implementation else {
-        return Ok(());
-    };
-    let model = model.to_ascii_lowercase();
-    let exists = transaction
-        .query_row(
-            "SELECT 1 FROM objects WHERE namespace='model' AND kind='model' AND name=?1",
-            [&model],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if exists {
-        Ok(())
-    } else {
-        Err(VqlError::new(
-            ErrorCode::NotFound,
-            format!("model '{model}' does not exist"),
-        ))
-    }
-}
-
-fn alter_object_in_transaction<T: serde::Serialize>(
-    transaction: &rusqlite::Transaction<'_>,
-    namespace: &str,
-    kind: ObjectKind,
-    name: &str,
-    definition: &T,
-) -> Result<i64> {
-    let name = name.to_ascii_lowercase();
-    let exists = transaction
-        .query_row(
-            "SELECT 1 FROM objects WHERE namespace=?1 AND kind=?2 AND name=?3",
-            params![namespace, kind.as_str(), name],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if !exists {
-        return Err(VqlError::new(
-            ErrorCode::NotFound,
-            format!("{} '{name}' does not exist", kind.as_str()),
-        ));
-    }
-    let definition_json = serde_json::to_string(definition)?;
-    transaction.execute(
-        "INSERT INTO revisions(namespace, kind, name, definition_json) VALUES (?1, ?2, ?3, ?4)",
-        params![namespace, kind.as_str(), name, definition_json],
-    )?;
-    let revision = transaction.last_insert_rowid();
-    transaction.execute(
-        "UPDATE objects SET head_revision=?4 WHERE namespace=?1 AND kind=?2 AND name=?3",
-        params![namespace, kind.as_str(), name, revision],
-    )?;
-    Ok(revision)
 }
 
 fn drop_object_in_transaction(

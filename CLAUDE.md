@@ -23,7 +23,7 @@ Tests:
 
 ```bash
 cargo test -p vql-kernel --test sql_cases                        # SQL golden suite
-VQL_SQL_CASE=models/function cargo test -p vql-kernel --test sql_cases   # filter by path substring
+VQL_SQL_CASE=models/typed_detection cargo test -p vql-kernel --test sql_cases   # filter by path substring
 VQL_UPDATE_GOLDEN=1 VQL_SQL_CASE=... cargo test -p vql-kernel --test sql_cases  # rewrite goldens
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
 VQL_YOLO26_ONNX=./data/models/yolo26n.onnx cargo test real_yolo26_onnx_e2e -- --ignored
@@ -49,25 +49,25 @@ Three crates: `vql-kernel` (everything), `vql-cli` (clap + reedline shell), `vql
 
 `Session::sql` (`session.rs`) is the single entry point and splits on statement kind:
 
-- **VQL DDL** (`CREATE TABLE/MODEL/FUNCTION/SINK`, `ALTER`, `DROP`, `SHOW`, `DESCRIBE`) is parsed by the hand-written parser in `sql/ddl_parser.rs` into `sql/ast.rs` types, validated eagerly (a bad `LOCATION` or missing FFmpeg must fail *before* anything is written), then committed to the catalog. `Statement::Ddl` carries both a human message and a RecordBatch.
-- **Queries** go through `planner::plan_statement`: `planner/normalize.rs` performs textual rewrites (SQL-macro expansion, `box.center` → `BOX_CENTER`, correlated `UNNEST`), DataFusion plans the result, and `planner/inference.rs` rewrites model-function calls into `InferenceNode` extension nodes.
+- **VQL DDL** (`CREATE TABLE/MODEL/SINK`, `DROP`, `SHOW`, `DESCRIBE`) is parsed by the hand-written parser in `sql/ddl_parser.rs` into `sql/ast.rs` types and validated before commit. `CREATE FUNCTION` is classified there but parsed and validated by DataFusion's `CreateFunction` and VisionQL `FunctionFactory`; the resulting normalized definition is then committed to the Catalog. `Statement::Ddl` carries both a human message and a RecordBatch.
+- **Queries** go through `planner::plan_statement`: `planner/normalize.rs` performs textual rewrites (SQL-macro expansion, typed-inference named arguments, `box.center` → `BOX_CENTER`, correlated `UNNEST`), DataFusion plans the result, and `planner/inference.rs` rewrites typed inference markers into `InferenceNode` extension nodes.
 - `INSERT INTO <sink> SELECT ...` reuses the query path and wraps the DataFrame with `planner/sink.rs` (`SinkWrite` / `SinkExec`).
 
 ### Two invariants worth preserving
 
-**Model calls are plan nodes, not row UDFs.** A model-backed function registers a placeholder `ScalarUDF` (`models::model_function_udf`) purely so DataFusion can type-check it; `planner/inference.rs` then lifts every call out of the projection into an `InferenceNode` above the input, replacing the call with a column reference. Identical calls are deduplicated by a key of (output name, function `semantic_fingerprint`, model `semantic_fingerprint`, input expression) — but only for non-volatile models; `endpoint://` sources are volatile and keep one node per call site. `InferenceExec` batches through `models/scheduler.rs` (max batch 16, 5 ms max wait) into a `ModelBackend` (`ort_backend.rs`, `backend.rs` for endpoint/mock). Tests assert on `InferenceNode` / `InferenceExec` appearing in the plan text — that is the contract.
+**Model calls are plan nodes, not row UDFs.** A Model type owns a fixed marker such as `DETECT_OBJECTS`; its first argument is a literal Model name resolved from the query's `DefinitionSnapshot`. `planner/inference.rs` validates type and semantic constants, then lifts every call into an `InferenceNode` above the input. Identical calls are deduplicated by operation, Model fingerprint, invocation fingerprint, and input expression, but only for immutable Models. `InferenceExec` uses the `PreProcessor → RuntimeSession → PostProcessor` pipeline: VisionQL batches local ONNX Runtime work, while Triton owns dynamic batching for KServe V2 requests. Tests assert on `InferenceNode` / `InferenceExec` in the plan text — that is the contract.
 
 **`IMAGE` carries references, not pixels.** `IMAGE` is an Arrow `Struct` (`types/image.rs`) with `ARROW:extension:name = visionql.image` metadata and ten nullable fields; the three payload shapes are *referenced* (`uri` + `locator`), *arena* (`arena_id`/`arena_slot`, in-process only), and *encoded* (`encoded` + `encoding`, used at process boundaries such as Python and JSON). Scans never decode. Decoding is triggered only by an explicit consumer — `TO_JPEG`, inference preprocessing, or a Python UDF — and `MediaRuntime` counters exist so tests can assert that a metadata-only query decoded zero frames. Preserving that property is a load-bearing part of nearly every media change.
 
 ### Catalog
 
-`catalog/store.rs` is an append-only revision log in SQLite: `revisions` rows are immutable, `objects` rows point at a `head_revision`, and `DROP` writes a tombstone revision. Schemas are stored as Arrow IPC. Every DDL runs in one transaction (`CREATE MODEL ... FUNCTION f` creates both atomically). Planning takes a `DefinitionSnapshot` once and pins it for the whole query, so concurrent DDL cannot change a running query's meaning. Relation names (tables) share one namespace; models, functions, and sinks each have their own. Unquoted identifiers lowercase.
+`catalog/store.rs` is an append-only revision log in SQLite: `revisions` rows are immutable, `objects` rows point at a `head_revision`, and `DROP` writes a tombstone revision. Schemas are stored as Arrow IPC. Every DDL commits one object in a transaction. Planning takes a `DefinitionSnapshot` once and pins it for the whole query, so concurrent DDL cannot change a running query's meaning. Relation names (tables) share one namespace; models, functions, and sinks each have their own. Unquoted identifiers lowercase.
 
 ### Media and models
 
 `MediaRuntime` prefers the `ffmpeg-native` decoder (default cargo feature, needs FFmpeg 8 dev libraries) and silently falls back to the `ffmpeg`/`ffprobe` subprocess decoder; `video_available()` gates `USING VIDEOS`. Video tables expand to frame rows inside the scan operator using the table's `WITH (fps = ...)`, sampled by PTS.
 
-Model params merge in one direction only: processor defaults → `CREATE MODEL ... WITH (...)` → `CREATE FUNCTION ... WITH (...)` overrides (`models/params.rs`). Unknown parameters are rejected, never silently stored. Sources resolve via `models/resolver.rs`: local `file://` reads in place, `hf://` downloads one ONNX artifact into the content-addressed cache under `$VQL_HOME/cache/models/`, `endpoint://` posts base64 JPEG batches to an HTTP endpoint, `mock://` is a test backend.
+A Model stores a typed `RuntimeSpec`, `PreProcessor` spec, and `PostProcessor` spec. `runtime.*` selects and binds execution; processor-specific values live only in complete `pre_processor.options` and `post_processor.options` objects. Unknown fields and unsupported combinations fail before Catalog commit. Invocation-only values such as `classes` and `min_confidence` belong to `DETECT_OBJECTS`, not the Model. Sources resolve through `models/resolver.rs`; the runtime opens a local/cached ONNX artifact or binds a Triton KServe V2 endpoint. `mock://` remains an internal test backend.
 
 ### Error contract
 

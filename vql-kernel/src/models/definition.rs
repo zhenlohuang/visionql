@@ -4,7 +4,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::Result;
-use crate::catalog::{ModelDef, ModelParams, ModelType};
+use crate::catalog::{ModelDef, ModelType, ProcessorSpec, RuntimeSpec};
 
 use super::resolver::resolve_source;
 
@@ -12,7 +12,9 @@ pub(crate) fn resolve_model(
     name: &str,
     model_type: ModelType,
     source: &str,
-    params: ModelParams,
+    runtime: RuntimeSpec,
+    pre_processor: ProcessorSpec,
+    post_processor: ProcessorSpec,
     cache_dir: &Path,
 ) -> Result<ModelDef> {
     let resolved = resolve_source(source, cache_dir)?;
@@ -23,14 +25,19 @@ pub(crate) fn resolve_model(
     if let Some(hash) = &resolved.artifact_hash {
         fingerprint.update(hash.as_bytes());
     }
-    fingerprint.update(serde_json::to_vec(&params).expect("model parameters serialize"));
+    fingerprint.update(serde_json::to_vec(&runtime).expect("runtime spec serializes"));
+    fingerprint.update(serde_json::to_vec(&pre_processor).expect("pre-processor spec serializes"));
+    fingerprint
+        .update(serde_json::to_vec(&post_processor).expect("post-processor spec serializes"));
     Ok(ModelDef {
         name: name.to_ascii_lowercase(),
         model_type,
         source: source.to_owned(),
         resolved_source: resolved.resolved_source,
         artifact_hash: resolved.artifact_hash,
-        params,
+        runtime,
+        pre_processor,
+        post_processor,
         semantic_fingerprint: hex(&fingerprint.finalize()),
         volatile: resolved.volatile,
     })
