@@ -534,13 +534,19 @@ mod tests {
             volatile: false,
         };
         let pipeline = registry.compile(&model).expect("compile YOLO pipeline");
+        // More than one image per call: a batch of 1 hides execution providers that cannot
+        // honour the dynamic batch dimension.
         let output = pipeline
             .infer(
-                vec![DynamicImage::new_rgb8(640, 480)],
+                vec![
+                    DynamicImage::new_rgb8(640, 480),
+                    DynamicImage::new_rgb8(1280, 720),
+                    DynamicImage::new_rgb8(320, 320),
+                ],
                 CancellationToken::new(),
             )
             .await
             .expect("run YOLO ONNX inference");
-        assert_eq!(output.len(), 1);
+        assert_eq!(output.len(), 3);
     }
 }

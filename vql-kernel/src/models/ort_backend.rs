@@ -114,12 +114,18 @@ impl OrtRuntime {
         input_contract: TensorContract,
         output_contract: TensorContract,
     ) -> Result<Self> {
+        // CoreML's NeuralNetwork format binds a dynamic batch dimension to 1, so any batched
+        // call fails at predict time. Restricting the EP to static shapes keeps CoreML for
+        // fixed-shape models — the only case where it also outperforms the CPU provider — and
+        // falls back to CPU for the dynamic-batch exports VisionQL requires.
         #[cfg(target_os = "macos")]
         let coreml = Session::builder()
             .ok()
             .and_then(|builder| {
                 builder
-                    .with_execution_providers([ort::ep::CoreML::default().build()])
+                    .with_execution_providers([ort::ep::CoreML::default()
+                        .with_static_input_shapes(true)
+                        .build()])
                     .ok()
             })
             .and_then(|mut builder| builder.commit_from_file(path).ok());
