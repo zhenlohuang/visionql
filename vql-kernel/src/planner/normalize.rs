@@ -91,7 +91,10 @@ fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Res
     Ok(output)
 }
 
-fn expand_macros(sql: &str, snapshot: &crate::catalog::DefinitionSnapshot) -> Result<String> {
+pub(super) fn expand_macros(
+    sql: &str,
+    snapshot: &crate::catalog::DefinitionSnapshot,
+) -> Result<String> {
     let mut output = sql.to_owned();
     for _ in 0..16 {
         let mut changed = false;

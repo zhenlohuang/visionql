@@ -10,8 +10,8 @@ use crate::catalog::{DefinitionSnapshot, TableProviderKind};
 use crate::connectors::images::ImagesTableProvider;
 use crate::connectors::videos::VideosTableProvider;
 use crate::functions::{
-    box_center_udf, count_objects_udf, polygon_udf, python_function_udf, st_contains_udf,
-    to_jpeg_udf, tumble_udf,
+    VqlFunctionFactory, VqlTypePlanner, box_center_udf, count_objects_udf, polygon_udf,
+    python_function_udf, st_contains_udf, to_jpeg_udf, tumble_udf,
 };
 use crate::media::MediaRuntime;
 use crate::models::detect_objects_udf;
@@ -31,6 +31,52 @@ pub(crate) fn context_for_snapshot(
         .with_query_planner(Arc::new(VqlQueryPlanner))
         .build();
     let context = SessionContext::new_with_state(state);
+    register_functions(
+        &context,
+        snapshot,
+        Arc::clone(&catalog),
+        Arc::clone(&media),
+        Arc::clone(&fail_on_error),
+        python_udf_host,
+    )?;
+    register_tables(&context, snapshot, media)?;
+    Ok(context)
+}
+
+pub(crate) fn context_for_function_ddl(
+    snapshot: &DefinitionSnapshot,
+    catalog: Arc<CatalogStore>,
+    media: Arc<MediaRuntime>,
+    fail_on_error: Arc<AtomicBool>,
+    python_udf_host: Option<PythonUdfHostRef>,
+    factory: Arc<VqlFunctionFactory>,
+) -> Result<SessionContext> {
+    let state = SessionStateBuilder::new()
+        .with_default_features()
+        .with_query_planner(Arc::new(VqlQueryPlanner))
+        .with_type_planner(Arc::new(VqlTypePlanner))
+        .with_function_factory(Some(factory))
+        .build();
+    let context = SessionContext::new_with_state(state);
+    register_functions(
+        &context,
+        snapshot,
+        catalog,
+        media,
+        fail_on_error,
+        python_udf_host,
+    )?;
+    Ok(context)
+}
+
+fn register_functions(
+    context: &SessionContext,
+    snapshot: &DefinitionSnapshot,
+    catalog: Arc<CatalogStore>,
+    media: Arc<MediaRuntime>,
+    fail_on_error: Arc<AtomicBool>,
+    python_udf_host: Option<PythonUdfHostRef>,
+) -> Result<()> {
     context.register_udf(to_jpeg_udf(
         Arc::clone(&catalog),
         Arc::clone(&media),
@@ -57,6 +103,14 @@ pub(crate) fn context_for_snapshot(
             crate::catalog::FunctionImplementation::SqlMacro { .. } => {}
         }
     }
+    Ok(())
+}
+
+fn register_tables(
+    context: &SessionContext,
+    snapshot: &DefinitionSnapshot,
+    media: Arc<MediaRuntime>,
+) -> Result<()> {
     for (name, table) in snapshot.tables() {
         match table.definition.provider {
             TableProviderKind::Images => {
@@ -92,5 +146,5 @@ pub(crate) fn context_for_snapshot(
             }
         }
     }
-    Ok(context)
+    Ok(())
 }

@@ -14,6 +14,8 @@ use crate::catalog::{FunctionDef, FunctionImplementation};
 use crate::models::semantic_fingerprint;
 use crate::{ErrorCode, VqlError};
 
+use super::python_udf::parse_data_type as parse_python_data_type;
+
 #[derive(Debug, Default)]
 pub(crate) struct VqlTypePlanner;
 
@@ -121,13 +123,17 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
         .iter()
         .enumerate()
         .map(|(index, argument)| {
+            let data_type = data_type_name(&argument.data_type, !is_python)?;
+            if is_python {
+                parse_python_data_type(&data_type)?;
+            }
             Ok((
                 argument
                     .name
                     .as_ref()
                     .map(|name| name.value.to_ascii_lowercase())
                     .unwrap_or_else(|| format!("${}", index + 1)),
-                data_type_name(&argument.data_type, !is_python)?,
+                data_type,
             ))
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -148,6 +154,9 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
         })?,
     };
     let return_type = data_type_name(&resolved_return_type, !is_python)?;
+    if is_python {
+        parse_python_data_type(&return_type)?;
+    }
     let implementation = match language.as_deref() {
         None | Some("sql") => FunctionImplementation::SqlMacro {
             expression: expr_to_sql(body)

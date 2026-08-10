@@ -12,8 +12,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::models::ModelRuntime;
 
-pub(crate) use session_state::context_for_snapshot;
+pub(crate) use session_state::{context_for_function_ddl, context_for_snapshot};
 pub(crate) use sink::wrap_console_sink;
+
+pub(crate) fn normalize_function_ddl(
+    sql: &str,
+    snapshot: &crate::catalog::DefinitionSnapshot,
+) -> crate::Result<String> {
+    normalize::expand_macros(sql, snapshot)
+}
 
 pub(crate) async fn plan_statement(
     context: &SessionContext,

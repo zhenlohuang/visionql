@@ -32,6 +32,7 @@ enum SchedulerKind {
     Service {
         backend: Arc<dyn ModelBackend>,
         semaphore: Arc<Semaphore>,
+        max_batch: usize,
     },
 }
 
@@ -47,9 +48,14 @@ impl Debug for ModelScheduler {
                 .field("batching_owner", &BatchingOwner::VisionQl)
                 .field("max_batch", max_batch)
                 .finish(),
-            SchedulerKind::Service { semaphore, .. } => formatter
+            SchedulerKind::Service {
+                semaphore,
+                max_batch,
+                ..
+            } => formatter
                 .debug_struct("ModelScheduler")
                 .field("batching_owner", &BatchingOwner::Service)
+                .field("max_batch", max_batch)
                 .field("available_permits", &semaphore.available_permits())
                 .finish(),
         }
@@ -76,16 +82,17 @@ impl ModelScheduler {
         capacity: usize,
         service_concurrency: usize,
     ) -> Self {
+        let max_batch = max_batch.max(1);
         let kind = match batching_owner {
             BatchingOwner::VisionQl => {
                 let (sender, receiver) = mpsc::channel(capacity.max(1));
-                let max_batch = max_batch.max(1);
                 tokio::spawn(drive(receiver, backend, max_batch, max_wait));
                 SchedulerKind::VisionQl { sender, max_batch }
             }
             BatchingOwner::Service => SchedulerKind::Service {
                 backend,
                 semaphore: Arc::new(Semaphore::new(service_concurrency.max(1))),
+                max_batch,
             },
         };
         Self { kind }
@@ -110,20 +117,44 @@ impl ModelScheduler {
                 concat_arrays(&outputs)
             }
             SchedulerKind::VisionQl { .. } => self.submit_visionql(images, cancel).await,
-            SchedulerKind::Service { backend, semaphore } => {
-                let permit = tokio::select! {
-                    _ = cancel.cancelled() => {
-                        return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
+            SchedulerKind::Service { max_batch, .. } if images.len() > *max_batch => {
+                let mut images = images.into_iter();
+                let mut outputs = Vec::new();
+                loop {
+                    let chunk = images.by_ref().take(*max_batch).collect::<Vec<_>>();
+                    if chunk.is_empty() {
+                        break;
                     }
-                    permit = Arc::clone(semaphore).acquire_owned() => permit.map_err(|_| {
-                        VqlError::new(ErrorCode::Execution, "model service scheduler stopped")
-                    })?,
-                };
-                let result = backend.infer(images, cancel).await;
-                drop(permit);
-                result
+                    outputs.push(self.submit_service(chunk, cancel.clone()).await?);
+                }
+                concat_arrays(&outputs)
             }
+            SchedulerKind::Service { .. } => self.submit_service(images, cancel).await,
         }
+    }
+
+    async fn submit_service(
+        &self,
+        images: Vec<DynamicImage>,
+        cancel: CancellationToken,
+    ) -> Result<ArrayRef> {
+        let SchedulerKind::Service {
+            backend, semaphore, ..
+        } = &self.kind
+        else {
+            unreachable!("service submission requires a service-owned scheduler");
+        };
+        let permit = tokio::select! {
+            _ = cancel.cancelled() => {
+                return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
+            }
+            permit = Arc::clone(semaphore).acquire_owned() => permit.map_err(|_| {
+                VqlError::new(ErrorCode::Execution, "model service scheduler stopped")
+            })?,
+        };
+        let result = backend.infer(images, cancel).await;
+        drop(permit);
+        result
     }
 
     async fn submit_visionql(
@@ -335,6 +366,30 @@ mod tests {
             Duration::from_millis(1),
             4,
             1,
+        );
+        let images = (0..8)
+            .map(|_| DynamicImage::new_rgb8(1, 1))
+            .collect::<Vec<_>>();
+        let output = scheduler
+            .infer_with_cancel(images, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(output.len(), 8);
+        assert_eq!(*batch_sizes.lock().unwrap(), vec![3, 3, 2]);
+    }
+
+    #[tokio::test]
+    async fn service_owned_scheduler_never_exceeds_max_batch() {
+        let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = ModelScheduler::with_config(
+            Arc::new(RecordingBackend {
+                batch_sizes: Arc::clone(&batch_sizes),
+            }),
+            BatchingOwner::Service,
+            3,
+            Duration::ZERO,
+            1,
+            2,
         );
         let images = (0..8)
             .map(|_| DynamicImage::new_rgb8(1, 1))

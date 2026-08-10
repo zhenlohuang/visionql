@@ -181,14 +181,21 @@ pub(crate) fn python_function_udf(
     }))
 }
 
-fn parse_data_type(value: &str) -> Result<DataType> {
+pub(super) fn parse_data_type(value: &str) -> Result<DataType> {
     match value.to_ascii_uppercase().as_str() {
         "IMAGE" => Ok(DataType::Struct(crate::types::image_storage_fields())),
         "FLOAT" | "REAL" => Ok(DataType::Float32),
         "DOUBLE" => Ok(DataType::Float64),
         "STRING" | "VARCHAR" => Ok(DataType::Utf8),
         "BOOLEAN" | "BOOL" => Ok(DataType::Boolean),
+        "TINYINT" => Ok(DataType::Int8),
+        "SMALLINT" => Ok(DataType::Int16),
+        "INT" => Ok(DataType::Int32),
         "BIGINT" => Ok(DataType::Int64),
+        "TINYINT UNSIGNED" => Ok(DataType::UInt8),
+        "SMALLINT UNSIGNED" => Ok(DataType::UInt16),
+        "INT UNSIGNED" => Ok(DataType::UInt32),
+        "BIGINT UNSIGNED" => Ok(DataType::UInt64),
         "BINARY" => Ok(DataType::Binary),
         data_type => Err(VqlError::new(
             ErrorCode::InvalidOption,

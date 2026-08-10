@@ -7,8 +7,6 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
-use datafusion::execution::context::SessionContext;
-use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
@@ -17,10 +15,13 @@ use tokio_util::sync::CancellationToken;
 use crate::catalog::{FunctionImplementation, ObjectKind, SinkDef, TableDef, TableProviderKind};
 use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
-use crate::functions::{VqlFunctionFactory, VqlTypePlanner, count_objects_udf};
+use crate::functions::VqlFunctionFactory;
 use crate::media::{MediaCounters, MediaRuntime};
-use crate::models::{ModelCounters, detect_objects_udf, resolve_model};
-use crate::planner::{context_for_snapshot, plan_statement, wrap_console_sink};
+use crate::models::{ModelCounters, resolve_model};
+use crate::planner::{
+    context_for_function_ddl, context_for_snapshot, normalize_function_ddl, plan_statement,
+    wrap_console_sink,
+};
 use crate::sql::{CreateModel, CreateTable, ShowKind, VqlStatement, parse_statement};
 use crate::types::{image_field, is_image_storage};
 use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
@@ -516,19 +517,21 @@ impl Session {
     }
 
     fn create_function(&self, sql: &str) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let sql = normalize_function_ddl(sql, &snapshot)?;
         let factory = Arc::new(VqlFunctionFactory::default());
-        let state = SessionStateBuilder::new()
-            .with_default_features()
-            .with_type_planner(Arc::new(VqlTypePlanner))
-            .with_function_factory(Some(factory.clone()))
-            .build();
-        let context = SessionContext::new_with_state(state);
-        context.register_udf(detect_objects_udf());
-        context.register_udf(count_objects_udf());
+        let context = context_for_function_ddl(
+            &snapshot,
+            Arc::clone(&self.engine.inner.catalog),
+            Arc::clone(&self.engine.inner.media),
+            Arc::clone(&self.fail_on_error),
+            self.python_udf_host.clone(),
+            Arc::clone(&factory),
+        )?;
         self.engine
             .inner
             .runtime
-            .block_on(context.sql(sql))
+            .block_on(context.sql(&sql))
             .map_err(function_ddl_error)?;
         let function = factory.take_definition()?;
         let revision = self.engine.inner.catalog.create_function(&function)?;
@@ -875,7 +878,7 @@ fn percentile(values: &[u64], percentile: f64) -> u64 {
 mod tests {
     use super::*;
     use crate::EngineConfig;
-    use arrow::array::Array;
+    use arrow::array::{Array, Float64Array};
     use image::{Rgb, RgbImage};
     use tempfile::tempdir;
 
@@ -1044,6 +1047,69 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(values.value(0), 42);
+    }
+
+    #[test]
+    fn python_integer_types_reopen_from_catalog() {
+        let temp = tempdir().unwrap();
+        let catalog = temp.path().join("catalog.db");
+        {
+            let engine = Engine::new(EngineConfig::new(&catalog)).unwrap();
+            let session = engine.session().build().unwrap();
+            session
+                .sql("CREATE FUNCTION py_int(value INT) RETURNS INT LANGUAGE PYTHON AS 'm:f'")
+                .unwrap();
+            session.sql("SELECT 1").unwrap().collect().unwrap();
+        }
+
+        let engine = Engine::new(EngineConfig::new(&catalog)).unwrap();
+        let session = engine.session().build().unwrap();
+        session.sql("SELECT 1").unwrap().collect().unwrap();
+    }
+
+    #[test]
+    fn sql_expression_function_can_call_existing_function() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(
+                "CREATE FUNCTION fahrenheit(DOUBLE) RETURNS DOUBLE \
+                 RETURN $1 * 9.0 / 5.0 + 32.0",
+            )
+            .unwrap();
+        session
+            .sql(
+                "CREATE FUNCTION hotter(DOUBLE) RETURNS DOUBLE \
+                 RETURN fahrenheit($1) + 1.0",
+            )
+            .unwrap();
+
+        let batches = session
+            .sql("SELECT hotter(0.0) AS temperature")
+            .unwrap()
+            .collect()
+            .unwrap();
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 33.0);
+    }
+
+    #[test]
+    fn sql_expression_function_can_call_tumble() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+
+        session
+            .sql(
+                "CREATE FUNCTION minute_bucket(TIMESTAMP) RETURNS TIMESTAMP \
+                 RETURN TUMBLE($1, INTERVAL '1' MINUTE)",
+            )
+            .unwrap();
     }
 
     #[test]
