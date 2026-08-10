@@ -11,12 +11,14 @@ ffmpeg-native = ["dep:ffmpeg-next"]
 
 [dependencies]
 arrow.workspace = true
+arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 datafusion.workspace = true
 ffmpeg-next = { workspace = true, optional = true }
+fast_image_resize.workspace = true
 futures.workspace = true
 image.workspace = true
 object_store.workspace = true

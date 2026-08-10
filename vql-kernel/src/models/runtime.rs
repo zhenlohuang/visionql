@@ -1,12 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::time::Instant;
 
-use arrow::array::{Array, BinaryArray, StructArray};
+use arrow::array::{Array, ArrayRef, BinaryArray, StructArray};
 use arrow::datatypes::DataType;
 use datafusion::common::exec_err;
 use datafusion::logical_expr::{
@@ -15,15 +14,15 @@ use datafusion::logical_expr::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::BoundInferenceParams;
 use super::backend::{MockBackend, ModelBackend};
-use super::ort_backend::OrtRuntime;
-use super::pipeline::{
-    BatchingOwner, CompiledPipeline, ImageTensorPreProcessor, RuntimeSession, YoloPostProcessor,
+use super::pipeline::BatchingOwner;
+use super::postprocess::{
+    filter_and_scatter_detections, mock_detection_output, mock_primary_label,
 };
+use super::registry::PipelineRegistry;
 use super::scheduler::ModelScheduler;
-use super::triton_backend::TritonRuntime;
-use super::{BoundInferenceParams, Detection, ModelParams, compile_model_params, detections_type};
-use crate::catalog::{CatalogStore, ModelDef, TableProviderKind};
+use crate::catalog::{CatalogStore, ModelDef, ModelType, TableProviderKind};
 use crate::media::{DecodedFrame, MediaRuntime};
 use crate::types::parse_locator;
 use crate::{ErrorCode, Result, VqlError};
@@ -39,6 +38,7 @@ pub(crate) struct ModelCounters {
 pub(crate) struct ModelRuntime {
     catalog: Arc<CatalogStore>,
     media: Arc<MediaRuntime>,
+    registry: Arc<PipelineRegistry>,
     schedulers: Mutex<HashMap<String, Arc<ModelScheduler>>>,
     inference_rows: AtomicU64,
     inference_batches: AtomicU64,
@@ -47,10 +47,15 @@ pub(crate) struct ModelRuntime {
 }
 
 impl ModelRuntime {
-    pub(crate) fn new(catalog: Arc<CatalogStore>, media: Arc<MediaRuntime>) -> Self {
+    pub(crate) fn new(
+        catalog: Arc<CatalogStore>,
+        media: Arc<MediaRuntime>,
+        registry: Arc<PipelineRegistry>,
+    ) -> Self {
         Self {
             catalog,
             media,
+            registry,
             schedulers: Mutex::new(HashMap::new()),
             inference_rows: AtomicU64::new(0),
             inference_batches: AtomicU64::new(0),
@@ -78,68 +83,72 @@ impl ModelRuntime {
         }
     }
 
-    fn scheduler(&self, model: &ModelDef, params: &ModelParams) -> Result<Arc<ModelScheduler>> {
-        let mut schedulers = self.schedulers.lock().map_err(|_| {
-            VqlError::new(ErrorCode::Internal, "model scheduler cache was poisoned")
-        })?;
+    pub(crate) fn evict_stale(&self) -> Result<()> {
+        let live_fingerprints = self.live_model_fingerprints()?;
+        self.schedulers
+            .lock()
+            .map_err(|_| VqlError::new(ErrorCode::Internal, "model scheduler cache was poisoned"))?
+            .retain(|fingerprint, _| live_fingerprints.contains(fingerprint));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_pipeline_count(&self) -> usize {
+        self.schedulers.lock().map_or(0, |cache| cache.len())
+    }
+
+    async fn scheduler(&self, model: &ModelDef) -> Result<Arc<ModelScheduler>> {
+        let live_fingerprints = self.live_model_fingerprints()?;
+        let cacheable = live_fingerprints.contains(&model.semantic_fingerprint);
         let key = model.semantic_fingerprint.clone();
-        if let Some(scheduler) = schedulers.get(&key) {
-            return Ok(Arc::clone(scheduler));
+        {
+            let mut schedulers = self.schedulers.lock().map_err(|_| {
+                VqlError::new(ErrorCode::Internal, "model scheduler cache was poisoned")
+            })?;
+            schedulers.retain(|fingerprint, _| live_fingerprints.contains(fingerprint));
+            if let Some(scheduler) = schedulers.get(&key) {
+                return Ok(Arc::clone(scheduler));
+            }
         }
+
         let (backend, batching_owner): (Arc<dyn ModelBackend>, BatchingOwner) =
             if model.source.starts_with("mock://") {
                 (
-                    Arc::new(MockBackend::new(
-                        params
-                            .labels
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "object".to_owned()),
-                    )),
+                    Arc::new(MockBackend::new(mock_primary_label(&model.post_processor)?)),
                     BatchingOwner::VisionQl,
                 )
             } else {
-                let runtime: Arc<dyn RuntimeSession> = if model.runtime.kind == "triton" {
-                    let model_name = model.runtime.options["model_name"]
-                        .as_str()
-                        .expect("validated Triton model name");
-                    let model_version = model
-                        .runtime
-                        .options
-                        .get("model_version")
-                        .and_then(serde_json::Value::as_str);
-                    Arc::new(TritonRuntime::new(
-                        &model.source,
-                        model_name,
-                        model_version,
-                    )?)
-                } else if model.runtime.kind == "onnxruntime" {
-                    Arc::new(OrtRuntime::new(Path::new(&model.resolved_source))?)
-                } else {
-                    return Err(VqlError::new(
-                        ErrorCode::InvalidOption,
-                        format!("unsupported Runtime '{}'", model.runtime.kind),
-                    ));
-                };
-                let batching_owner = runtime.batching_owner();
-                let pipeline = CompiledPipeline::new(
-                    Arc::new(ImageTensorPreProcessor::new(params.clone())),
-                    runtime,
-                    Arc::new(YoloPostProcessor::new(params.clone())),
-                );
+                let registry = Arc::clone(&self.registry);
+                let model = model.clone();
+                let pipeline = tokio::task::spawn_blocking(move || registry.compile(&model))
+                    .await
+                    .map_err(|error| {
+                        VqlError::new(ErrorCode::Execution, "model pipeline build task failed")
+                            .with_source(error)
+                    })??;
+                let batching_owner = pipeline.batching_owner();
                 (Arc::new(pipeline), batching_owner)
             };
-        let scheduler = Arc::new(ModelScheduler::new(
-            backend,
-            16,
-            match batching_owner {
-                BatchingOwner::VisionQl => Duration::from_millis(5),
-                BatchingOwner::Service => Duration::ZERO,
-            },
-            64,
-        ));
-        schedulers.insert(key, Arc::clone(&scheduler));
+        let scheduler = Arc::new(ModelScheduler::new(backend, batching_owner));
+        if cacheable {
+            let mut schedulers = self.schedulers.lock().map_err(|_| {
+                VqlError::new(ErrorCode::Internal, "model scheduler cache was poisoned")
+            })?;
+            if let Some(existing) = schedulers.get(&key) {
+                return Ok(Arc::clone(existing));
+            }
+            schedulers.insert(key, Arc::clone(&scheduler));
+        }
         Ok(scheduler)
+    }
+
+    fn live_model_fingerprints(&self) -> Result<HashSet<String>> {
+        Ok(self
+            .catalog
+            .snapshot()?
+            .models()
+            .map(|(_, model)| model.definition.semantic_fingerprint.clone())
+            .collect())
     }
 
     fn decode_image(&self, images: &StructArray, row: usize) -> Result<image::DynamicImage> {
@@ -180,18 +189,16 @@ impl ModelRuntime {
         }
     }
 
-    pub(crate) fn infer(
+    pub(crate) async fn infer(
         &self,
         model: &ModelDef,
         invocation: &BoundInferenceParams,
         images: &StructArray,
         fail_on_error: bool,
         cancel: CancellationToken,
-    ) -> Result<Vec<Option<Vec<Detection>>>> {
-        let params = compile_model_params(model)?;
+    ) -> Result<ArrayRef> {
         let mut decoded = Vec::new();
         let mut positions = Vec::new();
-        let mut output = vec![None; images.len()];
         for row in 0..images.len() {
             if images.is_null(row) {
                 continue;
@@ -213,31 +220,24 @@ impl ModelRuntime {
             }
         }
         if decoded.is_empty() {
-            return Ok(output);
+            return filter_and_scatter_detections(
+                &mock_detection_output("object", 0),
+                &[],
+                images.len(),
+                invocation,
+            );
         }
         let count = decoded.len();
-        let scheduler = self.scheduler(model, &params)?;
+        let scheduler = self.scheduler(model).await?;
         let started = Instant::now();
-        let result = scheduler.infer_with_cancel(decoded, cancel);
+        let result = scheduler.infer_with_cancel(decoded, cancel).await;
         if let Ok(mut samples) = self.samples.lock() {
             samples.push((started.elapsed().as_micros() as u64, count as u64));
         }
         match result {
             Ok(results) => {
-                for (position, detections) in positions.into_iter().zip(results) {
-                    output[position] = Some(
-                        detections
-                            .into_iter()
-                            .filter(|detection| {
-                                detection.confidence >= invocation.min_confidence
-                                    && invocation
-                                        .classes
-                                        .as_ref()
-                                        .is_none_or(|classes| classes.contains(&detection.label))
-                            })
-                            .collect(),
-                    );
-                }
+                let output =
+                    filter_and_scatter_detections(&results, &positions, images.len(), invocation)?;
                 self.inference_rows
                     .fetch_add(count as u64, Ordering::Relaxed);
                 self.inference_batches.fetch_add(1, Ordering::Relaxed);
@@ -247,7 +247,12 @@ impl ModelRuntime {
             Err(_) => {
                 self.inference_errors
                     .fetch_add(count as u64, Ordering::Relaxed);
-                Ok(output)
+                filter_and_scatter_detections(
+                    &mock_detection_output("object", 0),
+                    &[],
+                    images.len(),
+                    invocation,
+                )
             }
         }
     }
@@ -280,7 +285,7 @@ impl ScalarUDFImpl for DetectObjects {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
-        Ok(detections_type())
+        Ok(ModelType::ObjectDetection.canonical_output_type())
     }
 
     fn invoke_with_args(

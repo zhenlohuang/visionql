@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arrow::array::{Array, ArrayRef, StringArray, StructArray};
+use arrow::array::{Array, StringArray, StructArray};
 use arrow::datatypes::{Field, Fields, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
@@ -29,8 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{DefinitionSnapshot, ModelDef, ModelType};
 use crate::models::{
-    BoundInferenceParams, ModelRuntime, append_detections, bind_inference_params,
-    detection_builder, detections_type, semantic_fingerprint,
+    BoundInferenceParams, ModelRuntime, bind_inference_params, semantic_fingerprint,
 };
 use crate::planner::sink::SinkExtensionPlanner;
 
@@ -66,7 +65,7 @@ impl InferenceNode {
         let result = DFSchema::from_unqualified_fields(
             Fields::from(vec![Arc::new(Field::new(
                 &output_name,
-                detections_type(),
+                model.model_type.canonical_output_type(),
                 true,
             ))]),
             HashMap::new(),
@@ -680,13 +679,10 @@ impl ExecutionPlan for InferenceExec {
                         fail_on_error.load(Ordering::Relaxed),
                         cancellation.clone(),
                     )
+                    .await
                     .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-                let mut builder = detection_builder(images.len());
-                for detections in &output {
-                    append_detections(&mut builder, detections.as_deref());
-                }
                 let mut columns = batch.columns().to_vec();
-                columns.push(Arc::new(builder.finish()) as ArrayRef);
+                columns.push(output);
                 yield RecordBatch::try_new(Arc::clone(&schema), columns)?;
             }
         };

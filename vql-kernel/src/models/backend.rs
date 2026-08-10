@@ -1,10 +1,15 @@
+use arrow::array::ArrayRef;
+use async_trait::async_trait;
 use image::DynamicImage;
+use tokio_util::sync::CancellationToken;
 
-use super::Detection;
+use super::postprocess::mock_detection_output;
 use crate::Result;
 
+#[async_trait]
 pub(crate) trait ModelBackend: Send + Sync + std::fmt::Debug {
-    fn infer(&self, images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>>;
+    async fn infer(&self, images: Vec<DynamicImage>, cancel: CancellationToken)
+    -> Result<ArrayRef>;
 }
 
 #[derive(Debug)]
@@ -20,25 +25,13 @@ impl MockBackend {
     }
 }
 
+#[async_trait]
 impl ModelBackend for MockBackend {
-    fn infer(&self, images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>> {
-        Ok(images
-            .into_iter()
-            .map(|image| {
-                let confidence = if image.width() > 0 && image.height() > 0 {
-                    0.9
-                } else {
-                    0.0
-                };
-                vec![Detection {
-                    label: self.label.clone(),
-                    confidence,
-                    x: 0.25,
-                    y: 0.25,
-                    w: 0.5,
-                    h: 0.5,
-                }]
-            })
-            .collect())
+    async fn infer(
+        &self,
+        images: Vec<DynamicImage>,
+        _cancel: CancellationToken,
+    ) -> Result<ArrayRef> {
+        Ok(mock_detection_output(&self.label, images.len()))
     }
 }

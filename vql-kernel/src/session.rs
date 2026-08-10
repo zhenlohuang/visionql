@@ -19,9 +19,7 @@ use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
 use crate::functions::{VqlFunctionFactory, VqlTypePlanner, count_objects_udf};
 use crate::media::{MediaCounters, MediaRuntime};
-use crate::models::{
-    ModelCounters, compile_model_params, detect_objects_udf, model_specs_for_options, resolve_model,
-};
+use crate::models::{ModelCounters, detect_objects_udf, resolve_model};
 use crate::planner::{context_for_snapshot, plan_statement, wrap_console_sink};
 use crate::sql::{CreateModel, CreateTable, ShowKind, VqlStatement, parse_statement};
 use crate::types::{image_field, is_image_storage};
@@ -495,8 +493,11 @@ impl Session {
     }
 
     fn create_model(&self, create: CreateModel) -> Result<DdlResult> {
-        let (runtime, pre_processor, post_processor) =
-            model_specs_for_options(create.model_type, &create.source, &create.options)?;
+        let (runtime, pre_processor, post_processor) = self
+            .engine
+            .inner
+            .pipelines
+            .model_specs_for_options(create.model_type, &create.source, &create.options)?;
         let model = resolve_model(
             &create.name,
             create.model_type,
@@ -506,7 +507,7 @@ impl Session {
             post_processor,
             self.engine.inner.config.model_cache_dir(),
         )?;
-        compile_model_params(&model)?;
+        self.engine.inner.pipelines.validate_model(&model)?;
         let revision = self.engine.inner.catalog.create_model(&model)?;
         Ok(message_result(format!(
             "created model '{}' at revision {revision}",
@@ -602,7 +603,11 @@ impl Session {
     fn drop_object(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
         let revision = match kind {
             ShowKind::Tables => return self.drop_table(name),
-            ShowKind::Models => self.engine.inner.catalog.drop_model(name)?,
+            ShowKind::Models => {
+                let revision = self.engine.inner.catalog.drop_model(name)?;
+                self.engine.inner.models.evict_stale()?;
+                revision
+            }
             ShowKind::Functions => {
                 self.engine
                     .inner
@@ -921,6 +926,44 @@ mod tests {
 
         assert!(matches!(result, Statement::Ddl(_)));
         assert!(session.sql("SELECT 1").unwrap().collect().is_ok());
+    }
+
+    #[test]
+    fn dropping_and_recreating_a_model_builds_a_fresh_pipeline() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        RgbImage::from_pixel(8, 8, Rgb([10, 20, 30]))
+            .save(photos.join("one.png"))
+            .unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}';
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';",
+                photos.display()
+            ))
+            .unwrap();
+        session
+            .sql("SELECT DETECT_OBJECTS('detector', image) FROM photos")
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(engine.inner.models.cached_pipeline_count(), 1);
+
+        session.sql("DROP MODEL detector").unwrap();
+        assert_eq!(engine.inner.models.cached_pipeline_count(), 0);
+
+        session
+            .sql("CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'")
+            .unwrap();
+        session
+            .sql("SELECT DETECT_OBJECTS('detector', image) FROM photos")
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(engine.inner.models.cached_pipeline_count(), 1);
     }
 
     #[test]

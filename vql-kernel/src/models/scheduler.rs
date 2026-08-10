@@ -1,16 +1,22 @@
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::thread;
 use std::time::{Duration, Instant};
 
+use arrow::array::{Array, ArrayRef};
 use image::DynamicImage;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::Detection;
 use super::backend::ModelBackend;
+use super::pipeline::BatchingOwner;
 use crate::{ErrorCode, Result, VqlError};
 
-type Response = std::sync::mpsc::Sender<Result<Vec<Vec<Detection>>>>;
+pub(super) const MAX_BATCH: usize = 16;
+pub(super) const MAX_WAIT: Duration = Duration::from_millis(5);
+pub(super) const QUEUE_CAPACITY: usize = 64;
+pub(super) const SERVICE_CONCURRENCY: usize = 4;
+
+type Response = oneshot::Sender<Result<ArrayRef>>;
 
 struct Request {
     images: Vec<DynamicImage>,
@@ -18,102 +24,158 @@ struct Request {
     cancel: CancellationToken,
 }
 
-#[derive(Debug)]
+enum SchedulerKind {
+    VisionQl {
+        sender: mpsc::Sender<Request>,
+        max_batch: usize,
+    },
+    Service {
+        backend: Arc<dyn ModelBackend>,
+        semaphore: Arc<Semaphore>,
+    },
+}
+
 pub(crate) struct ModelScheduler {
-    sender: SyncSender<Request>,
-    max_batch: usize,
+    kind: SchedulerKind,
+}
+
+impl Debug for ModelScheduler {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            SchedulerKind::VisionQl { max_batch, .. } => formatter
+                .debug_struct("ModelScheduler")
+                .field("batching_owner", &BatchingOwner::VisionQl)
+                .field("max_batch", max_batch)
+                .finish(),
+            SchedulerKind::Service { semaphore, .. } => formatter
+                .debug_struct("ModelScheduler")
+                .field("batching_owner", &BatchingOwner::Service)
+                .field("available_permits", &semaphore.available_permits())
+                .finish(),
+        }
+    }
 }
 
 impl ModelScheduler {
-    pub(crate) fn new(
+    pub(crate) fn new(backend: Arc<dyn ModelBackend>, batching_owner: BatchingOwner) -> Self {
+        Self::with_config(
+            backend,
+            batching_owner,
+            MAX_BATCH,
+            MAX_WAIT,
+            QUEUE_CAPACITY,
+            SERVICE_CONCURRENCY,
+        )
+    }
+
+    fn with_config(
         backend: Arc<dyn ModelBackend>,
+        batching_owner: BatchingOwner,
         max_batch: usize,
         max_wait: Duration,
         capacity: usize,
+        service_concurrency: usize,
     ) -> Self {
-        let (sender, receiver) = sync_channel::<Request>(capacity);
-        let max_batch = max_batch.max(1);
-        thread::Builder::new()
-            .name("vql-model-scheduler".to_owned())
-            .spawn(move || drive(receiver, backend, max_batch, max_wait))
-            .expect("model scheduler thread can be created");
-        Self { sender, max_batch }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn infer(&self, images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>> {
-        self.infer_with_cancel(images, CancellationToken::new())
-    }
-
-    pub(crate) fn infer_with_cancel(
-        &self,
-        images: Vec<DynamicImage>,
-        cancel: CancellationToken,
-    ) -> Result<Vec<Vec<Detection>>> {
-        if images.len() > self.max_batch {
-            let mut images = images.into_iter();
-            let mut output = Vec::new();
-            loop {
-                let chunk = images.by_ref().take(self.max_batch).collect::<Vec<_>>();
-                if chunk.is_empty() {
-                    break;
-                }
-                output.extend(self.submit(chunk, cancel.clone())?);
+        let kind = match batching_owner {
+            BatchingOwner::VisionQl => {
+                let (sender, receiver) = mpsc::channel(capacity.max(1));
+                let max_batch = max_batch.max(1);
+                tokio::spawn(drive(receiver, backend, max_batch, max_wait));
+                SchedulerKind::VisionQl { sender, max_batch }
             }
-            return Ok(output);
-        }
-        self.submit(images, cancel)
+            BatchingOwner::Service => SchedulerKind::Service {
+                backend,
+                semaphore: Arc::new(Semaphore::new(service_concurrency.max(1))),
+            },
+        };
+        Self { kind }
     }
 
-    fn submit(
+    pub(crate) async fn infer_with_cancel(
         &self,
         images: Vec<DynamicImage>,
         cancel: CancellationToken,
-    ) -> Result<Vec<Vec<Detection>>> {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let mut request = Request {
+    ) -> Result<ArrayRef> {
+        match &self.kind {
+            SchedulerKind::VisionQl { max_batch, .. } if images.len() > *max_batch => {
+                let mut images = images.into_iter();
+                let mut outputs = Vec::new();
+                loop {
+                    let chunk = images.by_ref().take(*max_batch).collect::<Vec<_>>();
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    outputs.push(self.submit_visionql(chunk, cancel.clone()).await?);
+                }
+                concat_arrays(&outputs)
+            }
+            SchedulerKind::VisionQl { .. } => self.submit_visionql(images, cancel).await,
+            SchedulerKind::Service { backend, semaphore } => {
+                let permit = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
+                    }
+                    permit = Arc::clone(semaphore).acquire_owned() => permit.map_err(|_| {
+                        VqlError::new(ErrorCode::Execution, "model service scheduler stopped")
+                    })?,
+                };
+                let result = backend.infer(images, cancel).await;
+                drop(permit);
+                result
+            }
+        }
+    }
+
+    async fn submit_visionql(
+        &self,
+        images: Vec<DynamicImage>,
+        cancel: CancellationToken,
+    ) -> Result<ArrayRef> {
+        let SchedulerKind::VisionQl { sender, .. } = &self.kind else {
+            unreachable!("VisionQL submission requires a VisionQL-owned scheduler");
+        };
+        let (response, receiver) = oneshot::channel();
+        let request = Request {
             images,
-            response: sender,
+            response,
             cancel: cancel.clone(),
         };
-        loop {
-            if cancel.is_cancelled() {
+        tokio::select! {
+            _ = cancel.cancelled() => {
                 return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
             }
-            match self.sender.try_send(request) {
-                Ok(()) => break,
-                Err(TrySendError::Full(returned)) => {
-                    request = returned;
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    return Err(VqlError::new(
-                        ErrorCode::Execution,
-                        "model scheduler stopped",
-                    ));
-                }
-            }
+            result = sender.send(request) => result.map_err(|_| {
+                VqlError::new(ErrorCode::Execution, "model scheduler stopped")
+            })?,
         }
-        loop {
-            if cancel.is_cancelled() {
-                return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
-            }
-            match receiver.recv_timeout(Duration::from_millis(5)) {
-                Ok(result) => return result,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(VqlError::new(
-                        ErrorCode::Execution,
-                        "model scheduler dropped response",
-                    ));
-                }
-            }
+        tokio::select! {
+            _ = cancel.cancelled() => Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled")),
+            result = receiver => result.map_err(|_| {
+                VqlError::new(ErrorCode::Execution, "model scheduler dropped response")
+            })?,
         }
     }
 }
 
-fn drive(
-    receiver: Receiver<Request>,
+fn concat_arrays(arrays: &[ArrayRef]) -> Result<ArrayRef> {
+    if arrays.len() == 1 {
+        return Ok(Arc::clone(&arrays[0]));
+    }
+    let arrays = arrays
+        .iter()
+        .map(|array| array.as_ref() as &dyn Array)
+        .collect::<Vec<_>>();
+    arrow::compute::concat(&arrays).map_err(|error| {
+        VqlError::new(
+            ErrorCode::Execution,
+            "failed to concatenate model batch output",
+        )
+        .with_source(error)
+    })
+}
+
+async fn drive(
+    mut receiver: mpsc::Receiver<Request>,
     backend: Arc<dyn ModelBackend>,
     max_batch: usize,
     max_wait: Duration,
@@ -122,9 +184,9 @@ fn drive(
     loop {
         let first = match pending.take() {
             Some(request) => request,
-            None => match receiver.recv() {
-                Ok(request) => request,
-                Err(_) => break,
+            None => match receiver.recv().await {
+                Some(request) => request,
+                None => break,
             },
         };
         if first.cancel.is_cancelled() {
@@ -138,20 +200,17 @@ fn drive(
             if remaining.is_zero() {
                 break;
             }
-            match receiver.recv_timeout(remaining) {
-                Ok(request) => {
-                    if request.cancel.is_cancelled() {
-                        continue;
-                    }
-                    if rows + request.images.len() > max_batch {
-                        pending = Some(request);
-                        break;
-                    } else {
-                        rows += request.images.len();
-                        requests.push(request);
-                    }
+            match tokio::time::timeout(remaining, receiver.recv()).await {
+                Ok(Some(request)) if request.cancel.is_cancelled() => {}
+                Ok(Some(request)) if rows + request.images.len() > max_batch => {
+                    pending = Some(request);
+                    break;
                 }
-                Err(_) => break,
+                Ok(Some(request)) => {
+                    rows += request.images.len();
+                    requests.push(request);
+                }
+                Ok(None) | Err(_) => break,
             }
         }
         let sizes = requests
@@ -162,11 +221,13 @@ fn drive(
             .iter_mut()
             .flat_map(|request| std::mem::take(&mut request.images))
             .collect();
-        match backend.infer(images) {
+        let output = backend.infer(images, CancellationToken::new()).await;
+        match output {
             Ok(output) if output.len() == rows => {
-                let mut output = output.into_iter();
+                let mut offset = 0;
                 for (request, size) in requests.into_iter().zip(sizes) {
-                    let values = output.by_ref().take(size).collect();
+                    let values = output.slice(offset, size);
+                    offset += size;
                     let _ = request.response.send(Ok(values));
                 }
             }
@@ -195,119 +256,218 @@ fn drive(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use arrow::array::ListArray;
+    use async_trait::async_trait;
+
     use super::*;
     use crate::models::backend::MockBackend;
-    use std::sync::Mutex;
+    use crate::models::postprocess::mock_detection_output;
 
     #[derive(Debug)]
     struct RecordingBackend {
         batch_sizes: Arc<Mutex<Vec<usize>>>,
     }
 
+    #[async_trait]
     impl ModelBackend for RecordingBackend {
-        fn infer(&self, images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>> {
+        async fn infer(
+            &self,
+            images: Vec<DynamicImage>,
+            _cancel: CancellationToken,
+        ) -> Result<ArrayRef> {
             self.batch_sizes.lock().unwrap().push(images.len());
-            Ok(images.into_iter().map(|_| Vec::new()).collect())
+            Ok(mock_detection_output("person", images.len()))
         }
     }
 
-    #[test]
-    fn scheduler_preserves_batch_order() {
-        let scheduler = ModelScheduler::new(
+    #[tokio::test]
+    async fn scheduler_preserves_batch_order() {
+        let scheduler = ModelScheduler::with_config(
             Arc::new(MockBackend::new("person")),
+            BatchingOwner::VisionQl,
             8,
             Duration::from_millis(1),
             4,
+            1,
         );
-        let images = vec![DynamicImage::new_rgb8(1, 1), DynamicImage::new_rgb8(2, 2)];
-        let result = scheduler.infer(images).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0][0].label, "person");
-        assert_eq!(result[1][0].confidence, 0.9);
+        let output = scheduler
+            .infer_with_cancel(
+                vec![DynamicImage::new_rgb8(1, 1), DynamicImage::new_rgb8(2, 2)],
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.len(), 2);
+        assert!(output.as_any().is::<ListArray>());
     }
 
-    #[test]
-    fn scheduler_drops_cancelled_work() {
-        let scheduler = ModelScheduler::new(
+    #[tokio::test]
+    async fn scheduler_drops_cancelled_work() {
+        let scheduler = ModelScheduler::with_config(
             Arc::new(MockBackend::new("person")),
+            BatchingOwner::VisionQl,
             8,
             Duration::from_millis(1),
+            1,
             1,
         );
         let cancel = CancellationToken::new();
         cancel.cancel();
         let error = scheduler
             .infer_with_cancel(vec![DynamicImage::new_rgb8(1, 1)], cancel)
+            .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::QueryCancelled);
     }
 
-    #[test]
-    fn scheduler_never_exceeds_max_batch() {
+    #[tokio::test]
+    async fn scheduler_never_exceeds_max_batch() {
         let batch_sizes = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = ModelScheduler::new(
+        let scheduler = ModelScheduler::with_config(
             Arc::new(RecordingBackend {
                 batch_sizes: Arc::clone(&batch_sizes),
             }),
+            BatchingOwner::VisionQl,
             3,
             Duration::from_millis(1),
             4,
+            1,
         );
         let images = (0..8)
             .map(|_| DynamicImage::new_rgb8(1, 1))
             .collect::<Vec<_>>();
-
-        let output = scheduler.infer(images).unwrap();
-
+        let output = scheduler
+            .infer_with_cancel(images, CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(output.len(), 8);
         assert_eq!(*batch_sizes.lock().unwrap(), vec![3, 3, 2]);
     }
 
-    #[test]
-    fn scheduler_rejects_backend_cardinality_mismatch() {
+    #[tokio::test]
+    async fn scheduler_rejects_backend_cardinality_mismatch() {
         #[derive(Debug)]
         struct EmptyBackend;
 
+        #[async_trait]
         impl ModelBackend for EmptyBackend {
-            fn infer(&self, _images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>> {
-                Ok(Vec::new())
+            async fn infer(
+                &self,
+                _images: Vec<DynamicImage>,
+                _cancel: CancellationToken,
+            ) -> Result<ArrayRef> {
+                Ok(mock_detection_output("person", 0))
             }
         }
 
-        let scheduler = ModelScheduler::new(Arc::new(EmptyBackend), 8, Duration::from_millis(1), 1);
+        let scheduler = ModelScheduler::with_config(
+            Arc::new(EmptyBackend),
+            BatchingOwner::VisionQl,
+            8,
+            Duration::from_millis(1),
+            1,
+            1,
+        );
         let error = scheduler
-            .infer(vec![DynamicImage::new_rgb8(1, 1)])
+            .infer_with_cancel(vec![DynamicImage::new_rgb8(1, 1)], CancellationToken::new())
+            .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Execution);
         assert!(error.message.contains("0 rows for 1 inputs"));
     }
 
-    #[test]
-    fn scheduler_cancellation_does_not_wait_for_blocking_backend() {
+    #[tokio::test]
+    async fn cancellation_does_not_wait_for_blocking_backend() {
         #[derive(Debug)]
         struct SlowBackend;
 
+        #[async_trait]
         impl ModelBackend for SlowBackend {
-            fn infer(&self, images: Vec<DynamicImage>) -> Result<Vec<Vec<Detection>>> {
-                std::thread::sleep(Duration::from_millis(500));
-                Ok(images.into_iter().map(|_| Vec::new()).collect())
+            async fn infer(
+                &self,
+                images: Vec<DynamicImage>,
+                _cancel: CancellationToken,
+            ) -> Result<ArrayRef> {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok(mock_detection_output("person", images.len()))
             }
         }
 
-        let scheduler = ModelScheduler::new(Arc::new(SlowBackend), 8, Duration::from_millis(1), 1);
+        let scheduler = ModelScheduler::with_config(
+            Arc::new(SlowBackend),
+            BatchingOwner::VisionQl,
+            8,
+            Duration::from_millis(1),
+            1,
+            1,
+        );
         let cancel = CancellationToken::new();
         let trigger = cancel.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
             trigger.cancel();
         });
         let started = Instant::now();
-
         let error = scheduler
             .infer_with_cancel(vec![DynamicImage::new_rgb8(1, 1)], cancel)
+            .await
             .unwrap_err();
-
         assert_eq!(error.code, ErrorCode::QueryCancelled);
         assert!(started.elapsed() < Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn service_owned_scheduler_allows_bounded_overlap() {
+        #[derive(Debug)]
+        struct ConcurrentBackend {
+            active: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ModelBackend for ConcurrentBackend {
+            async fn infer(
+                &self,
+                images: Vec<DynamicImage>,
+                _cancel: CancellationToken,
+            ) -> Result<ArrayRef> {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(active, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                Ok(mock_detection_output("person", images.len()))
+            }
+        }
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let scheduler = Arc::new(ModelScheduler::with_config(
+            Arc::new(ConcurrentBackend {
+                active,
+                peak: Arc::clone(&peak),
+            }),
+            BatchingOwner::Service,
+            16,
+            Duration::ZERO,
+            1,
+            2,
+        ));
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let scheduler = Arc::clone(&scheduler);
+            tasks.push(tokio::spawn(async move {
+                scheduler
+                    .infer_with_cancel(vec![DynamicImage::new_rgb8(1, 1)], CancellationToken::new())
+                    .await
+                    .unwrap()
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
     }
 }

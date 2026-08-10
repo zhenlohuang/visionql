@@ -755,11 +755,55 @@ trait PostProcessor {
 }
 ```
 
+`Engine` owns one crate-private `PipelineRegistry`. The registry maps the versioned `kind` of each stage to a factory; DDL validation and pipeline compilation must both resolve through the same factory instead of repeating `kind` match arms:
+
+```rust
+trait PreProcessorFactory: Send + Sync {
+    fn kind(&self) -> &str;
+    fn supported_types(&self) -> &[ModelType];
+    fn validate(&self, options: &BTreeMap<String, Value>) -> Result<()>;
+    fn build(&self, spec: &ProcessorSpec) -> Result<Arc<dyn PreProcessor>>;
+}
+
+trait RuntimeFactory: Send + Sync {
+    fn kind(&self) -> &str;
+    fn supported_types(&self) -> &[ModelType];
+    fn validate(&self, source: &str, spec: &RuntimeSpec) -> Result<()>;
+    fn build(
+        &self,
+        model: &ModelDef,
+        input: &RuntimeContract,
+        output: &RuntimeContract,
+    ) -> Result<Arc<dyn RuntimeSession>>;
+}
+```
+
+`PostProcessorFactory` follows the PreProcessor factory shape. v0.1 registers `vision.image_tensor@1`, `vision.yolo_e2e@1`, `vision.yolo_raw@1`, `vision.xywh_normalized@1`, `onnxruntime`, and `triton`. Known roadmap-gated Runtime kinds are registered as rejecting factories so their stable `FEATURE_NOT_AVAILABLE` responses do not depend on an unrelated fallback branch. These traits are the future host-injection seam, but no public registration API ships until an independent processor or Runtime requires one.
+
+Each factory owns a serde option type with unknown fields denied. A PreProcessor receives only its input options; a PostProcessor receives only decoding and result-construction options; a Runtime receives only source, protocol, and binding options. Deserialization failures are rendered through the existing `INVALID_OPTION` contract with the complete option path. Options are deserialized once while compiling a pipeline, not once per input batch.
+
 Registration and planning validate every adjacent contract: Model-type input against PreProcessor input, PreProcessor output against Runtime input, Runtime output against PostProcessor input, and PostProcessor output against the canonical Model-type result. No component may rely on an unchecked tensor name, dtype, shape, or response field.
+
+Runtime tensors use Arrow's canonical `arrow.fixed_shape_tensor` extension type instead of a private dtype-and-buffer enum. The outer Arrow array length is the batch dimension; each slot is one equal-shape tensor backed by a non-nullable `FixedSizeList`, while the extension `Field` records element dtype, per-row shape, optional dimension names, and layout permutation. `TensorBatch` therefore carries the `FieldRef` together with its array so extension metadata cannot be separated from the buffer. Concrete batches contain only positive fixed dimensions after the batch axis; wildcard dimensions remain a contract-only concept.
+
+The image PreProcessor emits `Float32` tensors with `C`, `H`, and `W` dimension names. ONNX Runtime borrows the contiguous Arrow values buffer for input execution; runtime output is wrapped back into a fixed-shape tensor before contract validation and PostProcessor execution. Triton HTTP/JSON derives the KServe datatype and shape from the same Arrow value and serializes its inner contiguous slice. HTTP serialization and Runtime-owned output memory may still require copies; zero-copy is guaranteed only where the consumer accepts the Arrow buffer lifetime directly. Unsupported Arrow element types fail at the Runtime protocol boundary rather than narrowing the shared processor interfaces.
 
 A CV PreProcessor resolves and decodes `IMAGE`, converts color and dtype, resizes/crops/pads, normalizes, changes layout, and constructs named tensor batches. It returns row-aligned context such as original dimensions and letterbox transforms. Text PreProcessors construct a protocol request or invoke a tokenizer in an isolated worker while enforcing prompt and payload limits.
 
 A PostProcessor converts Runtime output to the canonical Arrow result. Detection implementations decode tensors, apply activation or NMS only when required, resolve labels, and restore coordinates. Embedding implementations validate dimension `n` and declared pooling/normalization. Generation implementations validate the protocol response and return bounded final text. Inference-call parameters are defined by Model `TYPE`; processors may consume only that allowlist.
+
+The compiled PreProcessor, Runtime session, PostProcessor, and scheduler form one `CompiledPipeline` cache entry keyed by the Model semantic fingerprint. `ModelRuntime` removes entries whose fingerprints are no longer present in the Catalog head; in-flight queries retain their snapshot-owned `Arc`, while removing the cache owner closes the scheduler queue and releases the Runtime session after the last query finishes. Dropping and recreating a Model therefore cannot reuse an obsolete session.
+
+The v0.1 implementation keeps processor semantics out of Runtime backends:
+
+```text
+models/
+  registry.rs                 # factory traits and PipelineRegistry
+  preprocess/image_tensor.rs  # vision.image_tensor@1
+  postprocess/yolo.rs         # YOLO decoding, NMS, coordinate restore, Arrow output
+  ort_backend.rs              # ONNX Runtime session and graph-contract validation
+  triton_backend.rs           # KServe V2 HTTP session and metadata validation
+```
 
 ### 10.2 Runtime Registry and Batching Ownership
 
@@ -774,7 +818,9 @@ A Runtime loads an artifact bundle or binds a service endpoint. It deals only in
 | `sglang` | SGLang endpoint and served model | `openai` | SGLang owns continuous batching; VisionQL owns bounded concurrency and backpressure | Roadmap-gated |
 | `llama_cpp` | Local GGUF bundle or llama-server endpoint | omitted for embedded execution; `openai` for llama-server | llama.cpp owns tokenization and generation | Roadmap-gated |
 
-Triton uses the selected KServe V2 protocol and validates server model metadata against the compiled processor contracts before inference. v0.1 implements the HTTP/JSON tensor contract; gRPC uses the same Runtime boundary when scheduled. VisionQL does not manage Triton repositories or deployments. The vLLM and SGLang integrations are separate Runtime implementations even when both use the OpenAI-compatible protocol: discovery, capabilities, errors, cancellation, and response validation remain implementation-specific.
+ONNX Runtime validates graph input/output names, dtypes, and static dimensions against the compiled processor contracts when the session is built. Its blocking `run` executes through Tokio's blocking pool and retains one session mutex because VisionQL-owned batching already serializes calls per session.
+
+Triton uses the selected KServe V2 protocol and validates server model metadata against the compiled processor contracts before inference. v0.1 implements the asynchronous HTTP/JSON tensor contract; gRPC uses the same Runtime boundary when scheduled. Cancellation drops the in-flight HTTP future. VisionQL does not manage Triton repositories or deployments. The vLLM and SGLang integrations are separate Runtime implementations even when both use the OpenAI-compatible protocol: discovery, capabilities, errors, cancellation, and response validation remain implementation-specific.
 
 Each Runtime reports whether batching is VisionQL-owned or service-owned. VisionQL never places a second dynamic-batching queue in front of Triton, vLLM, SGLang, or llama-server. It still applies bounded concurrency, deadlines, cancellation, memory reservation, and backpressure.
 
@@ -819,7 +865,9 @@ domain Arrow values
 
 The compiled pipeline carries a stable row identifier. It must produce exactly one value, NULL, or row error for every input row and restore input order even when a remote service completes requests out of order. Batch video usually needs no frame arena because read, decode, and preprocessing can be fused inside `InferenceExec`.
 
-For VisionQL-owned batching, each pipeline/session key—Model semantic fingerprint, device, and RuntimeConfig generation—owns one bounded queue. Requests enter weighted-fair `interactive`, `stream`, and `batch` classes and dispatch on `max_batch`, earliest deadline, or `max_wait`. Tensor buffers are preallocated and reused; a full queue awaits capacity and propagates backpressure. Service-owned batching bypasses this queue and uses bounded request concurrency instead.
+For VisionQL-owned batching, each pipeline/session key—Model semantic fingerprint, device, and RuntimeConfig generation—owns one bounded Tokio mpsc queue with per-request oneshot responses. Requests enter weighted-fair `interactive`, `stream`, and `batch` classes and dispatch on `max_batch`, earliest deadline, or `max_wait`. Tensor buffers are preallocated and reused; a full queue awaits capacity and propagates backpressure. Queue submission and response waits use cancellation-aware `select`, never sleep polling.
+
+Service-owned batching bypasses the VisionQL batching queue. Each session instead owns a semaphore for bounded concurrent in-flight requests so the service can observe overlapping submissions and apply its own dynamic batching; awaiting a permit is VisionQL's backpressure boundary. v0.1 centralizes the current limits—16 rows per VisionQL batch, 5 ms maximum wait, 64 queued requests, and 4 service requests—in the scheduler module rather than scattering literals across Runtime construction.
 
 NULL domain inputs produce NULL results. A row-level preprocessing or post-processing error follows `vql.on_error`: NULL by default or query failure in strict mode. A Runtime failure affecting a whole batch is attributed to every affected row before the same policy is applied. Cancellation removes queued work, sends protocol cancellation when supported, discards late responses, and releases decoded images, tensors, request payloads, and output buffers.
 
@@ -1014,6 +1062,7 @@ ADR-010 and ADR-014 are reserved for public-protocol decisions in [proposals/](.
 
 | Date | Change |
 |---|---|
+| 2026-08-10 | Specified the inference pipeline factory registry, typed per-kind options, Arrow fixed-shape runtime tensors, compiled-pipeline lifecycle, and async batching paths |
 | 2026-08-10 | Defined type-owned inference calls, immutable Query Manifests, DataFusion-backed user Functions, and the PreProcessor/Runtime/PostProcessor pipeline |
 | 2026-08-08 | Defined `VQL_HOME`, downloaded-model caching, the separate dataset directory, and scenario-oriented examples; performance testing remains separate |
 | 2026-08-07 | Initial system design |

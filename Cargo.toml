@@ -14,6 +14,7 @@ repository = "https://github.com/visionql/visionql"
 arrow = { version = "=58.3.0", features = ["prettyprint"] }
 arrow-json = "=58.4.0"
 arrow-pyarrow = "=58.3.0"
+arrow-schema = { version = "=58.4.0", features = ["canonical_extension_types"] }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 base64 = "0.22.1"
@@ -22,6 +23,7 @@ clap = { version = "4.5.48", features = ["derive", "env"] }
 ctrlc = "3.5.0"
 datafusion = "=54.1.0"
 ffmpeg-next = "8.1.0"
+fast_image_resize = "6.1.0"
 futures = "0.3.31"
 hf-hub = "0.4.3"
 image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
@@ -37,7 +39,7 @@ serde_json = "1.0.145"
 sha2 = "0.10.9"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
-tokio = { version = "1.47.1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.16"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
