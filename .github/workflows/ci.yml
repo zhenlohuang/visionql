@@ -60,3 +60,64 @@ jobs:
 
       - name: Run unit tests
         run: cargo test --workspace --locked
+
+  coverage:
+    name: Rust test coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install FFmpeg development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang \
+            libavcodec-dev \
+            libavdevice-dev \
+            libavfilter-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libclang-dev \
+            libswresample-dev \
+            libswscale-dev \
+            pkg-config
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM coverage tools
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --locked --html
+
+      - name: Export LCOV report
+        run: cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
+
+      - name: Add coverage summary
+        run: |
+          echo '### Rust test coverage' >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov report --summary-only \
+            | awk 'NR == 1 || /^TOTAL/' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v6
+        with:
+          name: rust-coverage
+          path: |
+            target/llvm-cov/html
+            target/llvm-cov/lcov.info
+          if-no-files-found: error

@@ -43,7 +43,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-CI runs only these three gates on Linux. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
+CI runs these three gates on Linux and records Rust test coverage in a separate job. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
 
 ```bash
 python -m pip install pytest
@@ -51,6 +51,19 @@ python -m pytest -q vql-python/tests
 ```
 
 The default suite does not require downloaded datasets or a real model. Unit tests create isolated temporary directories and use `mock://` models.
+
+### Test coverage
+
+CI uses `cargo-llvm-cov` to publish a line, function, and region coverage summary in the workflow run and attaches browsable HTML plus LCOV reports as the `rust-coverage` artifact. Generate the same report locally from the repository root:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov --workspace --locked --html
+cargo llvm-cov report --summary-only
+```
+
+Open `target/llvm-cov/html/index.html` for file-level results. Coverage is informational rather than a merge threshold. It measures the default Rust workspace suite; real-data SQL cases that skip because fixtures are absent, the ignored real-model test, and Python API tests are not represented unless they are run separately.
 
 ### Integration tests
 
