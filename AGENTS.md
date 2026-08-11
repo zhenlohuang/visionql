@@ -22,7 +22,7 @@ Use rustfmt defaults (four-space indentation). Follow Rust conventions: `snake_c
 
 ## Testing Guidelines
 
-Place Rust unit tests beside their modules and integration tests under each crate's `tests/`. SQL behavior cases use paired `vql-kernel/tests/sql/**/*.sql` and `.expected.json` files; run them with `cargo test -p vql-kernel --test sql_cases`. Use `VQL_SQL_CASE=models/function` to filter. Golden updates require `VQL_UPDATE_GOLDEN=1` and manual review. There is no numeric coverage threshold; every behavior change or regression fix should add a focused test.
+Place Rust unit tests beside their modules and integration tests under each crate's `tests/`. Anything provable with a synthetic fixture or a `mock://` model belongs in a unit test. `vql-kernel/tests/integration_tests.rs` runs real SQL cases from `tests/{ddl,functions,scenarios}` over `data/datasets` and `data/models/yolo26n.onnx`, registering every main SQL file as an individual Cargo test. Each case has one main `.sql` statement, a `.expected.json` file with exact `schema` and `rows`, and optional `.setup.sql` and `.teardown.sql` sidecars. Run it with `cargo test -p vql-kernel --test integration` and filter with `VQL_TEST_CASE=functions/detect_objects`; it skips when fixtures are absent, and `VQL_INTEGRATION_TEST=1` makes their absence a failure. See `vql-kernel/tests/README.md` before adding a case. There is no numeric coverage threshold; every behavior change or regression fix should add a focused test.
 
 ## Commit & Pull Request Guidelines
 

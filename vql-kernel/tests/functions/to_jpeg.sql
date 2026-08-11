@@ -1,0 +1,3 @@
+SELECT TO_JPEG(image, 80) IS NOT NULL AS encoded
+FROM photos
+WHERE uri LIKE '%/000000000009.jpg';

@@ -1,5 +1,0 @@
-CREATE FUNCTION py_double(x BIGINT)
-RETURNS BIGINT
-LANGUAGE PYTHON AS 'ops:double';
-
-SELECT py_double(1);

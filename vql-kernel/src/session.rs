@@ -1538,4 +1538,181 @@ mod tests {
         );
         insert.collect().unwrap();
     }
+
+    #[test]
+    fn python_function_without_a_host_reports_python_host_required() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql("CREATE FUNCTION py_double(x BIGINT) RETURNS BIGINT LANGUAGE PYTHON AS 'ops:double'")
+            .unwrap();
+
+        let error = session.sql("SELECT py_double(1)").unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PythonHostRequired);
+        assert!(error.message.contains("py_double"));
+    }
+
+    #[test]
+    fn inference_row_failure_is_null_by_default_and_fails_in_strict_mode() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        std::fs::write(photos.join("broken.png"), b"not an image").unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
+                photos.display()
+            ))
+            .unwrap();
+        // A Triton endpoint model decodes the IMAGE before it would issue a request, so the
+        // decode failure below is reached without any network access. `mock://` cannot stand in
+        // here: it skips decoding entirely and always answers with a synthetic detection.
+        session
+            .sql(
+                "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'endpoint://http://127.0.0.1:9' \
+                 WITH (runtime.kind = 'triton', runtime.protocol = 'kserve_v2_http', \
+                 runtime.model_name = 'detector')",
+            )
+            .unwrap();
+
+        let query = session
+            .sql(
+                "SELECT COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.5) AS people \
+                 FROM photos",
+            )
+            .unwrap();
+        let batches = query.collect().unwrap();
+        assert!(
+            batches[0].column(0).is_null(0),
+            "a row that fails inference must yield NULL"
+        );
+        assert_eq!(query.metrics().unwrap().error_rows(), 1);
+
+        session.sql("SET vql.on_error='fail'").unwrap();
+        let error = session
+            .sql("SELECT DETECT_OBJECTS('detector', image) FROM photos")
+            .unwrap()
+            .collect()
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Execution);
+        assert!(
+            error
+                .to_string()
+                .contains("failed to decode model IMAGE input")
+        );
+    }
+
+    #[test]
+    fn table_lifecycle_shows_describes_and_drops() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
+                photos.display()
+            ))
+            .unwrap();
+
+        let shown = session.sql("SHOW TABLES").unwrap().collect().unwrap();
+        assert_eq!(
+            shown[0]
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| (
+                    field.name().clone(),
+                    field.data_type().clone(),
+                    field.is_nullable()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("table_name".to_owned(), DataType::Utf8, false),
+                ("provider".to_owned(), DataType::Utf8, false),
+                ("location".to_owned(), DataType::Utf8, false),
+                ("revision".to_owned(), DataType::Int64, false),
+            ]
+        );
+        assert_eq!(shown[0].num_rows(), 1);
+        let table_names = shown[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let providers = shown[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let locations = shown[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let revisions = shown[0]
+            .column(3)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(table_names.value(0), "photos");
+        assert_eq!(providers.value(0), "IMAGES");
+        assert_eq!(
+            locations.value(0),
+            photos.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(revisions.value(0), 1);
+
+        let described = session.sql("DESCRIBE photos").unwrap().collect().unwrap();
+        let columns = described[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        let data_types = described[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let nullable = described[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            (0..described[0].num_rows())
+                .map(|row| (
+                    columns.value(row),
+                    data_types.value(row),
+                    nullable.value(row)
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("uri", "Utf8", "false"),
+                (
+                    "image",
+                    "Struct(\"uri\": Utf8, \"locator\": Utf8, \"pts_ms\": Int64, \"frame_id\": UInt64, \"encoded\": Binary, \"encoding\": Utf8, \"width\": Int32, \"height\": Int32, \"arena_id\": UInt64, \"arena_slot\": UInt32)",
+                    "false"
+                ),
+                ("width", "Int32", "true"),
+                ("height", "Int32", "true"),
+                ("captured_at", "Timestamp(ms, \"UTC\")", "true"),
+            ]
+        );
+
+        session.sql("DROP TABLE photos").unwrap();
+
+        let shown = session.sql("SHOW TABLES").unwrap().collect().unwrap();
+        assert_eq!(
+            shown.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            0,
+            "a dropped table must disappear from SHOW TABLES"
+        );
+    }
 }

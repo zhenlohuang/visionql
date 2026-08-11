@@ -38,5 +38,10 @@ tracing.workspace = true
 ort = { workspace = true, features = ["coreml"] }
 
 [dev-dependencies]
-arrow-json.workspace = true
+libtest-mimic.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration_tests.rs"
+harness = false

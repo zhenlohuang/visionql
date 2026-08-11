@@ -50,41 +50,58 @@ python -m pip install pytest
 python -m pytest -q vql-python/tests
 ```
 
-The default suite does not require downloaded datasets or a real model. Test fixtures create isolated temporary `${TEST_DATA}` and `${VQL_HOME}` directories.
+The default suite does not require downloaded datasets or a real model. Unit tests create isolated temporary directories and use `mock://` models.
 
-### SQL behavior cases
+### Integration tests
 
-Run every executable SQL case with:
-
-```bash
-cargo test -p vql-kernel --test sql_cases
-```
-
-Narrow the suite while iterating:
+`vql-kernel/tests/integration_tests.rs` runs real SQL over the example datasets and the exported YOLO26 model. Fetch the fixtures once:
 
 ```bash
-VQL_SQL_CASE=models/function cargo test -p vql-kernel --test sql_cases
+python scripts/fetch_datasets.py          # about 10 MB
+python scripts/export_yolo26.py --size n  # data/models/yolo26n.onnx
 ```
 
-Golden JSON updates must be explicit:
+Then run the suite, optionally narrowing it while iterating:
 
 ```bash
-VQL_UPDATE_GOLDEN=1 VQL_SQL_CASE=models/function \
-  cargo test -p vql-kernel --test sql_cases
+cargo test -p vql-kernel --test integration
+VQL_TEST_CASE=functions/detect_objects cargo test -p vql-kernel --test integration
 ```
 
-Review every changed `.expected.json` file before submitting it. Do not update a golden merely to make an unexplained behavior change pass.
+Without the fixtures every case reports a skip and passes, which keeps `cargo test --workspace` green on a fresh clone. Set `VQL_INTEGRATION_TEST=1` to turn a missing fixture into a failure instead.
 
-### Real-model test
+Every main SQL file appears as an individual test in Cargo output; use `cargo test -p vql-kernel --test integration -- --list` to list them.
 
-The real YOLO26 test is optional and ignored by the default suite:
+A case has one main SQL statement, an expected result, and optional setup and teardown sidecars:
+
+```text
+detect_objects.setup.sql
+detect_objects.sql
+detect_objects.expected.json
+detect_objects.teardown.sql
+```
+
+Expected JSON contains the exact schema and rows:
+
+```json
+{
+  "schema": ["found BOOLEAN"],
+  "rows": [[true]]
+}
+```
+
+Cases are grouped under `ddl/`, `functions/`, and `scenarios/`. Keep one purpose in each main statement, put prerequisite DDL in `*.setup.sql`, and put cleanup in `*.teardown.sql`. Return stable values that can be compared exactly. Read `vql-kernel/tests/README.md` before adding a case.
+
+If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
+
+### Real-model unit test
+
+One ignored unit test exercises the ONNX pipeline directly:
 
 ```bash
 VQL_YOLO26_ONNX=./data/models/yolo26n.onnx \
   cargo test real_yolo26_onnx_e2e -- --ignored
 ```
-
-If a change affects ONNX preprocessing, batching, or postprocessing, state whether this gate ran and which model artifact was used.
 
 ## Git hooks
 

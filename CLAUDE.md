@@ -22,9 +22,9 @@ cargo run -p vql-cli -- explain "SELECT 1"
 Tests:
 
 ```bash
-cargo test -p vql-kernel --test sql_cases                        # SQL golden suite
-VQL_SQL_CASE=models/typed_detection cargo test -p vql-kernel --test sql_cases   # filter by path substring
-VQL_UPDATE_GOLDEN=1 VQL_SQL_CASE=... cargo test -p vql-kernel --test sql_cases  # rewrite goldens
+cargo test -p vql-kernel --test integration                          # integration suite over real data
+VQL_TEST_CASE=functions/detect_objects cargo test -p vql-kernel --test integration # filter cases
+VQL_INTEGRATION_TEST=1 cargo test -p vql-kernel --test integration   # fail instead of skip when fixtures are missing
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
 VQL_YOLO26_ONNX=./data/models/yolo26n.onnx cargo test real_yolo26_onnx_e2e -- --ignored
 ```
@@ -71,11 +71,21 @@ A Model stores a typed `RuntimeSpec`, `PreProcessor` spec, and `PostProcessor` s
 
 ### Error contract
 
-`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL:CODE] message`. Row-level failures (bad image, failed inference) produce NULL result columns and bump `QueryMetrics::error_rows`; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Golden tests compare error codes, so changing a code is a contract change.
+`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL:CODE] message`. Row-level failures (bad image, failed inference) produce NULL result columns and bump `QueryMetrics::error_rows`; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change.
 
 ## Testing model
 
-Rust unit tests live beside their modules (`session.rs` holds the broadest end-to-end ones, using `mock://` models and generated PNGs so they need no downloads). Behavior visible in SQL is tested by paired `vql-kernel/tests/sql/**/{case.sql,case.expected.json}` files; the runner in `tests/sql_cases.rs` gives each case a fresh temp `VQL_HOME` and `${TEST_DATA}` fixture directory, canonicalizes results (binary → `{length, sha256}`, `IMAGE` → `$image` summary, NaN/Inf → `$float`), and stops a case at its first error. Use `${TEST_DATA}` / `${VQL_HOME}` placeholders instead of real paths, and add an explicit `ORDER BY` whenever row order matters. The default suite requires no downloaded datasets, no FFmpeg-dependent fixtures that aren't guarded, and no real model.
+Two layers, split by what each can actually prove.
+
+Rust unit tests live beside their modules and cover everything a synthetic fixture can reach: parser and DDL validation, error codes, catalog lifecycle, plan shape, scheduler batching. `session.rs` holds the broadest ones, using `mock://` models and generated PNGs so they need no downloads. Note that `mock://` never decodes its input, so it cannot exercise decode failures — use a Triton endpoint model for those, as decoding happens before any request.
+
+`vql-kernel/tests/integration_tests.rs` is the only integration target. It uses a dynamic test harness, so every main SQL file appears as an individual Cargo test. Cases are grouped under `tests/{ddl,functions,scenarios}`. Each case has one main `.sql` statement and a `.expected.json` file containing exact `schema` (`"name TYPE"`, in order) and `rows`. When a real-model count can vary by execution provider, return the stable property the case needs to prove, such as `COUNT(*) > 0`.
+
+Use `<case>.setup.sql` for prerequisite objects and `<case>.teardown.sql` for cleanup. Every case gets a fresh catalog and temporary `VQL_HOME`, and the runner executes setup, the main statement, and teardown in order. The runner substitutes `${IMAGES_LOCATION}`, `${VIDEOS_LOCATION}`, and `${MODEL}`. Do not pre-create shared objects or combine unrelated assertions in one query.
+
+The fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`; the suite skips when they are absent, and `VQL_INTEGRATION_TEST=1` turns that into a failure. See `vql-kernel/tests/README.md`.
+
+`cargo test --workspace` therefore stays green on a fresh clone and in CI, which runs no downloads.
 
 ## Docs
 

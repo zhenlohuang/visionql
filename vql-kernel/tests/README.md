@@ -1,36 +1,100 @@
-# vql-kernel SQL tests
+# vql-kernel integration tests
 
-Public SQL behavior is tested with paired files under `tests/sql`:
+The integration suite runs SQL against the downloaded example datasets and the exported YOLO26
+model. Parser, error, catalog, planner, and `mock://` behavior stays in unit tests.
+
+## Run the suite
+
+Fetch the untracked fixtures once:
+
+```bash
+python scripts/fetch_datasets.py
+python scripts/export_yolo26.py --size n
+```
+
+Then run all cases or filter by path:
+
+```bash
+cargo test -p vql-kernel --test integration
+VQL_TEST_CASE=functions/detect_objects cargo test -p vql-kernel --test integration
+```
+
+Every main `.sql` file is registered as an individual test, so the output names each case and the
+summary reports the number of SQL cases rather than one aggregate runner test. List discovered
+cases with `cargo test -p vql-kernel --test integration -- --list`.
+
+The suite skips when fixtures are absent. Set `VQL_INTEGRATION_TEST=1` to make missing fixtures a
+failure.
+
+## Layout
+
+Cases are grouped by SQL-facing behavior:
 
 ```text
-scenario.sql
-scenario.expected.json
+tests/
+├── ddl/
+├── functions/
+├── scenarios/
+├── integration_tests.rs
+└── README.md
 ```
 
-The runner discovers cases recursively, creates an isolated `VQL_HOME` and deterministic test
-data for every case, executes statements in order through `Session::sql`, and compares the
-canonical JSON result. A case stops after its first error, matching script execution semantics.
+- `ddl/` covers one DDL statement per case.
+- `functions/` covers one built-in function per case.
+- `scenarios/` covers a complete user query that crosses several features.
 
-Use `${TEST_DATA}` and `${VQL_HOME}` in SQL and expected JSON instead of machine-specific paths.
-Multi-row queries must use an explicit `ORDER BY` when row order is part of the contract.
+A case consists of one main statement and its expected result. Setup and teardown are optional:
 
-Run all cases:
-
-```bash
-cargo test -p vql-kernel --test sql_cases
+```text
+detect_objects.setup.sql
+detect_objects.sql
+detect_objects.expected.json
+detect_objects.teardown.sql
 ```
 
-Select cases by path substring:
+The runner creates a fresh catalog and `VQL_HOME` for every case, then executes setup, the main
+statement, and teardown in that order. Teardown is still attempted when the main statement fails.
+Isolation prevents one failed case from affecting another; teardown keeps the case lifecycle
+explicit and exercises cleanup SQL.
 
-```bash
-VQL_SQL_CASE=models/function cargo test -p vql-kernel --test sql_cases
+The main `.sql` file must contain exactly one statement. Put all prerequisite DDL in
+`*.setup.sql` and cleanup in `*.teardown.sql`.
+
+## Expected results
+
+Expected JSON has only two fields:
+
+```json
+{
+  "schema": ["found BOOLEAN"],
+  "rows": [[true]]
+}
 ```
 
-Accept intentional result changes:
+Schema entries use `name TYPE`; names, types, values, and row order are exact. Logical VisionQL
+types such as `IMAGE` are reported by their public type rather than their Arrow storage type. When
+a real-model count can vary by execution provider, return the property the case needs to prove,
+such as `COUNT(*) > 0`, instead of snapshotting an incidental count. Add `ORDER BY` whenever row
+order is part of the result.
 
-```bash
-VQL_UPDATE_GOLDEN=1 cargo test -p vql-kernel --test sql_cases
-```
+Main-query result columns must be `BOOLEAN`, integer, floating-point, or `VARCHAR`; cast other
+types before returning them.
 
-The update flag is intentionally explicit. Review every changed expected JSON file before
-committing it.
+## Placeholders
+
+Setup and main SQL can use:
+
+| Placeholder | Value |
+| --- | --- |
+| `${IMAGES_LOCATION}` | `data/datasets/images/coco128/images` |
+| `${VIDEOS_LOCATION}` | `data/datasets/videos/sample-videos` |
+| `${MODEL}` | `data/models/yolo26n.onnx` |
+
+## Adding a case
+
+1. Choose `ddl`, `functions`, or `scenarios` by the behavior under test.
+2. Give the main file one statement and one purpose.
+3. Move object creation and cleanup into setup and teardown sidecars.
+4. Return only the columns needed to prove that purpose.
+5. Return stable values that can be compared exactly.
+6. Run the filtered case before the whole integration target.

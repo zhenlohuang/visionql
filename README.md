@@ -220,11 +220,15 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Run the executable SQL behavior suite directly with:
+Run the integration suite directly with:
 
 ```bash
-cargo test -p vql-kernel --test sql_cases
+cargo test -p vql-kernel --test integration
 ```
+
+Cases are grouped under `vql-kernel/tests/{ddl,functions,scenarios}`. Each has one main SQL
+statement, an expected result, and optional setup and teardown scripts. The suite runs against
+`data/datasets` and `data/models/yolo26n.onnx`, and reports a skip when those fixtures are absent.
 
 Install the Git hooks with [pre-commit](https://pre-commit.com/):
 

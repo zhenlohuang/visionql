@@ -1,8 +1,0 @@
-CREATE TABLE photos
-USING IMAGES LOCATION '${TEST_DATA}/images'
-WITH (recursive = true);
-
-SHOW TABLES;
-DESCRIBE photos;
-DROP TABLE photos;
-SHOW TABLES;
