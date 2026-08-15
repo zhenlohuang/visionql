@@ -25,7 +25,7 @@ This proposal covers Parquet write behavior and restoration of logical types whe
 ## Relationship to the System Design
 
 - Follow the public Sink contract in [design.md](../design.md) §8.4, including registration, validation, cancellation, timeout, bounded buffering, and coordinator-owned retries.
-- Follow the `IMAGE` payload invariants in [design.md](../design.md) §6.2: `arena_id` and `arena_slot` must never be persisted.
+- Follow the `IMAGE` payload invariants in [design.md](../design.md) §6.2: `buffer_id` and `buffer_slot` must never be persisted.
 - Restore logical types according to the Arrow extension-type contract in [design.md](../design.md) §6.1.
 
 ## Testing and Acceptance

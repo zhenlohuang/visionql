@@ -21,8 +21,8 @@ pub fn image_storage_fields() -> Fields {
         Arc::new(Field::new("encoding", DataType::Utf8, true)),
         Arc::new(Field::new("width", DataType::Int32, true)),
         Arc::new(Field::new("height", DataType::Int32, true)),
-        Arc::new(Field::new("arena_id", DataType::UInt64, true)),
-        Arc::new(Field::new("arena_slot", DataType::UInt32, true)),
+        Arc::new(Field::new("buffer_id", DataType::UInt64, true)),
+        Arc::new(Field::new("buffer_slot", DataType::UInt32, true)),
     ])
 }
 
@@ -63,8 +63,8 @@ pub struct ImageRef {
     pub encoding: Option<String>,
     pub width: Option<i32>,
     pub height: Option<i32>,
-    pub arena_id: Option<u64>,
-    pub arena_slot: Option<u32>,
+    pub buffer_id: Option<u64>,
+    pub buffer_slot: Option<u32>,
 }
 
 impl ImageRef {
@@ -83,8 +83,31 @@ impl ImageRef {
             encoding: None,
             width,
             height,
-            arena_id: None,
-            arena_slot: None,
+            buffer_id: None,
+            buffer_slot: None,
+        }
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    pub(crate) fn frame_buffer(
+        uri: impl Into<String>,
+        frame_id: u64,
+        width: i32,
+        height: i32,
+        buffer_id: u64,
+        buffer_slot: u32,
+    ) -> Self {
+        Self {
+            uri: Some(uri.into()),
+            locator: None,
+            pts_ms: None,
+            frame_id: Some(frame_id),
+            encoded: None,
+            encoding: None,
+            width: Some(width),
+            height: Some(height),
+            buffer_id: Some(buffer_id),
+            buffer_slot: Some(buffer_slot),
         }
     }
 }
@@ -154,16 +177,16 @@ impl ImageRefBuilder {
                 .map(|value| value.height)
                 .collect::<Vec<_>>(),
         );
-        let arena_id = UInt64Array::from(
+        let buffer_id = UInt64Array::from(
             self.values
                 .iter()
-                .map(|value| value.arena_id)
+                .map(|value| value.buffer_id)
                 .collect::<Vec<_>>(),
         );
-        let arena_slot = UInt32Array::from(
+        let buffer_slot = UInt32Array::from(
             self.values
                 .iter()
-                .map(|value| value.arena_slot)
+                .map(|value| value.buffer_slot)
                 .collect::<Vec<_>>(),
         );
 
@@ -178,8 +201,8 @@ impl ImageRefBuilder {
                 Arc::new(encoding),
                 Arc::new(width),
                 Arc::new(height),
-                Arc::new(arena_id),
-                Arc::new(arena_slot),
+                Arc::new(buffer_id),
+                Arc::new(buffer_slot),
             ],
             None,
         )

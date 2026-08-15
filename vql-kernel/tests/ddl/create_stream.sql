@@ -1,0 +1,8 @@
+CREATE STREAM cam_entrance
+FROM 'rtsp://127.0.0.1:8554/main'
+WITH (
+  fps = 5,
+  event_time = 'capture_time',
+  watermark = INTERVAL '2' SECOND,
+  transport = 'tcp'
+);

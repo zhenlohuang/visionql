@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryBuilder, StringArray, StringBuilder, StructArray,
+    UInt32Array, UInt64Array,
 };
+use arrow::record_batch::RecordBatch;
 
 use crate::catalog::{CatalogStore, TableProviderKind};
 use crate::media::{DecodedFrame, MediaRuntime};
-use crate::types::parse_locator;
+use crate::types::{is_image_field, parse_locator};
 use crate::{ErrorCode, Result, VqlError};
 
 const DEFAULT_JPEG_QUALITY: u8 = 85;
@@ -36,6 +38,8 @@ impl ImageEncoder {
                 VqlError::new(ErrorCode::Execution, "IMAGE encoded bytes are invalid")
                     .with_source(error)
             })?
+        } else if let Some(frame) = self.load_frame_buffer(images, row)? {
+            decoded_image(frame)?
         } else {
             self.load_reference(images, row)?
         };
@@ -49,6 +53,29 @@ impl ImageEncoder {
         Ok(Some(output))
     }
 
+    fn load_frame_buffer(&self, images: &StructArray, row: usize) -> Result<Option<DecodedFrame>> {
+        let buffer_ids = images
+            .column(8)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .ok_or_else(|| {
+                VqlError::new(ErrorCode::Internal, "IMAGE buffer_id field is invalid")
+            })?;
+        let buffer_slots = images
+            .column(9)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt32Array>()
+            .ok_or_else(|| {
+                VqlError::new(ErrorCode::Internal, "IMAGE buffer_slot field is invalid")
+            })?;
+        if buffer_ids.is_null(row) || buffer_slots.is_null(row) {
+            return Ok(None);
+        }
+        self.media
+            .resolve_buffered_frame(buffer_ids.value(row), buffer_slots.value(row))
+            .map(Some)
+    }
+
     fn load_reference(&self, images: &StructArray, row: usize) -> Result<image::DynamicImage> {
         let locators = images
             .column(1)
@@ -58,7 +85,7 @@ impl ImageEncoder {
         if locators.is_null(row) {
             return Err(VqlError::new(
                 ErrorCode::Execution,
-                "IMAGE has neither encoded bytes nor a locator",
+                "IMAGE has neither encoded bytes, a frame buffer slot, nor a locator",
             ));
         }
         let locator = parse_locator(locators.value(row))?;
@@ -114,11 +141,44 @@ pub(crate) fn materialize_encoded_images(
     let mut columns = images.columns().to_vec();
     columns[4] = Arc::new(encoded.finish());
     columns[5] = Arc::new(encoding.finish());
+    columns[8] = Arc::new(UInt64Array::from(vec![None; images.len()]));
+    columns[9] = Arc::new(UInt32Array::from(vec![None; images.len()]));
     Ok(Arc::new(StructArray::new(
         crate::types::image_storage_fields(),
         columns,
         images.nulls().cloned(),
     )))
+}
+
+pub(crate) fn materialize_batch_images(
+    catalog: Arc<CatalogStore>,
+    media: Arc<MediaRuntime>,
+    batch: RecordBatch,
+    fail_on_error: bool,
+) -> Result<RecordBatch> {
+    let mut columns = batch.columns().to_vec();
+    for (index, field) in batch.schema().fields().iter().enumerate() {
+        if !is_image_field(field) {
+            continue;
+        }
+        let images = columns[index]
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or_else(|| VqlError::new(ErrorCode::Internal, "IMAGE column is not StructArray"))?;
+        columns[index] = materialize_encoded_images(
+            Arc::clone(&catalog),
+            Arc::clone(&media),
+            images,
+            fail_on_error,
+        )?;
+    }
+    RecordBatch::try_new(batch.schema(), columns).map_err(|error| {
+        VqlError::new(
+            ErrorCode::Execution,
+            "failed to materialize streaming IMAGE output",
+        )
+        .with_source(error)
+    })
 }
 
 fn resolved_media_path(root: &str, relative: &str) -> Result<PathBuf> {

@@ -26,7 +26,7 @@ cargo test -p vql-kernel --test integration                          # integrati
 VQL_TEST_CASE=functions/image_detection cargo test -p vql-kernel --test integration # filter cases
 VQL_INTEGRATION_TEST=1 cargo test -p vql-kernel --test integration   # fail instead of skip when fixtures are missing
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
-VQL_YOLO26_ONNX=./data/models/yolo26n.onnx cargo test real_yolo26_onnx_e2e -- --ignored
+VQL_TEST_CASE=scenarios/detect_objects_in_mixed_size_image_batch cargo test -p vql-kernel --test integration --locked
 ```
 
 Python (`vql-python` is a PyO3/Maturin extension, not a pure-Python package):
@@ -57,7 +57,7 @@ Three crates: `vql-kernel` (everything), `vql-cli` (clap + reedline shell), `vql
 
 **Model calls are plan nodes, not row UDFs.** A Model type owns a fixed marker such as `IMAGE_DETECTION`; its first argument is a literal Model name resolved from the query's `DefinitionSnapshot`. `planner/inference.rs` validates type and semantic constants, then lifts every call into an `InferenceNode` above the input. Identical calls are deduplicated by operation, Model fingerprint, invocation fingerprint, and input expression, but only for immutable Models. `InferenceExec` uses the `PreProcessor → RuntimeSession → PostProcessor` pipeline: VisionQL batches local ONNX Runtime work, while Triton owns dynamic batching for KServe V2 requests. Tests assert on `InferenceNode` / `InferenceExec` in the plan text — that is the contract.
 
-**`IMAGE` carries references, not pixels.** `IMAGE` is an Arrow `Struct` (`types/image.rs`) with `ARROW:extension:name = visionql.image` metadata and ten nullable fields; the three payload shapes are *referenced* (`uri` + `locator`), *arena* (`arena_id`/`arena_slot`, in-process only), and *encoded* (`encoded` + `encoding`, used at process boundaries such as Python and JSON). Scans never decode. Decoding is triggered only by an explicit consumer such as inference preprocessing or a Python UDF, and `MediaRuntime` counters exist so tests can assert that a metadata-only query decoded zero frames. Preserving that property is a load-bearing part of nearly every media change.
+**`IMAGE` carries references, not pixels.** `IMAGE` is an Arrow `Struct` (`types/image.rs`) with `ARROW:extension:name = visionql.image` metadata and ten nullable fields; the three payload shapes are *referenced* (`uri` + `locator`), *buffered* (`buffer_id`/`buffer_slot`, in-process only), and *encoded* (`encoded` + `encoding`, used at process boundaries such as Python and JSON). Scans never decode. Decoding is triggered only by an explicit consumer such as inference preprocessing or a Python UDF, and `MediaRuntime` counters exist so tests can assert that a metadata-only query decoded zero frames. Preserving that property is a load-bearing part of nearly every media change.
 
 ### Catalog
 

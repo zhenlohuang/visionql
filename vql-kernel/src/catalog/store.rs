@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::migrations;
 use super::objects::{
-    FunctionDef, ModelDef, ObjectKind, SinkDef, TableDef, decode_schema, encode_schema,
+    FunctionDef, ModelDef, ObjectKind, SinkDef, StreamDef, TableDef, decode_schema, encode_schema,
 };
 use super::snapshot::{DefinitionSnapshot, SnapshotObject, SnapshotTable};
 use crate::{ErrorCode, Result, VqlError};
@@ -35,8 +35,8 @@ impl CatalogStore {
         let transaction = connection.transaction()?;
         let exists = transaction
             .query_row(
-                "SELECT 1 FROM objects WHERE namespace='relation' AND kind=?1 AND name=?2",
-                params![kind, name],
+                "SELECT 1 FROM objects WHERE namespace='relation' AND name=?1",
+                params![name],
                 |_| Ok(()),
             )
             .optional()?
@@ -115,14 +115,36 @@ impl CatalogStore {
         }
         drop(rows);
         drop(statement);
+        let streams = load_objects::<StreamDef>(&connection, "relation", "stream")?;
         let models = load_objects::<ModelDef>(&connection, "model", "model")?;
         let functions = load_objects::<FunctionDef>(&connection, "function", "function")?;
         let sinks = load_objects::<SinkDef>(&connection, "sink", "sink")?;
-        Ok(DefinitionSnapshot::new(tables, models, functions, sinks))
+        Ok(DefinitionSnapshot::new(
+            tables, streams, models, functions, sinks,
+        ))
     }
 
     pub(crate) fn create_model(&self, definition: &ModelDef) -> Result<i64> {
         self.create_object("model", ObjectKind::Model, &definition.name, definition)
+    }
+
+    pub(crate) fn create_stream(&self, definition: &StreamDef) -> Result<i64> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        ensure_relation_absent(&transaction, &definition.name)?;
+        let revision = insert_object(
+            &transaction,
+            "relation",
+            ObjectKind::Stream,
+            &definition.name,
+            definition,
+        )?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
+    pub(crate) fn drop_stream(&self, name: &str) -> Result<i64> {
+        self.drop_object("relation", ObjectKind::Stream, name)
     }
 
     pub(crate) fn create_function(&self, definition: &FunctionDef) -> Result<i64> {
@@ -239,6 +261,24 @@ fn ensure_absent(
     Ok(())
 }
 
+fn ensure_relation_absent(transaction: &rusqlite::Transaction<'_>, name: &str) -> Result<()> {
+    let name = name.to_ascii_lowercase();
+    let exists = transaction
+        .query_row(
+            "SELECT kind FROM objects WHERE namespace='relation' AND name=?1",
+            [&name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(kind) = exists {
+        return Err(VqlError::new(
+            ErrorCode::AlreadyExists,
+            format!("relation '{name}' already exists as {kind}"),
+        ));
+    }
+    Ok(())
+}
+
 fn drop_object_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     namespace: &str,
@@ -314,7 +354,9 @@ fn load_objects<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{ObjectKind, TableProviderKind};
+    use crate::catalog::{
+        EventTimePolicy, ObjectKind, RtspTransport, StreamDef, TableProviderKind,
+    };
     use crate::connectors::images::images_schema;
     use tempfile::tempdir;
 
@@ -364,5 +406,47 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::AlreadyExists);
         assert_eq!(catalog.revision_count(ObjectKind::Table).unwrap(), 1);
+    }
+
+    #[test]
+    fn stream_reopens_and_shares_the_relation_namespace() {
+        let temp = tempdir().unwrap();
+        let catalog = CatalogStore::open(&temp.path().join("catalog.db")).unwrap();
+        let stream = StreamDef {
+            name: "entrance".to_owned(),
+            endpoint: "rtsp://camera/live".to_owned(),
+            fps: 5.0,
+            event_time: EventTimePolicy::CaptureTime,
+            watermark_delay_ms: 2_000,
+            transport: RtspTransport::Tcp,
+        };
+        catalog.create_stream(&stream).unwrap();
+        assert_eq!(
+            catalog
+                .snapshot()
+                .unwrap()
+                .stream("ENTRANCE")
+                .unwrap()
+                .definition,
+            stream
+        );
+
+        let table = TableDef {
+            name: "entrance".to_owned(),
+            provider: TableProviderKind::Images,
+            location: temp.path().to_string_lossy().into_owned(),
+            recursive: false,
+            fps: None,
+            start_time_ms: None,
+        };
+        assert_eq!(
+            catalog
+                .create_table(&table, &images_schema())
+                .unwrap_err()
+                .code,
+            ErrorCode::AlreadyExists
+        );
+        catalog.drop_stream("entrance").unwrap();
+        assert!(catalog.snapshot().unwrap().stream("entrance").is_none());
     }
 }

@@ -1,10 +1,10 @@
 mod decoder;
-#[cfg(feature = "ffmpeg-native")]
-mod ffmpeg_native;
-mod ffmpeg_subprocess;
+mod ffmpeg;
+mod frame_buffer;
 mod runtime;
 
 pub(crate) use decoder::{
     DecodedFrame, FrameInfo, SampleSpec, TimeRange, VideoDecoder, VideoMetadata, sample_timestamps,
 };
+pub(crate) use frame_buffer::{FrameBufferLease, FrameBufferRegistry};
 pub(crate) use runtime::{MediaCounters, MediaRuntime};

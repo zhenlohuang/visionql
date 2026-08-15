@@ -3,10 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ffmpeg-native")]
-use super::ffmpeg_native::NativeDecoder;
-use super::ffmpeg_subprocess::SubprocessDecoder;
+use super::FrameBufferLease;
+#[cfg(feature = "ffmpeg-native")]
+use super::ffmpeg::NativeDecoder;
+use super::ffmpeg::SubprocessDecoder;
 use super::{
-    DecodedFrame, FrameInfo, SampleSpec, TimeRange, VideoDecoder, VideoMetadata, sample_timestamps,
+    DecodedFrame, FrameBufferRegistry, FrameInfo, SampleSpec, TimeRange, VideoDecoder,
+    VideoMetadata, sample_timestamps,
 };
 use crate::{ErrorCode, Result, VqlError};
 
@@ -19,6 +22,7 @@ pub(crate) struct MediaRuntime {
     timestamp_scans: AtomicU64,
     decoded_frames: AtomicU64,
     decode_errors: AtomicU64,
+    frame_buffers: Arc<FrameBufferRegistry>,
 }
 
 impl MediaRuntime {
@@ -38,11 +42,28 @@ impl MediaRuntime {
             timestamp_scans: AtomicU64::new(0),
             decoded_frames: AtomicU64::new(0),
             decode_errors: AtomicU64::new(0),
+            frame_buffers: FrameBufferRegistry::new(),
         }
     }
 
     pub(crate) fn video_available(&self) -> bool {
         self.backend_name() == "ffmpeg-native" || SubprocessDecoder::available()
+    }
+
+    pub(crate) const fn rtsp_available(&self) -> bool {
+        cfg!(feature = "ffmpeg-native")
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    pub(crate) fn register_frame_buffer(
+        &self,
+        frames: Vec<DecodedFrame>,
+    ) -> Result<(u64, FrameBufferLease)> {
+        self.frame_buffers.register(frames)
+    }
+
+    pub(crate) fn resolve_buffered_frame(&self, buffer_id: u64, slot: u32) -> Result<DecodedFrame> {
+        self.frame_buffers.resolve(buffer_id, slot)
     }
 
     pub(crate) fn backend_name(&self) -> &'static str {
@@ -108,7 +129,7 @@ pub(crate) struct MediaCounters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::ffmpeg_subprocess::SubprocessDecoder;
+    use crate::media::ffmpeg::SubprocessDecoder;
     use crate::media::{SampleSpec, TimeRange, VideoDecoder};
     use crate::test_util::{ffmpeg_available, generate_test_video};
     use tempfile::tempdir;

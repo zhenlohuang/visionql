@@ -8,6 +8,7 @@ use crate::PythonUdfHostRef;
 use crate::catalog::CatalogStore;
 use crate::catalog::{DefinitionSnapshot, TableProviderKind};
 use crate::connectors::images::ImagesTableProvider;
+use crate::connectors::rtsp::RtspTableProvider;
 use crate::connectors::videos::VideosTableProvider;
 use crate::functions::{
     VqlFunctionFactory, VqlTypePlanner, box_center_udf, polygon_udf, python_function_udf,
@@ -40,7 +41,15 @@ pub(crate) fn context_for_snapshot(
         python_udf_host,
     )?;
     register_tables(&context, snapshot, media)?;
+    register_streams(&context, snapshot)?;
     Ok(context)
+}
+
+fn register_streams(context: &SessionContext, snapshot: &DefinitionSnapshot) -> Result<()> {
+    for (name, _stream) in snapshot.streams() {
+        context.register_table(name, Arc::new(RtspTableProvider::new()))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn context_for_function_ddl(

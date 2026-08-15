@@ -107,13 +107,13 @@ Cases are grouped under `ddl/`, `functions/`, and `scenarios/`. Keep one purpose
 
 If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
 
-### Real-model unit test
+### Real-model integration scenario
 
-One ignored unit test exercises the ONNX pipeline directly:
+The mixed-size image batch scenario exercises the ONNX pipeline through public SQL:
 
 ```bash
-VQL_YOLO26_ONNX=./data/models/yolo26n.onnx \
-  cargo test real_yolo26_onnx_e2e -- --ignored
+VQL_TEST_CASE=scenarios/detect_objects_in_mixed_size_image_batch \
+  cargo test -p vql-kernel --test integration --locked
 ```
 
 ## Git hooks

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use arrow::datatypes::SchemaRef;
 
-use super::objects::{FunctionDef, ModelDef, SinkDef, TableDef};
+use super::objects::{FunctionDef, ModelDef, SinkDef, StreamDef, TableDef};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SnapshotTable {
@@ -14,6 +14,7 @@ pub(crate) struct SnapshotTable {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DefinitionSnapshot {
     tables: BTreeMap<String, SnapshotTable>,
+    streams: BTreeMap<String, SnapshotObject<StreamDef>>,
     models: BTreeMap<String, SnapshotObject<ModelDef>>,
     functions: BTreeMap<String, SnapshotObject<FunctionDef>>,
     sinks: BTreeMap<String, SnapshotObject<SinkDef>>,
@@ -28,12 +29,14 @@ pub(crate) struct SnapshotObject<T> {
 impl DefinitionSnapshot {
     pub(crate) fn new(
         tables: BTreeMap<String, SnapshotTable>,
+        streams: BTreeMap<String, SnapshotObject<StreamDef>>,
         models: BTreeMap<String, SnapshotObject<ModelDef>>,
         functions: BTreeMap<String, SnapshotObject<FunctionDef>>,
         sinks: BTreeMap<String, SnapshotObject<SinkDef>>,
     ) -> Self {
         Self {
             tables,
+            streams,
             models,
             functions,
             sinks,
@@ -48,6 +51,16 @@ impl DefinitionSnapshot {
 
     pub(crate) fn table(&self, name: &str) -> Option<&SnapshotTable> {
         self.tables.get(&name.to_ascii_lowercase())
+    }
+
+    pub(crate) fn streams(&self) -> impl Iterator<Item = (&str, &SnapshotObject<StreamDef>)> {
+        self.streams
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
+    }
+
+    pub(crate) fn stream(&self, name: &str) -> Option<&SnapshotObject<StreamDef>> {
+        self.streams.get(&name.to_ascii_lowercase())
     }
 
     pub(crate) fn models(&self) -> impl Iterator<Item = (&str, &SnapshotObject<ModelDef>)> {

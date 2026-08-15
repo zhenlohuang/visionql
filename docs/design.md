@@ -43,7 +43,7 @@ The product non-goals are in PRD Section 4. This design also excludes the follow
 | Data fragment | A bounded DataFusion plan executed for one epoch; it contains no watermark or progress messages |
 | Job coordinator | The streaming runtime component that sequences epochs, window state, and Sink acknowledgements |
 | Media reference | Logical coordinates for an image or video frame; it contains no decoded pixels |
-| Frame arena | An arena of decoded frames valid only within one process and one epoch |
+| Frame buffer | A buffer of decoded frames valid only within one process and one epoch |
 | Query Manifest | The immutable, fully resolved Table, Stream, Model, user-defined Function, and Sink specifications captured when a query is planned; internal Catalog generations are implementation details |
 
 ---
@@ -55,7 +55,7 @@ The product non-goals are in PRD Section 4. This design also excludes the follow
 | G1 | Batch and streaming share SQL and DataFrame semantics | Maintain one `VqlLogicalPlan`. Infer boundedness during analysis and choose a batch plan or streaming job graph only during physical compilation. |
 | G2 | The product works after `pip install`, with no service | The kernel cannot listen on a port or require an external metadata service. Local state uses SQLite, and CLI and Python embed the same kernel. |
 | G3 | Model calls are optimizable | A type-owned built-in inference call is resolved against a constant Model name and extracted into an explicit `Inference` node; it never runs as an opaque row-at-a-time UDF. |
-| G4 | Large images do not bounce between operators as pixel copies | `IMAGE` carries a reference by default. Pixels exist only in a bounded frame arena, tensor buffer, or explicit IPC/persistence boundary. |
+| G4 | Large images do not bounce between operators as pixel copies | `IMAGE` carries a reference by default. Pixels exist only in a bounded frame buffer, tensor buffer, or explicit IPC/persistence boundary. |
 | G5 | Streaming has event time and honest delivery semantics | Watermarks, source offsets, and frame leases live in the epoch control plane, not in rows that a Filter could discard. |
 | G6 | One bad row does not stop a query by default | Decode or inference failure keeps the input row, writes NULL to the affected result, and records a structured error metric. Strict mode fails the query. |
 | G7 | Results remain consumable by the Arrow ecosystem | Multimodal values use standard Arrow storage types with extension metadata. Process-local memory never crosses a process boundary, and clients that do not recognize the extension can still read its storage type. |
@@ -96,7 +96,7 @@ flowchart TB
     end
 
     subgraph RUNTIME["Runtime services"]
-        MEDIA["Media read / decode / frame arena"]
+        MEDIA["Media read / decode / frame buffer"]
         MODELS["Model load / batching / inference"]
         CONNECTORS["Table, Stream, and Sink connectors"]
         BUDGET["Memory and resource budgets"]
@@ -129,7 +129,7 @@ flowchart TB
 | Batch compiler | Lowering a bounded logical plan to a DataFusion `ExecutionPlan` | Watermarks or recovery |
 | Streaming compiler | Splitting a continuous query into sources, bounded data fragments, stateful operators, and a Sink | Reimplementing expression evaluation |
 | Job coordinator | Driving epochs in order; advancing control state; cancellation; Sink acknowledgement | Interpreting SQL expressions |
-| Media runtime | Probe, read, decode, sample, frame arena, and encode | Model preprocessing or post-processing |
+| Media runtime | Probe, read, decode, sample, frame buffer, and encode | Model preprocessing or post-processing |
 | Model runtime | Artifact resolution, PreProcessor/Runtime/PostProcessor registries, sessions, bounded scheduling, and inference | SQL semantics or Catalog authorization |
 | Connectors | Reading images, video, and RTSP; writing Console and Kafka | Rewriting query plans |
 
@@ -245,11 +245,11 @@ struct StreamEpoch {
     batches: Vec<RecordBatch>,
     source_progress: SourceProgress,
     watermark: Option<Timestamp>,
-    frame_lease: Option<FrameArenaLease>,
+    frame_lease: Option<FrameBufferLease>,
 }
 ```
 
-`batches` may be empty. None of the other fields is encoded as a hidden row, so a Filter that removes every row still cannot stall source progress, watermarks, or arena reclamation.
+`batches` may be empty. None of the other fields is encoded as a hidden row, so a Filter that removes every row still cannot stall source progress, watermarks, or frame-buffer reclamation.
 
 ### 5.2 Epoch Execution Order
 
@@ -296,7 +296,7 @@ struct EpochBinding {
     job_id: QueryId,
     epoch_id: u64,
     batches: Vec<RecordBatch>,
-    frame_lease: Option<FrameArenaLease>,
+    frame_lease: Option<FrameBufferLease>,
     cancel: CancellationToken,
 }
 ```
@@ -337,7 +337,7 @@ value = versioned_arrow_states + source_progress_span
 - Rows where `event_time < current_watermark` are dropped and increment `late_rows_total`. `allowed_lateness` is not supported.
 - Stopping a query does not emit windows that have not closed.
 - `(aggregate_kind, input_types, state_codec_version)` determines the state schema and participates in the fingerprint. Each update adjusts its reservation through `size()`; a codec that cannot account for itself cannot be registered.
-- State and group keys cannot contain `arena_id` or `arena_slot`. Convert media to a persistent locator or encoded value first. `IMAGE` and `VIDEO` are rejected by default in window state.
+- State and group keys cannot contain `buffer_id` or `buffer_slot`. Convert media to a persistent locator or encoded value first. `IMAGE` and `VIDEO` are rejected by default in window state.
 - Batch mode lowers `TUMBLE` to time bucketing and ordinary aggregation. Differential batch/stream tests cover NULL, grouping, overflow, and final values for each allowlisted aggregate.
 
 `WindowStateCodec` is VisionQL's recovery ABI. Changing a released codec requires a migration or replay plan. A new codec must pass deterministic-schema, non-destructive-snapshot, restore-round-trip, and resource-accounting tests.
@@ -380,37 +380,37 @@ IMAGE storage := Struct {
   encoding: Utf8?,
   width: Int32?,
   height: Int32?,
-  arena_id: UInt64?,          # process-local only
-  arena_slot: UInt32?         # process-local only
+  buffer_id: UInt64?,         # process-local only
+  buffer_slot: UInt32?        # process-local only
 }
 ```
 
 | Form | Valid fields | Where it is used |
 |---|---|---|
 | Reference | `uri`, `locator`, `pts_ms`, metadata; `locator` is non-null | Table scans, video expansion, and most operator boundaries |
-| Arena | `arena_id`, `arena_slot`, metadata | Within one epoch, between decoding and pixel consumers |
+| Frame buffer | `buffer_id`, `buffer_slot`, metadata | Within one epoch, between decoding and pixel consumers |
 | Encoded | `encoded`, `encoding`, metadata | Python and other process boundaries, including explicit Kafka output |
 
 Invariants:
 
-1. `arena_id` and `arena_slot` never cross a process boundary, reach persistent storage, or enter the Catalog.
+1. `buffer_id` and `buffer_slot` never cross a process boundary, reach persistent storage, or enter the Catalog.
 2. `uri` is sanitized and display-only. It may be logged or exported but is never used by the runtime to read media.
 3. `locator` is an opaque `vql://media/v1/...` value bound to a source revision and frame coordinates. Resolution accepts only registered sources and reauthorizes as the current caller.
 4. A live RTSP frame is not replayable and has no durable `locator`. Encode or persist it before later retrieval.
 5. Field metadata distinguishes original encoded bytes from thumbnail bytes.
 
-### 6.3 Epoch Frame Arena
+### 6.3 Epoch Frame Buffer
 
-Sampled RTSP frames enter the current epoch's `FrameArena`; the RecordBatch carries only the slot. The coordinator releases `FrameArenaLease` only after the data fragment, state handling, and egress encoding have all completed.
+Sampled RTSP frames enter the current epoch's `FrameBuffer`; the RecordBatch carries only the slot. The coordinator releases `FrameBufferLease` only after the data fragment, state handling, and egress encoding have all completed.
 
 The lease is independent of row survival:
 
 - filtering one row or the whole batch does not leak a frame;
 - asynchronous inference retains the lease until it completes;
 - cancellation stops consumers before releasing the epoch;
-- arena references never survive into another epoch or a window state.
+- frame-buffer references never survive into another epoch or a window state.
 
-Batch video normally fuses read, decode, and preprocessing inside `InferenceExec`. A short-lived batch arena is needed only when several pixel consumers share one frame.
+Batch video normally fuses read, decode, and preprocessing inside `InferenceExec`. A short-lived frame buffer is needed only when several pixel consumers share one frame.
 
 ### 6.4 NULL and Row-Level Failure
 
@@ -626,9 +626,9 @@ Ingestion:
 
 - FFmpeg demux and decode run on controlled worker threads, away from the async executor.
 - Prefer TCP interleaved transport; allow UDP by configuration.
-- Inter-frame codecs normally require decode at the source frame rate before sampling. `fps=5` reduces arena, preprocessing, and inference work, not necessarily decode work.
+- Inter-frame codecs normally require decode at the source frame rate before sampling. `fps=5` reduces frame-buffer, preprocessing, and inference work, not necessarily decode work.
 - Hardware paths such as NVDEC and VideoToolbox may be enabled when supported. Fall back to software decode and record a metric on failure.
-- Sampled frames enter the current epoch arena. A row or time threshold closes the epoch.
+- Sampled frames enter the current epoch frame buffer. A row or time threshold closes the epoch.
 
 Event time and reconnect behavior:
 
@@ -862,7 +862,7 @@ domain Arrow values
   → nullable canonical Arrow result column
 ```
 
-The compiled pipeline carries a stable row identifier. It must produce exactly one value, NULL, or row error for every input row and restore input order even when a remote service completes requests out of order. Batch video usually needs no frame arena because read, decode, and preprocessing can be fused inside `InferenceExec`.
+The compiled pipeline carries a stable row identifier. It must produce exactly one value, NULL, or row error for every input row and restore input order even when a remote service completes requests out of order. Batch video usually needs no frame buffer because read, decode, and preprocessing can be fused inside `InferenceExec`.
 
 For VisionQL-owned batching, each pipeline/session key—Model semantic fingerprint, device, and RuntimeConfig generation—owns one bounded Tokio mpsc queue with per-request oneshot responses. Requests enter weighted-fair `interactive`, `stream`, and `batch` classes and dispatch on `max_batch`, earliest deadline, or `max_wait`. Tensor buffers are preallocated and reused; a full queue awaits capacity and propagates backpressure. Queue submission and response waits use cancellation-aware `select`, never sleep polling.
 
@@ -913,7 +913,7 @@ Each query receives one memory budget. DataFusion `MemoryPool` reservations or e
 |---|---|
 | Arrow batches and operator state | Use DataFusion memory management; custom state without spill support fails explicitly |
 | Object-store prefetch and compressed bytes | Reduce concurrency and read-ahead |
-| Decoded frame arena | Backpressure batch sources; for RTSP, drop only the oldest sampled frame before epoch admission |
+| Decoded frame buffer | Backpressure batch sources; for RTSP, drop only the oldest sampled frame before epoch admission |
 | Tensor buffers and inference queues | Bounded queues; submitters await capacity |
 | `TUMBLE` state | No spill; fail with guidance to reduce group-key cardinality or shorten the window |
 | Sink buffers | Apply backpressure; fail after timeout according to query policy |
@@ -928,7 +928,7 @@ The PRD baseline of 8 concurrent 1080p@5fps streams contains four distinct rates
 |---|---|---|
 | Input bitrate | 8 × approximately 4 Mbps | Network and demux |
 | Decode rate | 8 × 25–30 fps | Full decode commonly required by inter-frame RTSP codecs |
-| Sampled output | 8 × 5 fps = 40 fps | Frame arena, preprocessing, and query input |
+| Sampled output | 8 × 5 fps = 40 fps | Frame buffer, preprocessing, and query input |
 | Inference rate | Approximately 40 fps minus query filtering | Main GPU workload |
 
 “40 fps” is not a decode-capacity claim. Acceptance reports network, decode, sampling, inference, window latency, and frame-drop rate separately, with Model, hardware, codec, GOP, and watermark configuration.
@@ -952,7 +952,7 @@ Embedded mode exposes metrics through results, foreground output, and tracing lo
 | Query semantic error | Type mismatch, unbounded sort, unavailable feature | Fail planning before starting runtime work |
 | Resource error | Memory/device exhaustion, excessive state | Fail query and release every lease |
 | External-system error | RTSP disconnect, Kafka unavailable | Retry by connector policy; eventually fail or remain Disconnected |
-| Engine defect | Broken invariant, arena bounds violation | Fail immediately with diagnostics; never downgrade to NULL |
+| Engine defect | Broken invariant, frame-buffer bounds violation | Fail immediately with diagnostics; never downgrade to NULL |
 
 Stable codes are separate from prose messages. Clients react to codes, never error-string matching.
 
@@ -983,7 +983,7 @@ visionql/
 │       ├── execution/
 │       │   ├── batch/            # DataFusion physical plans and extension operators
 │       │   └── stream/           # epochs, coordinator, TUMBLE, checkpoint interfaces
-│       ├── media/                # FFmpeg, image codecs, FrameArena
+│       ├── media/                # FFmpeg, image codecs, FrameBuffer
 │       ├── models/               # type registry, processors, runtimes, scheduler
 │       └── connectors/           # Tables, Streams, and Sinks
 ├── vql-cli/                      # shell / run
@@ -1025,8 +1025,8 @@ Boundary rules:
 | ADR-001 | Rust + Arrow + DataFusion | Supports embedding, columnar execution, Python interoperability, and public extension points |
 | ADR-002 | One logical plan, separate physical compilation for batch and streaming | Preserves user-facing batch/stream semantics without forcing control data through RecordBatch-only operators |
 | ADR-003 | Epoch streaming with bounded DataFusion fragments | Filter cannot swallow watermark or source progress; asynchronous inference and release have a clear barrier |
-| ADR-004 | Standard Arrow storage for `IMAGE`, with reference, arena, and encoded forms | Avoids pixel copies while preserving IPC and fallback readability |
-| ADR-005 | Release FrameArena as one epoch lease | Lifetime does not depend on surviving rows, so Filter cannot leak references |
+| ADR-004 | Standard Arrow storage for `IMAGE`, with reference, buffered, and encoded forms | Avoids pixel copies while preserving IPC and fallback readability |
+| ADR-005 | Release FrameBuffer as one epoch lease | Lifetime does not depend on surviving rows, so Filter cannot leak references |
 | ADR-006 | Extract type-owned inference calls into explicit `Inference` nodes | Enables asynchronous batching, deduplication, later cascades/caches, and cost measurement |
 | ADR-007 | Build one immutable Query Manifest per planned query | Prevents DDL from silently changing a running result without exposing a public revision lifecycle |
 | ADR-008 | Delivery follows source replayability; RTSP is best-effort | Makes no guarantee that the physical source cannot satisfy |

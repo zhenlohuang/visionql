@@ -3,8 +3,8 @@ use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 
 use std::collections::BTreeMap;
 
-use super::ast::{CreateModel, CreateTable, ShowKind, VqlStatement};
-use crate::catalog::{ModelType, SinkKind, TableProviderKind};
+use super::ast::{CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement};
+use crate::catalog::{EventTimePolicy, ModelType, RtspTransport, SinkKind, TableProviderKind};
 use crate::{ErrorCode, Result, VqlError};
 
 pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
@@ -54,10 +54,7 @@ fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
         Some("TABLE") => parse_create_table(tokens),
         Some("MODEL") => parse_create_model(tokens),
         Some("SINK") => parse_create_sink(tokens),
-        Some("STREAM") => Err(VqlError::feature(
-            "CREATE STREAM is not available in v0.1",
-            "v0.2",
-        )),
+        Some("STREAM") => parse_create_stream(tokens),
         Some("INDEX") => Err(VqlError::feature(
             "vector indexes are not available",
             "v0.4",
@@ -68,6 +65,136 @@ fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
         )),
         _ => invalid("expected CREATE TABLE, MODEL, FUNCTION, or SINK"),
     }
+}
+
+fn parse_create_stream(tokens: &[Token]) -> Result<VqlStatement> {
+    if tokens.len() < 5 {
+        return invalid("expected CREATE STREAM <name> FROM 'rtsp://...'");
+    }
+    let name = identifier(tokens.get(2), "stream name")?;
+    expect_word(tokens.get(3), "FROM")?;
+    let endpoint = string_literal(tokens.get(4))?;
+    let mut fps = 5.0;
+    let mut event_time = EventTimePolicy::CaptureTime;
+    let mut watermark_delay_ms = 2_000;
+    let mut transport = RtspTransport::Tcp;
+    let mut index = 5;
+    if index < tokens.len() {
+        expect_word(tokens.get(index), "WITH")?;
+        index += 1;
+        expect_token(tokens.get(index), Token::LParen, "'(' after WITH")?;
+        index += 1;
+        while tokens.get(index) != Some(&Token::RParen) {
+            let option = identifier(tokens.get(index), "stream option")?.to_ascii_lowercase();
+            index += 1;
+            expect_token(tokens.get(index), Token::Eq, "'=' after stream option")?;
+            index += 1;
+            match option.as_str() {
+                "fps" => {
+                    fps = parse_number(tokens.get(index), "fps")?;
+                    if !fps.is_finite() || fps <= 0.0 || fps > 120.0 {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidOption,
+                            "fps must be greater than 0 and at most 120",
+                        ));
+                    }
+                    index += 1;
+                }
+                "event_time" => {
+                    event_time = match string_literal(tokens.get(index))?
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "capture_time" => EventTimePolicy::CaptureTime,
+                        "ingest_time" => EventTimePolicy::IngestTime,
+                        _ => {
+                            return Err(VqlError::new(
+                                ErrorCode::InvalidOption,
+                                "event_time must be 'capture_time' or 'ingest_time'",
+                            ));
+                        }
+                    };
+                    index += 1;
+                }
+                "watermark" => {
+                    let (value, consumed) = parse_fixed_interval_ms(&tokens[index..])?;
+                    watermark_delay_ms = value;
+                    index += consumed;
+                }
+                "transport" => {
+                    transport = match string_literal(tokens.get(index))?
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "tcp" => RtspTransport::Tcp,
+                        "udp" => RtspTransport::Udp,
+                        _ => {
+                            return Err(VqlError::new(
+                                ErrorCode::InvalidOption,
+                                "transport must be 'tcp' or 'udp'",
+                            ));
+                        }
+                    };
+                    index += 1;
+                }
+                _ => {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        format!("unknown RTSP option '{option}'"),
+                    ));
+                }
+            }
+            match tokens.get(index) {
+                Some(Token::Comma) => index += 1,
+                Some(Token::RParen) => {}
+                _ => return invalid("expected ',' or ')' after stream option"),
+            }
+        }
+        index += 1;
+    }
+    if index != tokens.len() {
+        return invalid("unexpected tokens after CREATE STREAM");
+    }
+    Ok(VqlStatement::CreateStream(CreateStream {
+        name,
+        endpoint,
+        fps,
+        event_time,
+        watermark_delay_ms,
+        transport,
+    }))
+}
+
+fn parse_fixed_interval_ms(tokens: &[Token]) -> Result<(i64, usize)> {
+    expect_word(tokens.first(), "INTERVAL")?;
+    let raw = string_literal(tokens.get(1))?;
+    let value = raw.parse::<f64>().map_err(|error| {
+        VqlError::new(
+            ErrorCode::InvalidOption,
+            "watermark interval must be numeric",
+        )
+        .with_source(error)
+    })?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "watermark interval must be finite and non-negative",
+        ));
+    }
+    let multiplier = match word(tokens.get(2)).as_deref() {
+        Some("MILLISECOND") | Some("MILLISECONDS") => 1.0,
+        Some("SECOND") | Some("SECONDS") => 1_000.0,
+        Some("MINUTE") | Some("MINUTES") => 60_000.0,
+        _ => return invalid("watermark must use MILLISECOND, SECOND, or MINUTE"),
+    };
+    let millis = value * multiplier;
+    if millis > i64::MAX as f64 {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "watermark interval is too large",
+        ));
+    }
+    Ok((millis.round() as i64, 3))
 }
 
 fn parse_create_table(tokens: &[Token]) -> Result<VqlStatement> {
@@ -368,14 +495,15 @@ fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
 
 fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
     if tokens.len() != 2 {
-        return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or SINKS");
+        return invalid("expected SHOW TABLES, STREAMS, MODELS, FUNCTIONS, or SINKS");
     }
     let kind = match word(tokens.get(1)).as_deref() {
         Some("TABLES") => ShowKind::Tables,
+        Some("STREAMS") => ShowKind::Streams,
         Some("MODELS") => ShowKind::Models,
         Some("FUNCTIONS") => ShowKind::Functions,
         Some("SINKS") => ShowKind::Sinks,
-        _ => return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or SINKS"),
+        _ => return invalid("expected SHOW TABLES, STREAMS, MODELS, FUNCTIONS, or SINKS"),
     };
     Ok(VqlStatement::Show(kind))
 }
@@ -383,6 +511,7 @@ fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
 fn singular_kind(token: Option<&Token>) -> Result<ShowKind> {
     match word(token).as_deref() {
         Some("TABLE") => Ok(ShowKind::Tables),
+        Some("STREAM") => Ok(ShowKind::Streams),
         Some("MODEL") => Ok(ShowKind::Models),
         Some("FUNCTION") => Ok(ShowKind::Functions),
         Some("SINK") => Ok(ShowKind::Sinks),
@@ -518,6 +647,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_rtsp_stream_options() {
+        let parsed = parse_statement(
+            "CREATE STREAM cam_entrance FROM 'rtsp://10.0.0.15:554/main' WITH (\
+             fps=5, event_time='capture_time', watermark=INTERVAL '2' SECOND, transport='tcp')",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            VqlStatement::CreateStream(CreateStream {
+                name: "cam_entrance".to_owned(),
+                endpoint: "rtsp://10.0.0.15:554/main".to_owned(),
+                fps: 5.0,
+                event_time: EventTimePolicy::CaptureTime,
+                watermark_delay_ms: 2_000,
+                transport: RtspTransport::Tcp,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_rtsp_stream_options() {
+        for sql in [
+            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (fps=0)",
+            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (event_time='wall_time')",
+            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (watermark=INTERVAL '-1' SECOND)",
+            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (transport='quic')",
+        ] {
+            assert_eq!(
+                parse_statement(sql).unwrap_err().code,
+                ErrorCode::InvalidOption
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unknown_images_option() {
         let error = parse_statement(
             "CREATE TABLE photos USING IMAGES LOCATION './photos' WITH (magic=true)",
@@ -568,7 +732,6 @@ mod tests {
     #[test]
     fn future_capabilities_have_stable_target_versions() {
         let cases = [
-            ("CREATE STREAM cam FROM 'rtsp://example'", "v0.2"),
             ("CREATE TABLE events USING KAFKA LOCATION 'topic'", "v0.2"),
             ("CREATE TABLE out USING PARQUET LOCATION './out'", "v0.4"),
             ("CREATE TABLE out AS SELECT 1", "v0.4"),

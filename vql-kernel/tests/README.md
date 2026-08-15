@@ -26,6 +26,27 @@ cases with `cargo test -p vql-kernel --test integration -- --list`.
 The suite skips when fixtures are absent. Set `VQL_INTEGRATION_TEST=1` to make missing fixtures a
 failure.
 
+## RTSP source scenarios
+
+The default owner-module scenario generates a short video and uses the deterministic
+`mock://person` Model to cover Source → epoch → `IMAGE_DETECTION` → Filter → global `LIMIT`:
+
+```bash
+cargo test -p vql-kernel local_video_stream_runs_people_detection_scenario --locked
+```
+
+The real-data integration test starts MediaMTX, publishes
+`data/datasets/videos/sample-videos/people-detection.mp4` with FFmpeg, creates the Stream through
+public SQL, and runs `data/models/yolo26n.onnx` over eight sampled RTSP frames:
+
+```bash
+cargo test -p vql-kernel --test rtsp_stream --locked -- --ignored --nocapture
+```
+
+It is ignored by default because MediaMTX, FFmpeg, the dataset, and the Model are external test
+dependencies. Streaming `TUMBLE` remains a separate v0.2 stateful operator; these RTSP scenarios
+deliberately exercise the currently supported stateless plan.
+
 ## Layout
 
 Cases are grouped by SQL-facing behavior:
@@ -36,12 +57,14 @@ tests/
 ├── functions/
 ├── scenarios/
 ├── integration_tests.rs
+├── rtsp_stream.rs
 └── README.md
 ```
 
 - `ddl/` covers one DDL statement per case.
 - `functions/` covers one built-in function per case.
 - `scenarios/` covers a complete user query that crosses several features.
+- `rtsp_stream.rs` owns the ignored MediaMTX/FFmpeg real-RTSP system scenario.
 
 A case consists of one main statement and its expected result. Setup and teardown are optional:
 

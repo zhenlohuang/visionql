@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::catalog::{ModelType, SinkKind, TableProviderKind};
+use crate::catalog::{EventTimePolicy, ModelType, RtspTransport, SinkKind, TableProviderKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateTable {
@@ -10,6 +10,16 @@ pub(crate) struct CreateTable {
     pub(crate) recursive: bool,
     pub(crate) fps: Option<f64>,
     pub(crate) start_time_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CreateStream {
+    pub(crate) name: String,
+    pub(crate) endpoint: String,
+    pub(crate) fps: f64,
+    pub(crate) event_time: EventTimePolicy,
+    pub(crate) watermark_delay_ms: i64,
+    pub(crate) transport: RtspTransport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +33,7 @@ pub(crate) struct CreateModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShowKind {
     Tables,
+    Streams,
     Models,
     Functions,
     Sinks,
@@ -31,6 +42,7 @@ pub(crate) enum ShowKind {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum VqlStatement {
     CreateTable(CreateTable),
+    CreateStream(CreateStream),
     CreateModel(CreateModel),
     CreateFunction { sql: String },
     CreateSink { name: String, kind: SinkKind },

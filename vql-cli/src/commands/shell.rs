@@ -94,8 +94,17 @@ fn run_basic(session: &Session) -> Result<()> {
 
 fn execute(session: &Session, statements: Vec<String>) -> Result<()> {
     for sql in statements {
-        match session.sql(&sql).and_then(|statement| statement.collect()) {
-            Ok(batches) => super::super::render::print_batches(&batches)?,
+        let result = session.sql(&sql).and_then(|statement| {
+            if statement.is_unbounded() {
+                statement.for_each_batch(|batch| {
+                    super::super::render::print_batches(std::slice::from_ref(batch))
+                })
+            } else {
+                super::super::render::print_batches(&statement.collect()?)
+            }
+        });
+        match result {
+            Ok(()) => {}
             Err(error) => eprintln!("{error}"),
         }
     }

@@ -12,6 +12,7 @@ use crate::{ErrorCode, Result, VqlError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObjectKind {
     Table,
+    Stream,
     Model,
     Function,
     Sink,
@@ -21,6 +22,7 @@ impl ObjectKind {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Table => "table",
+            Self::Stream => "stream",
             Self::Model => "model",
             Self::Function => "function",
             Self::Sink => "sink",
@@ -46,6 +48,30 @@ pub(crate) struct TableDef {
     pub(crate) fps: Option<f64>,
     #[serde(default)]
     pub(crate) start_time_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EventTimePolicy {
+    CaptureTime,
+    IngestTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RtspTransport {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct StreamDef {
+    pub(crate) name: String,
+    pub(crate) endpoint: String,
+    pub(crate) fps: f64,
+    pub(crate) event_time: EventTimePolicy,
+    pub(crate) watermark_delay_ms: i64,
+    pub(crate) transport: RtspTransport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

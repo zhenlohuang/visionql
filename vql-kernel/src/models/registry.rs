@@ -411,9 +411,6 @@ fn invalid_option_error(name: impl AsRef<str>, message: impl Into<String>) -> Vq
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::backend::ModelBackend;
-    use image::DynamicImage;
-    use tokio_util::sync::CancellationToken;
 
     #[derive(Debug)]
     struct WrongTypePreProcessorFactory;
@@ -508,45 +505,5 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
         assert_eq!(error.target_version.as_deref(), Some("v0.4"));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires VQL_YOLO26_ONNX"]
-    async fn real_yolo26_onnx_e2e() {
-        let path = std::env::var_os("VQL_YOLO26_ONNX")
-            .map(std::path::PathBuf::from)
-            .expect("set VQL_YOLO26_ONNX to an exported YOLO26 ONNX model");
-        let registry = PipelineRegistry::builtins();
-        let source = format!("file://{}", path.display());
-        let (runtime, pre_processor, post_processor) = registry
-            .model_specs_for_options(ModelType::ObjectDetection, &source, &BTreeMap::new())
-            .unwrap();
-        let model = ModelDef {
-            name: "detector".to_owned(),
-            model_type: ModelType::ObjectDetection,
-            source,
-            resolved_source: path.to_string_lossy().into_owned(),
-            artifact_hash: None,
-            runtime,
-            pre_processor,
-            post_processor,
-            semantic_fingerprint: "real-yolo26".to_owned(),
-            volatile: false,
-        };
-        let pipeline = registry.compile(&model).expect("compile YOLO pipeline");
-        // More than one image per call: a batch of 1 hides execution providers that cannot
-        // honour the dynamic batch dimension.
-        let output = pipeline
-            .infer(
-                vec![
-                    DynamicImage::new_rgb8(640, 480),
-                    DynamicImage::new_rgb8(1280, 720),
-                    DynamicImage::new_rgb8(320, 320),
-                ],
-                CancellationToken::new(),
-            )
-            .await
-            .expect("run YOLO ONNX inference");
-        assert_eq!(output.len(), 3);
     }
 }

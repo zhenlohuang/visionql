@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{ArrayRef, Int64Array, StringArray};
@@ -12,17 +12,20 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::catalog::{FunctionImplementation, ObjectKind, SinkDef, TableDef, TableProviderKind};
+use crate::catalog::{
+    FunctionImplementation, ObjectKind, SinkDef, StreamDef, TableDef, TableProviderKind,
+};
 use crate::connectors::images::{ImagesTableProvider, images_schema};
+use crate::connectors::rtsp::{rtsp_schema, start_rtsp_source};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
-use crate::functions::VqlFunctionFactory;
+use crate::functions::{VqlFunctionFactory, materialize_batch_images};
 use crate::media::{MediaCounters, MediaRuntime};
 use crate::models::{ModelCounters, resolve_model};
 use crate::planner::{
-    context_for_function_ddl, context_for_snapshot, normalize_function_ddl, plan_statement,
-    wrap_console_sink,
+    bind_stream_epoch, context_for_function_ddl, context_for_snapshot, normalize_function_ddl,
+    plan_statement, wrap_console_sink,
 };
-use crate::sql::{CreateModel, CreateTable, ShowKind, VqlStatement, parse_statement};
+use crate::sql::{CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement, parse_statement};
 use crate::types::{image_field, is_image_storage};
 use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
 
@@ -93,6 +96,27 @@ impl Statement {
             Self::Ddl(_) => {}
         }
     }
+
+    pub fn is_unbounded(&self) -> bool {
+        matches!(self, Self::Query(query) if query.is_unbounded())
+    }
+
+    pub fn for_each_batch(
+        &self,
+        mut callback: impl FnMut(&RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        match self {
+            Self::Query(query) | Self::Explain(query) | Self::Set(query) => {
+                query.for_each_batch(callback)
+            }
+            Self::Ddl(result) => {
+                for batch in &result.batches {
+                    callback(batch)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +142,12 @@ pub struct QueryMetrics {
     inference_p50_micros: AtomicU64,
     inference_p95_micros: AtomicU64,
     batch_histogram: Mutex<Vec<u64>>,
+    source_generation: AtomicU64,
+    source_reconnects: AtomicU64,
+    event_time_fallbacks: AtomicU64,
+    source_dropped_frames: AtomicU64,
+    watermark_ms: AtomicI64,
+    has_watermark: AtomicBool,
 }
 
 impl QueryMetrics {
@@ -156,6 +186,28 @@ impl QueryMetrics {
             .map(|values| values.clone())
             .unwrap_or_default()
     }
+
+    pub fn source_generation(&self) -> u64 {
+        self.source_generation.load(Ordering::Relaxed)
+    }
+
+    pub fn source_reconnects(&self) -> u64 {
+        self.source_reconnects.load(Ordering::Relaxed)
+    }
+
+    pub fn event_time_fallbacks(&self) -> u64 {
+        self.event_time_fallbacks.load(Ordering::Relaxed)
+    }
+
+    pub fn source_dropped_frames(&self) -> u64 {
+        self.source_dropped_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn watermark_ms(&self) -> Option<i64> {
+        self.has_watermark
+            .load(Ordering::Relaxed)
+            .then(|| self.watermark_ms.load(Ordering::Relaxed))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -170,36 +222,68 @@ pub struct QueryHandle {
     media: Arc<MediaRuntime>,
     media_start: MediaCounters,
     models: Arc<crate::models::ModelRuntime>,
+    catalog: Arc<crate::catalog::CatalogStore>,
+    fail_on_error: Arc<AtomicBool>,
     model_start: ModelCounters,
     model_sample_start: usize,
+    streaming: Option<StreamingQuery>,
+}
+
+#[derive(Debug, Clone)]
+struct StreamingQuery {
+    name: String,
+    definition: StreamDef,
+    skip: usize,
+    fetch: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct QueryResources {
+    runtime: Arc<tokio::runtime::Runtime>,
+    active_query: Arc<Mutex<Option<CancellationToken>>>,
+    media: Arc<MediaRuntime>,
+    models: Arc<crate::models::ModelRuntime>,
+    catalog: Arc<crate::catalog::CatalogStore>,
+    fail_on_error: Arc<AtomicBool>,
+}
+
+struct ActiveQueryGuard(Arc<Mutex<Option<CancellationToken>>>);
+
+impl Drop for ActiveQueryGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.0.lock() {
+            *active = None;
+        }
+    }
 }
 
 impl QueryHandle {
     fn new(
         dataframe: DataFrame,
-        runtime: Arc<tokio::runtime::Runtime>,
-        active_query: Arc<Mutex<Option<CancellationToken>>>,
         cancellation: CancellationToken,
-        media: Arc<MediaRuntime>,
-        models: Arc<crate::models::ModelRuntime>,
+        resources: QueryResources,
+        streaming: Option<StreamingQuery>,
     ) -> Self {
         let output_schema = restamp_schema(dataframe.schema().inner());
-        let media_start = media.counters();
-        let model_start = models.counters();
-        let model_sample_start = models.sample_count();
+        let media_start = resources.media.counters();
+        let model_start = resources.models.counters();
+        let model_sample_start = resources.models.sample_count();
         Self {
             dataframe,
-            runtime,
+            runtime: resources.runtime,
             cancellation,
-            active_query,
+            active_query: resources.active_query,
             output_schema,
             metrics: Arc::new(QueryMetrics::default()),
             collected: Arc::new(Mutex::new(None)),
-            media,
+            media: resources.media,
             media_start,
-            models,
+            models: resources.models,
+            catalog: resources.catalog,
+            fail_on_error: resources.fail_on_error,
             model_start,
             model_sample_start,
+            streaming,
         }
     }
 
@@ -215,16 +299,20 @@ impl QueryHandle {
                 stream,
             )));
         }
+        if self.streaming.is_some() {
+            return self.stream_rtsp();
+        }
         self.set_active()?;
+        let active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
         let input = self
             .runtime
             .block_on(self.dataframe.clone().execute_stream())?;
         let output_schema = Arc::clone(&self.output_schema);
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
-        let active_query = Arc::clone(&self.active_query);
         let metrics = Arc::clone(&self.metrics);
         let stream = async_stream::try_stream! {
+            let _active_guard = active_guard;
             let mut input = input;
             loop {
                 let next = tokio::select! {
@@ -244,8 +332,166 @@ impl QueryHandle {
                     batch.columns().to_vec(),
                 )?;
             }
-            if let Ok(mut active) = active_query.lock() {
-                *active = None;
+        };
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            stream_schema,
+            stream,
+        )))
+    }
+
+    fn stream_rtsp(&self) -> Result<SendableRecordBatchStream> {
+        let streaming = self
+            .streaming
+            .clone()
+            .ok_or_else(|| VqlError::new(ErrorCode::Internal, "stream definition is missing"))?;
+        if streaming.fetch == Some(0) {
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(
+                Arc::clone(&self.output_schema),
+                futures::stream::empty::<datafusion::error::Result<RecordBatch>>(),
+            )));
+        }
+        self.set_active()?;
+        let mut source = match start_rtsp_source(
+            streaming.definition,
+            Arc::clone(&self.media),
+            Arc::clone(&self.fail_on_error),
+            self.cancellation.clone(),
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                if let Ok(mut active) = self.active_query.lock() {
+                    *active = None;
+                }
+                return Err(error);
+            }
+        };
+        let stream_name = streaming.name;
+        let mut skip_remaining = streaming.skip;
+        let mut fetch_remaining = streaming.fetch;
+        let template = self.dataframe.clone();
+        let output_schema = Arc::clone(&self.output_schema);
+        let stream_schema = Arc::clone(&output_schema);
+        let cancellation = self.cancellation.clone();
+        let active_query = Arc::clone(&self.active_query);
+        let metrics = Arc::clone(&self.metrics);
+        let catalog = Arc::clone(&self.catalog);
+        let media = Arc::clone(&self.media);
+        let fail_on_error = Arc::clone(&self.fail_on_error);
+        let models = Arc::clone(&self.models);
+        let model_start = self.model_start;
+        let active_guard = ActiveQueryGuard(active_query);
+        let stream = async_stream::try_stream! {
+            let _active_guard = active_guard;
+            'epochs: loop {
+                let next = tokio::select! {
+                    _ = cancellation.cancelled() => Ok(None),
+                    next = source.next() => next,
+                };
+                let next = next.map_err(|error| {
+                    datafusion::error::DataFusionError::External(Box::new(error))
+                })?;
+                if cancellation.is_cancelled() {
+                    Err(datafusion::error::DataFusionError::Execution(
+                        "[VQL:QUERY_CANCELLED] query cancelled".to_owned(),
+                    ))?;
+                }
+                let Some(epoch) = next else { break; };
+                let input_rows = epoch.batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+                metrics.input_rows.fetch_add(input_rows as u64, Ordering::Relaxed);
+                metrics.source_generation.store(
+                    epoch.source_progress.generation,
+                    Ordering::Relaxed,
+                );
+                metrics.decode_frames.store(
+                    epoch.source_progress.decoded_frames,
+                    Ordering::Relaxed,
+                );
+                metrics.source_reconnects.store(
+                    epoch.source_progress.reconnects,
+                    Ordering::Relaxed,
+                );
+                metrics.event_time_fallbacks.store(
+                    epoch.source_progress.event_time_fallbacks,
+                    Ordering::Relaxed,
+                );
+                metrics.source_dropped_frames.store(
+                    epoch.source_progress.dropped_frames,
+                    Ordering::Relaxed,
+                );
+                if let Some(watermark_ms) = epoch.watermark_ms {
+                    metrics.watermark_ms.store(watermark_ms, Ordering::Relaxed);
+                    metrics.has_watermark.store(true, Ordering::Relaxed);
+                }
+                let dataframe = bind_stream_epoch(
+                    template.clone(),
+                    &stream_name,
+                    epoch.batches.clone(),
+                )
+                .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+                let mut output = dataframe.execute_stream().await?;
+                while let Some(batch) = output.next().await {
+                    let mut batch = batch?;
+                    if skip_remaining >= batch.num_rows() {
+                        skip_remaining -= batch.num_rows();
+                        continue;
+                    }
+                    if skip_remaining > 0 {
+                        batch = batch.slice(skip_remaining, batch.num_rows() - skip_remaining);
+                        skip_remaining = 0;
+                    }
+                    if let Some(remaining) = fetch_remaining
+                        && batch.num_rows() > remaining
+                    {
+                        batch = batch.slice(0, remaining);
+                    }
+                    if batch.num_rows() == 0 {
+                        continue;
+                    }
+                    let batch = materialize_batch_images(
+                        Arc::clone(&catalog),
+                        Arc::clone(&media),
+                        batch,
+                        fail_on_error.load(Ordering::Relaxed),
+                    )
+                    .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+                    metrics.output_rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+                    if let Some(remaining) = fetch_remaining.as_mut() {
+                        *remaining = remaining.saturating_sub(batch.num_rows());
+                    }
+                    yield RecordBatch::try_new(
+                        Arc::clone(&output_schema),
+                        batch.columns().to_vec(),
+                    )?;
+                    if fetch_remaining == Some(0) {
+                        break 'epochs;
+                    }
+                }
+                tracing::debug!(
+                    epoch_id = epoch.epoch_id,
+                    watermark_ms = epoch.watermark_ms,
+                    sampled_frames = epoch.source_progress.sampled_frames,
+                    "completed RTSP epoch"
+                );
+                let model_end = models.counters();
+                metrics.inference_rows.store(
+                    model_end
+                        .inference_rows
+                        .saturating_sub(model_start.inference_rows),
+                    Ordering::Relaxed,
+                );
+                metrics.inference_batches.store(
+                    model_end
+                        .inference_batches
+                        .saturating_sub(model_start.inference_batches),
+                    Ordering::Relaxed,
+                );
+                metrics.error_rows.store(
+                    model_end
+                        .inference_errors
+                        .saturating_sub(model_start.inference_errors),
+                    Ordering::Relaxed,
+                );
+                drop(epoch.frame_lease);
             }
         };
         Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -281,12 +527,14 @@ impl QueryHandle {
             .map_err(|_| VqlError::new(ErrorCode::Internal, "query result cache was poisoned"))?;
         *collected = Some(batches.clone());
         let media_end = self.media.counters();
-        self.metrics.decode_frames.store(
-            media_end
-                .decoded_frames
-                .saturating_sub(self.media_start.decoded_frames),
-            Ordering::Relaxed,
-        );
+        if self.streaming.is_none() {
+            self.metrics.decode_frames.store(
+                media_end
+                    .decoded_frames
+                    .saturating_sub(self.media_start.decoded_frames),
+                Ordering::Relaxed,
+            );
+        }
         let model_end = self.models.counters();
         self.metrics.inference_rows.store(
             model_end
@@ -311,10 +559,12 @@ impl QueryHandle {
                 ),
             Ordering::Relaxed,
         );
-        self.metrics.input_rows.store(
-            self.metrics.output_rows.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
+        if self.streaming.is_none() {
+            self.metrics.input_rows.store(
+                self.metrics.output_rows.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
         let samples = self.models.samples_since(self.model_sample_start);
         let mut latencies = samples.iter().map(|sample| sample.0).collect::<Vec<_>>();
         latencies.sort_unstable();
@@ -340,6 +590,31 @@ impl QueryHandle {
         Arc::clone(&self.metrics)
     }
 
+    pub fn is_unbounded(&self) -> bool {
+        self.streaming
+            .as_ref()
+            .is_some_and(|streaming| streaming.fetch.is_none())
+    }
+
+    pub fn for_each_batch(
+        &self,
+        mut callback: impl FnMut(&RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        let mut stream = self.stream()?;
+        self.runtime.block_on(async {
+            while let Some(batch) = stream.next().await {
+                match batch {
+                    Ok(batch) => callback(&batch)?,
+                    Err(_error) if self.cancellation.is_cancelled() => {
+                        return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn set_active(&self) -> Result<()> {
         let mut active = self
             .active_query
@@ -361,6 +636,7 @@ impl Session {
     pub fn sql(&self, sql: &str) -> Result<Statement> {
         match parse_statement(sql)? {
             VqlStatement::CreateTable(create) => self.create_table(create).map(Statement::Ddl),
+            VqlStatement::CreateStream(create) => self.create_stream(create).map(Statement::Ddl),
             VqlStatement::CreateModel(create) => self.create_model(create).map(Statement::Ddl),
             VqlStatement::CreateFunction { sql } => self.create_function(&sql).map(Statement::Ddl),
             VqlStatement::CreateSink { name, kind } => {
@@ -422,7 +698,7 @@ impl Session {
             self.python_udf_host.clone(),
         )?;
         let cancellation = CancellationToken::new();
-        let dataframe = self.engine.inner.runtime.block_on(plan_statement(
+        let planned = self.engine.inner.runtime.block_on(plan_statement(
             &context,
             &snapshot,
             sql,
@@ -430,13 +706,31 @@ impl Session {
             Arc::clone(&self.fail_on_error),
             cancellation.clone(),
         ))?;
+        let streaming = planned.stream_name.as_ref().map(|name| {
+            let definition = snapshot
+                .stream(name)
+                .expect("planned stream exists in the query snapshot")
+                .definition
+                .clone();
+            StreamingQuery {
+                name: name.clone(),
+                definition,
+                skip: planned.stream_skip,
+                fetch: planned.stream_fetch,
+            }
+        });
         Ok(QueryHandle::new(
-            dataframe,
-            Arc::clone(&self.engine.inner.runtime),
-            Arc::clone(&self.active_query),
+            planned.dataframe,
             cancellation,
-            Arc::clone(&self.engine.inner.media),
-            Arc::clone(&self.engine.inner.models),
+            QueryResources {
+                runtime: Arc::clone(&self.engine.inner.runtime),
+                active_query: Arc::clone(&self.active_query),
+                media: Arc::clone(&self.engine.inner.media),
+                models: Arc::clone(&self.engine.inner.models),
+                catalog: Arc::clone(&self.engine.inner.catalog),
+                fail_on_error: Arc::clone(&self.fail_on_error),
+            },
+            streaming,
         ))
     }
 
@@ -483,6 +777,29 @@ impl Session {
         Ok(message_result(format!(
             "created table '{}' at revision {revision}",
             create.name
+        )))
+    }
+
+    fn create_stream(&self, create: CreateStream) -> Result<DdlResult> {
+        if !self.engine.inner.media.rtsp_available() {
+            return Err(VqlError::new(
+                ErrorCode::FeatureNotAvailable,
+                "CREATE STREAM requires the ffmpeg-native feature",
+            ));
+        }
+        let endpoint = normalize_rtsp_endpoint(&create.endpoint)?;
+        let definition = StreamDef {
+            name: create.name.to_ascii_lowercase(),
+            endpoint,
+            fps: create.fps,
+            event_time: create.event_time,
+            watermark_delay_ms: create.watermark_delay_ms,
+            transport: create.transport,
+        };
+        let revision = self.engine.inner.catalog.create_stream(&definition)?;
+        Ok(message_result(format!(
+            "created stream '{}' at revision {revision}",
+            definition.name
         )))
     }
 
@@ -606,6 +923,7 @@ impl Session {
     fn drop_object(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
         let revision = match kind {
             ShowKind::Tables => return self.drop_table(name),
+            ShowKind::Streams => self.engine.inner.catalog.drop_stream(name)?,
             ShowKind::Models => {
                 let revision = self.engine.inner.catalog.drop_model(name)?;
                 self.engine.inner.models.evict_stale()?;
@@ -632,6 +950,9 @@ impl Session {
     fn show_objects(&self, kind: ShowKind) -> Result<DdlResult> {
         if kind == ShowKind::Tables {
             return self.show_tables();
+        }
+        if kind == ShowKind::Streams {
+            return self.show_streams();
         }
         let snapshot = self.engine.inner.catalog.snapshot()?;
         let rows = match kind {
@@ -665,7 +986,7 @@ impl Session {
                     )
                 })
                 .collect(),
-            ShowKind::Tables => unreachable!(),
+            ShowKind::Tables | ShowKind::Streams => unreachable!(),
         };
         named_objects_result(rows)
     }
@@ -729,15 +1050,96 @@ impl Session {
         })
     }
 
+    fn show_streams(&self) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let streams = snapshot.streams().collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("stream_name", DataType::Utf8, false),
+            Field::new("connector", DataType::Utf8, false),
+            Field::new("endpoint", DataType::Utf8, false),
+            Field::new("fps", DataType::Float64, false),
+            Field::new("event_time", DataType::Utf8, false),
+            Field::new("watermark_ms", DataType::Int64, false),
+            Field::new("transport", DataType::Utf8, false),
+            Field::new("revision", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(
+                    streams.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(StringArray::from(vec!["RTSP"; streams.len()])),
+                Arc::new(StringArray::from(
+                    streams
+                        .iter()
+                        .map(|(_, stream)| stream.definition.endpoint.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(arrow::array::Float64Array::from(
+                    streams
+                        .iter()
+                        .map(|(_, stream)| stream.definition.fps)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    streams
+                        .iter()
+                        .map(|(_, stream)| match stream.definition.event_time {
+                            crate::catalog::EventTimePolicy::CaptureTime => "capture_time",
+                            crate::catalog::EventTimePolicy::IngestTime => "ingest_time",
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    streams
+                        .iter()
+                        .map(|(_, stream)| stream.definition.watermark_delay_ms)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    streams
+                        .iter()
+                        .map(|(_, stream)| match stream.definition.transport {
+                            crate::catalog::RtspTransport::Tcp => "tcp",
+                            crate::catalog::RtspTransport::Udp => "udp",
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    streams
+                        .iter()
+                        .map(|(_, stream)| stream.revision)
+                        .collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .map_err(|error| {
+            VqlError::new(
+                ErrorCode::Execution,
+                "failed to build stream catalog result",
+            )
+            .with_source(error)
+        })?;
+        Ok(DdlResult {
+            message: format!("{} stream(s)", batch.num_rows()),
+            batches: vec![batch],
+        })
+    }
+
     fn describe(&self, name: &str) -> Result<DdlResult> {
         let snapshot = self.engine.inner.catalog.snapshot()?;
-        let table = snapshot.table(name).ok_or_else(|| {
-            VqlError::new(
-                ErrorCode::NotFound,
-                format!("table '{name}' does not exist"),
-            )
-        })?;
-        let fields = table.schema.fields();
+        let relation_schema = snapshot
+            .table(name)
+            .map(|table| Arc::clone(&table.schema))
+            .or_else(|| snapshot.stream(name).map(|_| rtsp_schema()))
+            .ok_or_else(|| {
+                VqlError::new(
+                    ErrorCode::NotFound,
+                    format!("relation '{name}' does not exist"),
+                )
+            })?;
+        let fields = relation_schema.fields();
         let schema = Arc::new(Schema::new(vec![
             Field::new("column_name", DataType::Utf8, false),
             Field::new("data_type", DataType::Utf8, false),
@@ -770,7 +1172,7 @@ impl Session {
             VqlError::new(ErrorCode::Execution, error.to_string()).with_source(error)
         })?;
         Ok(DdlResult {
-            message: format!("table '{name}'"),
+            message: format!("relation '{name}'"),
             batches: vec![batch],
         })
     }
@@ -788,6 +1190,33 @@ fn function_ddl_error(error: datafusion::common::DataFusionError) -> VqlError {
         | datafusion::common::DataFusionError::Diagnostic(_, source) => function_ddl_error(*source),
         source => VqlError::new(ErrorCode::InvalidSql, source.to_string()).with_source(source),
     }
+}
+
+fn normalize_rtsp_endpoint(endpoint: &str) -> Result<String> {
+    let parsed = url::Url::parse(endpoint).map_err(|error| {
+        VqlError::new(
+            ErrorCode::InvalidLocation,
+            "RTSP endpoint must be an absolute rtsp:// URL",
+        )
+        .with_source(error)
+    })?;
+    if parsed.scheme() != "rtsp" || parsed.host_str().is_none() {
+        return Err(VqlError::new(
+            ErrorCode::InvalidLocation,
+            "RTSP endpoint must be an absolute rtsp:// URL with a host",
+        ));
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "RTSP credentials, query parameters, and fragments cannot be stored in the Catalog; use an endpoint without embedded secrets",
+        ));
+    }
+    Ok(parsed.to_string())
 }
 
 fn normalize_location(location: &str) -> Result<PathBuf> {
@@ -1650,7 +2079,7 @@ mod tests {
                 ("uri", "Utf8", "false"),
                 (
                     "image",
-                    "Struct(\"uri\": Utf8, \"locator\": Utf8, \"pts_ms\": Int64, \"frame_id\": UInt64, \"encoded\": Binary, \"encoding\": Utf8, \"width\": Int32, \"height\": Int32, \"arena_id\": UInt64, \"arena_slot\": UInt32)",
+                    "Struct(\"uri\": Utf8, \"locator\": Utf8, \"pts_ms\": Int64, \"frame_id\": UInt64, \"encoded\": Binary, \"encoding\": Utf8, \"width\": Int32, \"height\": Int32, \"buffer_id\": UInt64, \"buffer_slot\": UInt32)",
                     "false"
                 ),
                 ("width", "Int32", "true"),
@@ -1667,5 +2096,204 @@ mod tests {
             0,
             "a dropped table must disappear from SHOW TABLES"
         );
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    #[test]
+    fn stream_lifecycle_and_stateless_planning_are_available_without_connecting() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(
+                "CREATE STREAM entrance FROM 'rtsp://camera.example:554/live' WITH (\
+                 fps=5, event_time='capture_time', watermark=INTERVAL '2' SECOND, transport='tcp')",
+            )
+            .unwrap();
+
+        let shown = session.sql("SHOW STREAMS").unwrap().collect().unwrap();
+        assert_eq!(shown[0].num_rows(), 1);
+        let names = shown[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "entrance");
+
+        let described = session.sql("DESCRIBE entrance").unwrap().collect().unwrap();
+        let names = described[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            (0..names.len())
+                .map(|row| names.value(row))
+                .collect::<Vec<_>>(),
+            ["ts", "frame", "frame_id", "source"]
+        );
+        let data_types = described[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(data_types.value(2), "Int64");
+
+        let statement = session
+            .sql("SELECT ts, frame_id, source FROM entrance WHERE frame_id >= 0")
+            .unwrap();
+        assert!(statement.is_unbounded());
+        assert!(
+            session
+                .sql("EXPLAIN SELECT frame_id FROM entrance")
+                .unwrap()
+                .collect()
+                .is_ok()
+        );
+        let error = session.sql("SELECT COUNT(*) FROM entrance").unwrap_err();
+        assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
+
+        session.sql("DROP STREAM entrance").unwrap();
+        assert_eq!(
+            session.sql("SHOW STREAMS").unwrap().collect().unwrap()[0].num_rows(),
+            0
+        );
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    #[test]
+    fn rtsp_catalog_rejects_embedded_secrets() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        for endpoint in [
+            "rtsp://user:password@camera/live",
+            "rtsp://camera/live?token=secret",
+        ] {
+            let error = session
+                .sql(&format!("CREATE STREAM cam FROM '{endpoint}'"))
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidOption);
+        }
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    #[test]
+    fn finite_rtsp_query_runs_epochs_and_encodes_egress_images() {
+        if !crate::test_util::ffmpeg_available() {
+            return;
+        }
+        let temp = tempdir().unwrap();
+        let video = temp.path().join("stream.mp4");
+        assert!(crate::test_util::generate_test_video(&video));
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        engine
+            .inner
+            .catalog
+            .create_stream(&StreamDef {
+                name: "local_stream".to_owned(),
+                endpoint: video.to_string_lossy().into_owned(),
+                fps: 5.0,
+                event_time: crate::catalog::EventTimePolicy::CaptureTime,
+                watermark_delay_ms: 100,
+                transport: crate::catalog::RtspTransport::Tcp,
+            })
+            .unwrap();
+        let session = engine.session().build().unwrap();
+        let statement = session
+            .sql("SELECT frame FROM local_stream LIMIT 2 OFFSET 1")
+            .unwrap();
+        assert!(!statement.is_unbounded());
+        let batches = statement.collect().unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        let images = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StructArray>()
+            .unwrap();
+        let encoded = images
+            .column(4)
+            .as_any()
+            .downcast_ref::<arrow::array::BinaryArray>()
+            .unwrap();
+        let buffer_ids = images
+            .column(8)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert!(!encoded.is_null(0));
+        assert!(buffer_ids.is_null(0));
+        let metrics = statement.metrics().unwrap();
+        assert!(metrics.decode_frames() > 0);
+        assert!(metrics.source_generation() > 0);
+        assert!(metrics.watermark_ms().is_some());
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    #[test]
+    fn local_video_stream_runs_people_detection_scenario() {
+        if !crate::test_util::ffmpeg_available() {
+            return;
+        }
+        let temp = tempdir().unwrap();
+        let video = temp.path().join("people-stream.mp4");
+        assert!(crate::test_util::generate_test_video(&video));
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        engine
+            .inner
+            .catalog
+            .create_stream(&StreamDef {
+                name: "people_stream".to_owned(),
+                endpoint: video.to_string_lossy().into_owned(),
+                fps: 5.0,
+                event_time: crate::catalog::EventTimePolicy::CaptureTime,
+                watermark_delay_ms: 100,
+                transport: crate::catalog::RtspTransport::Tcp,
+            })
+            .unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql("CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'")
+            .unwrap();
+
+        let statement = session
+            .sql(
+                "WITH detected AS (
+                   SELECT frame_id, CARDINALITY(IMAGE_DETECTION(
+                     'detector', frame, classes => ['person'], min_confidence => 0.5
+                   )) AS people
+                   FROM people_stream
+                 )
+                 SELECT frame_id, people
+                 FROM detected
+                 WHERE people > 0
+                 LIMIT 3",
+            )
+            .unwrap();
+        let batches = statement.collect().unwrap();
+        let rows = batches
+            .iter()
+            .flat_map(|batch| {
+                let frame_ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let people = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<arrow::array::UInt64Array>()
+                    .unwrap();
+                (0..batch.num_rows())
+                    .map(|row| (frame_ids.value(row), people.value(row)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rows, [(0, 1), (1, 1), (2, 1)]);
+        let metrics = statement.metrics().unwrap();
+        assert!(metrics.decode_frames() >= 3);
+        assert_eq!(metrics.inference_rows(), 3);
+        assert!(metrics.watermark_ms().is_some());
     }
 }

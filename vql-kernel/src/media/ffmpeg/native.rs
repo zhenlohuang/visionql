@@ -6,8 +6,8 @@ use ffmpeg::software::scaling::{context::Context as ScalingContext, flag::Flags}
 use ffmpeg::util::frame::video::Video;
 use ffmpeg_next as ffmpeg;
 
-use super::ffmpeg_subprocess::SubprocessDecoder;
-use super::{DecodedFrame, VideoDecoder, VideoMetadata};
+use super::SubprocessDecoder;
+use crate::media::{DecodedFrame, VideoDecoder, VideoMetadata};
 use crate::{ErrorCode, Result, VqlError};
 
 #[derive(Debug, Default)]

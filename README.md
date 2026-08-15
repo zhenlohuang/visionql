@@ -25,7 +25,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL or the DataFrame API, users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
-> VisionQL v0.1 is pre-release. Image sets and historical video are implemented; the typed inference contract is being integrated before release. RTSP streams, Kafka, `vqld`, Workbench, and vector search remain later roadmap items. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
+> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, and the first v0.2 RTSP source slice are implemented. Streaming `TUMBLE`, Kafka, `vqld`, Workbench, and vector search remain roadmap items. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
 
 ## Why VisionQL
 
@@ -125,6 +125,26 @@ The Runtime registry is intentionally explicit: `onnxruntime` and Triton with `k
 
 Set `HF_TOKEN` when resolving a private Hugging Face bundle. Credentials are provided through secret configuration and never persisted in visible Model DDL.
 
+### RTSP source preview
+
+The first v0.2 slice registers one live camera and runs a stateless attached query until the client cancels it. FFmpeg decodes on a controlled worker, sampling uses event time, watermarks advance outside data rows, and disconnects retry with exponential backoff.
+
+```sql
+CREATE STREAM cam_entrance
+FROM 'rtsp://10.0.0.15:554/main'
+WITH (
+  fps = 5,
+  event_time = 'capture_time',
+  watermark = INTERVAL '2' SECOND,
+  transport = 'tcp'
+);
+
+SELECT ts, frame_id, source, frame
+FROM cam_entrance;
+```
+
+The shell and `vql run` print unbounded results incrementally; Ctrl-C cancels the attached query. `Projection`, `Filter`, `UNNEST`, scalar functions, and typed inference are accepted. Streaming aggregation is rejected until the separate `TUMBLE` state work lands. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
+
 ## Python API
 
 The example below reuses the `sample_images` table and `VQL_HOME` from [Quick start](#quick-start). Build the Python extension into an active virtual environment with [Maturin](https://www.maturin.rs/):
@@ -194,7 +214,7 @@ flowchart LR
     ARROW --> HOSTS
 ```
 
-The CLI and Python hosts share `vql-kernel`, which owns SQL planning, the Catalog and Query Manifests, DataFusion execution, media decoding, and model inference. For design rationale—including lazy media decoding, optimizer-visible inference, and the future batch/stream boundary—read the [system design](docs/design.md).
+The CLI and Python hosts share `vql-kernel`, which owns SQL planning, the Catalog and Query Manifests, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. For design rationale—including lazy media decoding, optimizer-visible inference, and the batch/stream boundary—read the [system design](docs/design.md).
 
 ## Documentation
 
@@ -239,11 +259,12 @@ pre-commit run --all-files
 pre-commit run --hook-stage pre-push --all-files
 ```
 
-The real-model test is intentionally ignored in the default suite. Run it with an exported model:
+The real-model mixed-size batch scenario reads `data/models/yolo26n.onnx` directly. It runs when
+the integration fixtures are available and otherwise reports a skip:
 
 ```bash
-VQL_YOLO26_ONNX=./data/models/yolo26n.onnx \
-  cargo test real_yolo26_onnx_e2e -- --ignored
+VQL_TEST_CASE=scenarios/detect_objects_in_mixed_size_image_batch \
+  cargo test -p vql-kernel --test integration --locked
 ```
 
 ## Contributing

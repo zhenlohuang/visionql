@@ -3,7 +3,7 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use super::{DecodedFrame, VideoDecoder, VideoMetadata};
+use crate::media::{DecodedFrame, VideoDecoder, VideoMetadata};
 use crate::{ErrorCode, Result, VqlError};
 
 #[derive(Debug, Default)]

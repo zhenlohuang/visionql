@@ -163,6 +163,26 @@ impl ModelRuntime {
                     .with_source(error)
             });
         }
+        let buffer_ids = images
+            .column(8)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .ok_or_else(|| {
+                VqlError::new(ErrorCode::Internal, "IMAGE buffer_id field is invalid")
+            })?;
+        let buffer_slots = images
+            .column(9)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt32Array>()
+            .ok_or_else(|| {
+                VqlError::new(ErrorCode::Internal, "IMAGE buffer_slot field is invalid")
+            })?;
+        if !buffer_ids.is_null(row) && !buffer_slots.is_null(row) {
+            return decoded_image(
+                self.media
+                    .resolve_buffered_frame(buffer_ids.value(row), buffer_slots.value(row))?,
+            );
+        }
         let locators = images
             .column(1)
             .as_any()
@@ -171,7 +191,7 @@ impl ModelRuntime {
         if locators.is_null(row) {
             return Err(VqlError::new(
                 ErrorCode::Execution,
-                "IMAGE has neither encoded bytes nor a locator",
+                "IMAGE has neither encoded bytes, a frame buffer slot, nor a locator",
             ));
         }
         let locator = parse_locator(locators.value(row))?;
