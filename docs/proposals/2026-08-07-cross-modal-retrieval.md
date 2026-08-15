@@ -9,7 +9,7 @@ updated_at: 2026-08-10
 
 ## Summary
 
-The v0.4 text-to-image retrieval feature registers separate `IMAGE_EMBEDDING(n)` and `TEXT_EMBEDDING(n)` Models, calls them through `EMBED_IMAGE` and `EMBED_TEXT`, persists `VECTOR(n)` results in Lance, and performs Top-K search with the `<->` distance operator and an optional HNSW index. This proposal currently fixes the new types, syntax, and execution model; the remaining implementation detail will be completed when v0.4 begins.
+The v0.4 text-to-image retrieval feature registers separate `IMAGE_EMBEDDING(n)` and `TEXT_EMBEDDING(n)` Models, calls them through `IMAGE_EMBEDDING` and `TEXT_EMBEDDING`, persists `VECTOR(n)` results in Lance, and performs Top-K search with the `<->` distance operator and an optional HNSW index. This proposal currently fixes the new types, syntax, and execution model; the remaining implementation detail will be completed when v0.4 begins.
 
 ## Motivation and Scope
 
@@ -32,13 +32,13 @@ v0.4 normalizes `<->` to `L2_DISTANCE` and then executes a bounded Top-K. Withou
 | Addition | Definition | Existing contract it must preserve |
 |---|---|---|
 | `VECTOR(n)` | Arrow storage is `FixedSizeList<Float32, n>`; dimension is part of the type and is checked during planning | Logical types and extension metadata in [design.md](../design.md) §6.1 |
-| `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)` Model types | Fixed functions are `EMBED_IMAGE('<model>', image)` and `EMBED_TEXT('<model>', text)`; earlier versions reject registration | Typed Model contract and semantic fingerprints in [design.md](../design.md) §7.3 |
+| `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)` Model types | Fixed functions are `IMAGE_EMBEDDING('<model>', image)` and `TEXT_EMBEDDING('<model>', text)`; earlier versions reject registration | Typed Model contract and semantic fingerprints in [design.md](../design.md) §7.3 |
 | Vector-dimension resolution | Dimension `n` is structural Model-type data. Registration validates it against the resolved Runtime and PostProcessor contracts; planning derives the exact return type from the Model. | Query Manifest and pipeline validation in [design.md](../design.md) §4.3 and §10.1 |
 | `L2_DISTANCE(VECTOR(n), VECTOR(n)) -> FLOAT` and `<->` | Require equal dimensions during planning; normalize `<->` to `L2_DISTANCE` in the AST or logical plan | Normalization and built-in functions in [design.md](../design.md) §7.5–§7.6 |
 | `CREATE INDEX ... USING HNSW` | Earlier versions parse and return unsupported without registering an empty object | DDL and rejection behavior in [design.md](../design.md) §7.1 |
 | Vector Top-K and ANN rewrite | Defined above | Rule ordering and truthful `EXPLAIN` in [design.md](../design.md) §9 |
-| Constant-argument embedding, such as `EMBED_TEXT('clip_text', '...')` | Execute once as a query-init expression when determinism requirements are met | [design.md](../design.md) §9.2 item 4 |
-| Reused `Inference` node | Extract `EMBED_IMAGE` and `EMBED_TEXT` into the same type-generic `Inference` node | [design.md](../design.md) §4.1, §9.2, and §10 |
+| Constant-argument embedding, such as `TEXT_EMBEDDING('clip_text', '...')` | Execute once as a query-init expression when determinism requirements are met | [design.md](../design.md) §9.2 item 4 |
+| Reused `Inference` node | Extract `IMAGE_EMBEDDING` and `TEXT_EMBEDDING` into the same type-generic `Inference` node | [design.md](../design.md) §4.1, §9.2, and §10 |
 
 ## Relationship to the System Design
 

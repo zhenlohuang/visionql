@@ -16,6 +16,14 @@ use crate::{ErrorCode, VqlError};
 
 use super::python_udf::parse_data_type as parse_python_data_type;
 
+const RESERVED_INFERENCE_FUNCTION_NAMES: &[&str] = &[
+    "image_detection",
+    "image_classification",
+    "image_embedding",
+    "text_embedding",
+    "text_generation",
+];
+
 #[derive(Debug, Default)]
 pub(crate) struct VqlTypePlanner;
 
@@ -95,6 +103,13 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
         return Err(VqlError::new(
             ErrorCode::InvalidOption,
             "OR REPLACE and TEMPORARY functions are not supported",
+        ));
+    }
+    let function_name = statement.name.to_ascii_lowercase();
+    if RESERVED_INFERENCE_FUNCTION_NAMES.contains(&function_name.as_str()) {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            format!("function name '{function_name}' is reserved for built-in typed inference"),
         ));
     }
     let arguments = statement.args.as_deref().unwrap_or_default();
@@ -180,7 +195,7 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
         }
     };
     let mut function = FunctionDef {
-        name: statement.name.to_ascii_lowercase(),
+        name: function_name,
         implementation,
         parameters,
         return_type,

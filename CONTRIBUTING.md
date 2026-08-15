@@ -78,7 +78,7 @@ Then run the suite, optionally narrowing it while iterating:
 
 ```bash
 cargo test -p vql-kernel --test integration
-VQL_TEST_CASE=functions/detect_objects cargo test -p vql-kernel --test integration
+VQL_TEST_CASE=functions/image_detection cargo test -p vql-kernel --test integration
 ```
 
 Without the fixtures every case reports a skip and passes, which keeps `cargo test --workspace` green on a fresh clone. Set `VQL_INTEGRATION_TEST=1` to turn a missing fixture into a failure instead.
@@ -88,10 +88,10 @@ Every main SQL file appears as an individual test in Cargo output; use `cargo te
 A case has one main SQL statement, an expected result, and optional setup and teardown sidecars:
 
 ```text
-detect_objects.setup.sql
-detect_objects.sql
-detect_objects.expected.json
-detect_objects.teardown.sql
+image_detection.setup.sql
+image_detection.sql
+image_detection.expected.json
+image_detection.teardown.sql
 ```
 
 Expected JSON contains the exact schema and rows:

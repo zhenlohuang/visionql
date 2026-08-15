@@ -75,5 +75,5 @@ python examples/python/image_filtering.py
 ```
 
 All examples use the same `yolo26n.onnx` export. `CREATE MODEL ... WITH (...)` declares the Runtime,
-PreProcessor, and PostProcessor contract; each `DETECT_OBJECTS` call supplies query-specific classes
+PreProcessor, and PostProcessor contract; each `IMAGE_DETECTION` call supplies query-specific classes
 and confidence. Remove `data/.vql/` when you intentionally want a fresh development catalog.

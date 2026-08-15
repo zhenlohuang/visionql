@@ -700,7 +700,7 @@ As defined in §1.1 and PRD §3.8, Workbench is not a notebook, general BI tool,
 | Cancel | DELETE execution | `CancelFlightInfo` / cancellation token |
 | Load catalog | Aggregate and cache for 30 seconds | `GetTables` + `SHOW` / `DESCRIBE` |
 | Show thumbnail | Session blob cache | `IMAGE` thumbnail in query result |
-| Open original | Validate `media_ref` | Prepared `TO_JPEG(FRAME_AT(...))` |
+| Open original | Validate `media_ref` | Locator-backed Flight `DoGet` |
 | Live preview | Flight-to-SSE with short event ring | Unbounded `DoGet` |
 | Submit durable job | Display generated SQL and send through execution | `SUBMIT QUERY name AS INSERT INTO ...` |
 | Show Jobs | Typed JSON | `SHOW QUERIES` |

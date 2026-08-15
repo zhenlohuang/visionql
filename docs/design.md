@@ -416,7 +416,6 @@ Batch video normally fuses read, decode, and preprocessing inside `InferenceExec
 
 - Decode failure leaves the media reference and metadata intact, but any pixel-dependent result is NULL.
 - Inference failure makes the model result NULL while preserving input columns.
-- `COUNT_OBJECTS(NULL, ...)` returns NULL, not 0. Use `COALESCE` to request 0 explicitly.
 - A configurable failure-rate threshold sustained for five minutes raises an alert without changing results.
 - `SET vql.on_error = 'fail'` terminates on the first row-level failure.
 
@@ -488,18 +487,18 @@ A MODEL is one typed inference capability backed by an artifact bundle or endpoi
 
 | Model `TYPE` | Built-in function | Domain input | Canonical result | Availability |
 |---|---|---|---|---|
-| `OBJECT_DETECTION` | `DETECT_OBJECTS` | `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
-| `IMAGE_CLASSIFICATION` | `CLASSIFY_IMAGE` | `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Roadmap-gated |
-| `IMAGE_EMBEDDING(n)` | `EMBED_IMAGE` | `IMAGE` | `VECTOR(n)` | v0.4 |
-| `TEXT_EMBEDDING(n)` | `EMBED_TEXT` | `STRING` | `VECTOR(n)` | v0.4 |
-| `TEXT_GENERATION` | `GENERATE_TEXT` | `STRING` | `STRING` | Roadmap-gated |
+| `OBJECT_DETECTION` | `IMAGE_DETECTION` | `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
+| `IMAGE_CLASSIFICATION` | `IMAGE_CLASSIFICATION` | `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Roadmap-gated |
+| `IMAGE_EMBEDDING(n)` | `IMAGE_EMBEDDING` | `IMAGE` | `VECTOR(n)` | v0.4 |
+| `TEXT_EMBEDDING(n)` | `TEXT_EMBEDDING` | `STRING` | `VECTOR(n)` | v0.4 |
+| `TEXT_GENERATION` | `TEXT_GENERATION` | `STRING` | `STRING` | Roadmap-gated |
 
 One source bundle may be registered under multiple compatible capability types. For example, CLIP image and text embedding are two Models with different fixed interfaces; artifact-cache or Runtime-session reuse is an internal optimization.
 
 Required inference arguments are positional: the Model name comes first, followed by the Model type's domain inputs. Optional semantic arguments use DataFusion's `=>` named-argument notation and must follow every positional argument:
 
 ```sql
-SELECT DETECT_OBJECTS(
+SELECT IMAGE_DETECTION(
   'yolo',
   image,
   classes => ['person'],
@@ -549,7 +548,7 @@ The semantic fingerprint includes the Model type and structural parameters, sour
 
 The statement router uses DataFusion's PostgreSQL-style function grammar, `CreateFunction` representation, named-argument support, and UDF registry. A VisionQL `FunctionFactory` validates the supported language or body, constructs the UDF, and persists the normalized definition. Query Manifest construction recreates the equivalent DataFusion UDF, so session-local registration is never durable state.
 
-Python functions require an explicit `RETURNS` type. SQL expression functions may omit it when DataFusion can derive the body type from positional parameter types and registered built-ins. This permits a compact inference preset such as `CREATE FUNCTION detect_people(IMAGE) RETURN DETECT_OBJECTS('yolo', $1, classes => ['person'])`; macro expansion still exposes the typed inference marker to the planner.
+Python functions require an explicit `RETURNS` type. SQL expression functions may omit it when DataFusion can derive the body type from positional parameter types and registered built-ins. This permits a compact inference preset such as `CREATE FUNCTION detect_people(IMAGE) RETURN IMAGE_DETECTION('yolo', $1, classes => ['person'])`; macro expansion still exposes the typed inference marker to the planner.
 
 A Python UDF receives one `pyarrow.Array` per argument and returns an equal-length, type-compatible `pyarrow.Array`. `IMAGE` crosses the language boundary in encoded form; the SDK supplies batch decode helpers. Row-at-a-time callbacks are not supported.
 
@@ -568,19 +567,19 @@ Inference-call parameters such as `classes` and `min_confidence` are owned by th
 
 ### 7.6 Built-in Functions
 
+Typed-inference function names are reserved case-insensitively from v0.1, including Roadmap-gated markers; `CREATE FUNCTION` cannot redefine them.
+
 | Function | Signature | Contract |
 |---|---|---|
-| `DETECT_OBJECTS` | `(model STRING, image IMAGE [, named options])` → canonical detection array | v0.1 typed planner marker; the first argument resolves to an `OBJECT_DETECTION` Model and the call must become `Inference` |
-| `CLASSIFY_IMAGE` | `(model STRING, image IMAGE [, named options])` → canonical classification array | Roadmap-gated typed planner marker |
-| `EMBED_IMAGE` / `EMBED_TEXT` | `(model STRING, IMAGE)` / `(model STRING, STRING)` → `VECTOR(n)` | v0.4 typed planner markers; dimension comes from Model `TYPE` |
-| `GENERATE_TEXT` | `(model STRING, prompt STRING [, named options])` → `STRING` | Roadmap-gated bounded final-text marker |
-| `COUNT_OBJECTS` | `(detections, label STRING, min_confidence FLOAT) -> BIGINT` | Count matching array elements without expansion or whole-frame removal |
+| `IMAGE_DETECTION` | `(model STRING, image IMAGE [, named options])` → canonical detection array | v0.1 typed planner marker; the first argument resolves to an `OBJECT_DETECTION` Model and the call must become `Inference` |
+| `IMAGE_CLASSIFICATION` | `(model STRING, image IMAGE [, named options])` → canonical classification array | Roadmap-gated typed planner marker |
+| `IMAGE_EMBEDDING` / `TEXT_EMBEDDING` | `(model STRING, IMAGE)` / `(model STRING, STRING)` → `VECTOR(n)` | v0.4 typed planner markers; dimension comes from Model `TYPE` |
+| `TEXT_GENERATION` | `(model STRING, prompt STRING [, named options])` → `STRING` | Roadmap-gated bounded final-text marker |
 | `BOX_CENTER` | `(BOX2D) -> POINT2D` | Function form of `box.center` |
 | `POLYGON` / `ST_POLYGON` | `(STRING) -> POLYGON` | Parse constants during planning; require closure, finite values, and `[0,1]` coordinates |
 | `ST_CONTAINS` | `(POLYGON, POINT2D) -> BOOLEAN` | Boundary points count as contained |
-| `TO_JPEG` | `(IMAGE [, quality]) -> BINARY` | Explicitly read, decode, and encode; validate quality during planning |
 
-These functions use SQL NULL propagation. In particular, `COUNT_OBJECTS(NULL, ...)` returns NULL.
+VisionQL built-ins use SQL NULL propagation.
 
 ---
 
@@ -653,7 +652,7 @@ Event time and reconnect behavior:
 ### 8.5 Kafka Sink
 
 - Encode JSON scalars through stable rules and preserve query output column names. Regression tests fix the wire format.
-- Emit only sanitized URI, locator, and metadata for `IMAGE` by default. Base64 pixels require explicit `TO_JPEG`.
+- Emit only sanitized URI, locator, and metadata for `IMAGE`; inline pixel payloads are outside the v0.2 Kafka contract.
 - The job coordinator owns retry. A bounded buffer propagates backpressure upstream.
 
 ---

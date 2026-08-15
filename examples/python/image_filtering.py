@@ -38,10 +38,9 @@ if __name__ == "__main__":
         ")"
     ).collect()
     result = session.sql(
-        "SELECT uri, COUNT_OBJECTS("
-        "DETECT_OBJECTS('yolo26n', image, "
-        "classes => ['person'], min_confidence => 0.6), "
-        "'person', 0.6) AS people "
+        "SELECT uri, CARDINALITY("
+        "IMAGE_DETECTION('yolo26n', image, "
+        "classes => ['person'], min_confidence => 0.6)) AS people "
         "FROM product_photos WHERE quality(image) >= 0 ORDER BY uri"
     )
     print(result.show(20))

@@ -11,7 +11,7 @@ VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文�
 - [x] 多模态类型系统：`IMAGE`、`VIDEO`、`BOX2D`
 - [x] 图片目录表（`USING IMAGES`）与 `UNNEST` 检测结果展开
 - [x] 视频目录表（`USING VIDEOS`，建表时按 fps 展开为帧表）
-- [x] 类型化模型接口：`CREATE MODEL <name> TYPE OBJECT_DETECTION` + `DETECT_OBJECTS('<model>', image, ...)`，Model 名称与语义参数在规划期解析
+- [x] 类型化模型接口：`CREATE MODEL <name> TYPE OBJECT_DETECTION` + `IMAGE_DETECTION('<model>', image, ...)`，Model 名称与语义参数在规划期解析
 - [x] Model 配置契约：`runtime.*`、`pre_processor.kind/options`、`post_processor.kind/options`，完整配置写入 Query Manifest
 - [x] 通用推理流水线（[design.md §10](./docs/design.md)）：PreProcessor → Runtime → PostProcessor；本地 `onnxruntime` 批量推理与 Triton KServe V2 HTTP 远程推理
 - [x] DataFusion `FunctionFactory` 驱动的 SQL 表达式函数与库态 Python UDF
@@ -22,7 +22,7 @@ VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文�
 
 **验收**：
 
-- 场景 A（首次使用，PRD 第 4 节）：本地图片目录 → Python UDF 过滤 → `DETECT_OBJECTS` 调用本地 ONNX Model → 筛选目标图片并显示在 Python 会话中（进程内 UDF 要求引擎与用户代码同进程），从安装到第一个结果不超过 5 分钟，全程无外部服务
+- 场景 A（首次使用，PRD 第 4 节）：本地图片目录 → Python UDF 过滤 → `IMAGE_DETECTION` 调用本地 ONNX Model → 筛选目标图片并显示在 Python 会话中（进程内 UDF 要求引擎与用户代码同进程），从安装到第一个结果不超过 5 分钟，全程无外部服务
 
 ## v0.2 — 流：RTSP 摄入与窗口聚合 📋
 
@@ -78,7 +78,7 @@ Workbench（独立子项目，标准 Flight SQL 客户端）：
 
 Parquet 与 Lance 一并在本版交付：两者共用同一套写出、`CREATE TABLE ... AS SELECT` 与逻辑类型恢复契约，分版本做会把 `IMAGE` 列存设计两遍。
 
-- [ ] `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)` Model 类型及固定的 `EMBED_IMAGE` / `EMBED_TEXT` 调用；通过隔离的 `transformers` Runtime 加载 Safetensors/Hugging Face bundle
+- [ ] `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)` Model 类型及固定的 `IMAGE_EMBEDDING` / `TEXT_EMBEDDING` 调用；通过隔离的 `transformers` Runtime 加载 Safetensors/Hugging Face bundle
 - [ ] `VECTOR(n)` 类型、`<->`（`L2_DISTANCE`）与 `ORDER BY ... LIMIT` 暴力 TopK
 - [ ] Parquet Sink 与表 provider（[Parquet Sink proposal](./docs/proposals/2026-08-06-parquet-sink.md)）：批追加与流式滚动文件、`CREATE TABLE ... AS SELECT`、逻辑类型写出/读回
 - [ ] Lance 存储与 Sink：`IMAGE` 原生列存、向量列，嵌入结果落盘复用

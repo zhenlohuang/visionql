@@ -49,10 +49,9 @@ def test_image_filtering_python_udf_then_model(tmp_path):
         "WITH (post_processor.options={labels=['person']})"
     ).collect()
     table = session.sql(
-        "SELECT COUNT_OBJECTS("
-        "DETECT_OBJECTS('detector', image, "
-        "classes => ['person'], min_confidence => 0.8), "
-        "'person', 0.8) AS people "
+        "SELECT CARDINALITY("
+        "IMAGE_DETECTION('detector', image, "
+        "classes => ['person'], min_confidence => 0.8)) AS people "
         "FROM photos WHERE quality(img => image) >= 0"
     ).collect()
     assert table.column("people").to_pylist() == [1]

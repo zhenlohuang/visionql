@@ -102,7 +102,7 @@ WITH (
 );
 
 SELECT uri,
-       DETECT_OBJECTS(
+       IMAGE_DETECTION(
          'yolo',
          image,
          classes => ['person'],

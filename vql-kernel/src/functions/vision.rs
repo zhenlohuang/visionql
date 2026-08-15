@@ -2,99 +2,15 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanBuilder, Float32Array, Float32Builder, Float64Array, Int64Builder, ListArray,
-    ListBuilder, StringArray, StructArray, StructBuilder,
+    Array, BooleanBuilder, Float32Array, Float32Builder, ListArray, ListBuilder, StringArray,
+    StructArray, StructBuilder,
 };
 use arrow::datatypes::{DataType, Field, Fields};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 
-use crate::models::detections_type;
 use crate::types::box2d_field;
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct CountObjects(Signature);
-
-impl ScalarUDFImpl for CountObjects {
-    fn name(&self) -> &str {
-        "count_objects"
-    }
-    fn signature(&self) -> &Signature {
-        &self.0
-    }
-    fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
-        Ok(DataType::Int64)
-    }
-    fn invoke_with_args(
-        &self,
-        args: ScalarFunctionArgs,
-    ) -> datafusion::common::Result<ColumnarValue> {
-        let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let detections = arrays[0]
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or_else(|| {
-                datafusion::common::DataFusionError::Execution(
-                    "COUNT_OBJECTS expects detections".to_owned(),
-                )
-            })?;
-        let labels = arrays[1]
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| {
-                datafusion::common::DataFusionError::Execution(
-                    "COUNT_OBJECTS label must be STRING".to_owned(),
-                )
-            })?;
-        let confidences = arrays[2]
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| {
-                datafusion::common::DataFusionError::Execution(
-                    "COUNT_OBJECTS confidence must be DOUBLE".to_owned(),
-                )
-            })?;
-        let mut output = Int64Builder::with_capacity(detections.len());
-        for row in 0..detections.len() {
-            if detections.is_null(row) || labels.is_null(row) || confidences.is_null(row) {
-                output.append_null();
-                continue;
-            }
-            let values = detections.value(row);
-            let values = values
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .expect("detection list contains structs");
-            let det_labels = values
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("detection label is Utf8");
-            let det_confidences = values
-                .column(1)
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .expect("detection confidence is Float32");
-            let count = (0..values.len())
-                .filter(|index| {
-                    !values.is_null(*index)
-                        && det_labels.value(*index) == labels.value(row)
-                        && f64::from(det_confidences.value(*index)) >= confidences.value(row)
-                })
-                .count();
-            output.append_value(count as i64);
-        }
-        Ok(ColumnarValue::Array(Arc::new(output.finish())))
-    }
-}
-
-pub(crate) fn count_objects_udf() -> ScalarUDF {
-    ScalarUDF::new_from_impl(CountObjects(Signature::exact(
-        vec![detections_type(), DataType::Utf8, DataType::Float64],
-        Volatility::Immutable,
-    )))
-}
 
 pub(crate) fn point_fields() -> Fields {
     Fields::from(vec![

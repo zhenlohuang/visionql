@@ -33,16 +33,12 @@ SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        MAX(person_cnt) AS peak_people
 FROM (
   SELECT ts,
-         COUNT_OBJECTS(
-           DETECT_OBJECTS(
-             'yolo26n',
-             frame,
-             classes => ['person'],
-             min_confidence => 0.6
-           ),
-           'person',
-           0.6
-         ) AS person_cnt
+         CARDINALITY(IMAGE_DETECTION(
+           'yolo26n',
+           frame,
+           classes => ['person'],
+           min_confidence => 0.6
+         )) AS person_cnt
   FROM entrance_videos
 )
 GROUP BY 1;

@@ -10,11 +10,11 @@ use crate::catalog::{DefinitionSnapshot, TableProviderKind};
 use crate::connectors::images::ImagesTableProvider;
 use crate::connectors::videos::VideosTableProvider;
 use crate::functions::{
-    VqlFunctionFactory, VqlTypePlanner, box_center_udf, count_objects_udf, polygon_udf,
-    python_function_udf, st_contains_udf, to_jpeg_udf, tumble_udf,
+    VqlFunctionFactory, VqlTypePlanner, box_center_udf, polygon_udf, python_function_udf,
+    st_contains_udf, tumble_udf,
 };
 use crate::media::MediaRuntime;
-use crate::models::detect_objects_udf;
+use crate::models::image_detection;
 use crate::planner::inference::VqlQueryPlanner;
 use crate::{ErrorCode, Result, VqlError};
 use std::sync::atomic::AtomicBool;
@@ -77,18 +77,12 @@ fn register_functions(
     fail_on_error: Arc<AtomicBool>,
     python_udf_host: Option<PythonUdfHostRef>,
 ) -> Result<()> {
-    context.register_udf(to_jpeg_udf(
-        Arc::clone(&catalog),
-        Arc::clone(&media),
-        Arc::clone(&fail_on_error),
-    ));
-    context.register_udf(count_objects_udf());
     context.register_udf(box_center_udf());
     context.register_udf(polygon_udf("polygon"));
     context.register_udf(polygon_udf("st_polygon"));
     context.register_udf(st_contains_udf());
     context.register_udf(tumble_udf());
-    context.register_udf(detect_objects_udf());
+    context.register_udf(image_detection());
     for (_, function) in snapshot.functions() {
         match &function.definition.implementation {
             crate::catalog::FunctionImplementation::Python { .. } => {

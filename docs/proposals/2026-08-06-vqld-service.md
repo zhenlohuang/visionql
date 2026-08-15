@@ -104,18 +104,7 @@ SET vql.result.image_mode = 'inline';    -- original encoded content, protected 
 
 All three modes use the same `visionql.image` Arrow storage schema. Only the presence and semantic marker of `encoded` change.
 
-On-demand original-media reads use the PRD-defined function:
-
-```sql
--- Open the frame identified by the locator.
-SELECT TO_JPEG(FRAME_AT($1), 90);
-
--- Select another timestamp in the same video object.
-SELECT TO_JPEG(FRAME_AT($1, $2), 90);
--- $1 = IMAGE.locator, $2 = target pts_ms
-```
-
-`FRAME_AT(locator STRING [, pts_ms BIGINT]) -> IMAGE` is an I/O-bearing built-in planned as `MediaFetchExec`. The locator already includes the current frame PTS; the optional second argument selects another timestamp only within the same authorized video object. The function rejects display URIs, parses only versioned locators, and reauthorizes the current principal against the embedded source revision and range. File and object-store references are rereadable under the locator invariants in [design.md](../design.md) §6.2. A live RTSP frame is available only while it remains in the server's bounded compressed-GOP ring. The ring evicts the oldest GOP by total bytes and TTL, is charged to the service resource budget, and does not affect query semantics. See the [Workbench proposal](./2026-08-05-workbench.md) for client behavior.
+On-demand original-media reads use a locator-backed Flight `DoGet`, not a SQL scalar function. The media ticket carries the opaque `IMAGE.locator` and may request another `pts_ms` only within the same authorized video object. `vqld` rejects display URIs, parses only versioned locators, and reauthorizes the current principal against the embedded source revision and range before returning an encoded `IMAGE` row. File and object-store references are rereadable under the locator invariants in [design.md](../design.md) §6.2. A live RTSP frame is available only while it remains in the server's bounded compressed-GOP ring. The ring evicts the oldest GOP by total bytes and TTL, is charged to the service resource budget, and does not affect query semantics. See the [Workbench proposal](./2026-08-05-workbench.md) for client behavior.
 
 ### Minimum System-query Schemas
 

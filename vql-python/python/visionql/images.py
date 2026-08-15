@@ -6,7 +6,7 @@ from io import BytesIO
 def decode_batch(images):
     """Decode the encoded rows of an IMAGE StructArray with Pillow.
 
-    Referenced rows must first be materialized with ``TO_JPEG`` in SQL.
+    VisionQL materializes referenced rows before invoking a Python UDF.
     """
     try:
         from PIL import Image

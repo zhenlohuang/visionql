@@ -1,11 +1,10 @@
 WITH per_window AS (
   SELECT
     TUMBLE(ts, INTERVAL '5' SECOND) AS window_start,
-    SUM(COUNT_OBJECTS(
-      DETECT_OBJECTS('detector', frame, classes => ['person'], min_confidence => 0.5),
-      'person',
-      0.5
-    )) AS people
+    SUM(CARDINALITY(IMAGE_DETECTION(
+      'detector', frame,
+      classes => ['person'], min_confidence => 0.5
+    ))) AS people
   FROM clips
   WHERE uri LIKE '%/people-detection.mp4'
   GROUP BY 1

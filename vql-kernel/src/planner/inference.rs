@@ -250,17 +250,17 @@ fn rewrite_plan_node(
             let Expr::ScalarFunction(call) = &expr else {
                 return Ok(Transformed::no(expr));
             };
-            if !call.name().eq_ignore_ascii_case("detect_objects") {
+            if !call.name().eq_ignore_ascii_case("image_detection") {
                 return Ok(Transformed::no(expr));
             }
             if inputs.len() != 1 {
                 return Err(DataFusionError::Plan(
-                    "DETECT_OBJECTS is only supported on single-input v0.1 plans".to_owned(),
+                    "IMAGE_DETECTION is only supported on single-input v0.1 plans".to_owned(),
                 ));
             }
             if !(2..=4).contains(&call.args.len()) {
                 return Err(DataFusionError::Plan(format!(
-                    "DETECT_OBJECTS expects model, image, and optional classes/min_confidence; got {} arguments",
+                    "IMAGE_DETECTION expects model, image, and optional classes/min_confidence; got {} arguments",
                     call.args.len()
                 )));
             }
@@ -270,7 +270,7 @@ fn rewrite_plan_node(
             })?;
             if model.definition.model_type != ModelType::ObjectDetection {
                 return Err(DataFusionError::Plan(format!(
-                    "DETECT_OBJECTS requires an OBJECT_DETECTION Model; '{}' has type {:?}",
+                    "IMAGE_DETECTION requires an OBJECT_DETECTION Model; '{}' has type {:?}",
                     model.definition.name, model.definition.model_type
                 )));
             }
@@ -278,7 +278,7 @@ fn rewrite_plan_node(
             let input_type = input_expr.get_type(inputs[0].schema())?;
             if !crate::types::is_image_storage(&input_type) {
                 return Err(DataFusionError::Plan(format!(
-                    "DETECT_OBJECTS image argument must be IMAGE, got {input_type}"
+                    "IMAGE_DETECTION image argument must be IMAGE, got {input_type}"
                 )));
             }
             let classes = classes_literal(call.args.get(2))?;
@@ -288,7 +288,7 @@ fn rewrite_plan_node(
             let invocation_fingerprint = semantic_fingerprint(&invocation);
             let model = model.definition.clone();
             let output_name = inference_output_name(
-                "DETECT_OBJECTS",
+                "IMAGE_DETECTION",
                 &model,
                 &invocation_fingerprint,
                 &input_expr,
@@ -306,7 +306,7 @@ fn rewrite_plan_node(
                         input,
                         input_expr,
                         output_name.clone(),
-                        "DETECT_OBJECTS".to_owned(),
+                        "IMAGE_DETECTION".to_owned(),
                         model,
                         invocation,
                         invocation_fingerprint,
@@ -357,7 +357,7 @@ fn inference_output_name(
 fn model_literal(expr: &Expr) -> DataFusionResult<String> {
     let Expr::Literal(value, _) = strip_cast(expr) else {
         return Err(DataFusionError::Plan(
-            "DETECT_OBJECTS model must be a non-NULL string literal".to_owned(),
+            "IMAGE_DETECTION model must be a non-NULL string literal".to_owned(),
         ));
     };
     match value {
@@ -369,7 +369,7 @@ fn model_literal(expr: &Expr) -> DataFusionResult<String> {
             Ok(value.to_ascii_lowercase())
         }
         _ => Err(DataFusionError::Plan(
-            "DETECT_OBJECTS model must be a non-NULL string literal".to_owned(),
+            "IMAGE_DETECTION model must be a non-NULL string literal".to_owned(),
         )),
     }
 }
@@ -388,7 +388,7 @@ fn classes_literal(expr: Option<&Expr>) -> DataFusionResult<Option<Vec<String>>>
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| {
                     DataFusionError::Plan(
-                        "DETECT_OBJECTS classes must be a constant array of strings".to_owned(),
+                        "IMAGE_DETECTION classes must be a constant array of strings".to_owned(),
                     )
                 })?;
             Ok(Some(
@@ -404,7 +404,7 @@ fn classes_literal(expr: Option<&Expr>) -> DataFusionResult<Option<Vec<String>>>
             .collect::<DataFusionResult<Vec<_>>>()
             .map(Some),
         _ => Err(DataFusionError::Plan(
-            "DETECT_OBJECTS classes must be a constant array of strings".to_owned(),
+            "IMAGE_DETECTION classes must be a constant array of strings".to_owned(),
         )),
     }
 }
@@ -415,7 +415,7 @@ fn string_literal(expr: &Expr) -> DataFusionResult<String> {
         | Expr::Literal(ScalarValue::Utf8View(Some(value)), _)
         | Expr::Literal(ScalarValue::LargeUtf8(Some(value)), _) => Ok(value.clone()),
         _ => Err(DataFusionError::Plan(
-            "DETECT_OBJECTS classes must be a constant array of strings".to_owned(),
+            "IMAGE_DETECTION classes must be a constant array of strings".to_owned(),
         )),
     }
 }
@@ -426,7 +426,7 @@ fn probability_literal(expr: Option<&Expr>) -> DataFusionResult<Option<f32>> {
     };
     let Expr::Literal(value, _) = strip_cast(expr) else {
         return Err(DataFusionError::Plan(
-            "DETECT_OBJECTS min_confidence must be a constant number".to_owned(),
+            "IMAGE_DETECTION min_confidence must be a constant number".to_owned(),
         ));
     };
     let value = match value {
@@ -452,7 +452,7 @@ fn probability_literal(expr: Option<&Expr>) -> DataFusionResult<Option<f32>> {
         ScalarValue::UInt64(Some(value)) => *value as f64,
         _ => {
             return Err(DataFusionError::Plan(
-                "DETECT_OBJECTS min_confidence must be a constant number".to_owned(),
+                "IMAGE_DETECTION min_confidence must be a constant number".to_owned(),
             ));
         }
     };

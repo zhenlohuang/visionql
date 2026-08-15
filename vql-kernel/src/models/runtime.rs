@@ -259,25 +259,25 @@ impl ModelRuntime {
 }
 
 #[derive(Debug)]
-struct DetectObjects(Signature);
+struct ImageDetection(Signature);
 
-impl PartialEq for DetectObjects {
+impl PartialEq for ImageDetection {
     fn eq(&self, _other: &Self) -> bool {
         true
     }
 }
 
-impl Eq for DetectObjects {}
+impl Eq for ImageDetection {}
 
-impl Hash for DetectObjects {
+impl Hash for ImageDetection {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        "detect_objects".hash(state);
+        "image_detection".hash(state);
     }
 }
 
-impl ScalarUDFImpl for DetectObjects {
+impl ScalarUDFImpl for ImageDetection {
     fn name(&self) -> &str {
-        "detect_objects"
+        "image_detection"
     }
 
     fn signature(&self) -> &Signature {
@@ -292,12 +292,12 @@ impl ScalarUDFImpl for DetectObjects {
         &self,
         _args: ScalarFunctionArgs,
     ) -> datafusion::common::Result<ColumnarValue> {
-        exec_err!("DETECT_OBJECTS reached execution without InferenceNode extraction")
+        exec_err!("IMAGE_DETECTION reached execution without InferenceNode extraction")
     }
 }
 
-pub(crate) fn detect_objects_udf() -> ScalarUDF {
-    ScalarUDF::new_from_impl(DetectObjects(
+pub(crate) fn image_detection() -> ScalarUDF {
+    ScalarUDF::new_from_impl(ImageDetection(
         Signature::one_of(
             vec![
                 TypeSignature::Any(2),
@@ -312,7 +312,7 @@ pub(crate) fn detect_objects_udf() -> ScalarUDF {
             "classes".to_owned(),
             "min_confidence".to_owned(),
         ])
-        .expect("DETECT_OBJECTS parameter names match its signatures"),
+        .expect("IMAGE_DETECTION parameter names match its signatures"),
     ))
 }
 

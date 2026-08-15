@@ -129,7 +129,7 @@ LOCATION './recordings/entrance/'
 WITH (fps = 5);
 
 -- 2. Register one typed inference capability.
--- TYPE fixes the DETECT_OBJECTS SQL interface and result schema.
+-- TYPE fixes the IMAGE_DETECTION SQL interface and result schema.
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM './models/yolo26n.onnx'
@@ -149,14 +149,14 @@ SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        MAX(person_cnt) AS peak_people
 FROM (
   SELECT ts,
-         COUNT_OBJECTS(
-           DETECT_OBJECTS('yolo26n', frame),
-           'person', 0.6
-         ) AS person_cnt
+         CARDINALITY(IMAGE_DETECTION(
+           'yolo26n', frame,
+           classes => ['person'], min_confidence => 0.6
+         )) AS person_cnt
   FROM entrance_videos
 )
 GROUP BY 1;
--- COUNT_OBJECTS(detections, label, confidence threshold) is a built-in array function.
+-- CARDINALITY is DataFusion's native array-size function.
 ```
 
 The workflow stays below 30 non-comment SQL lines and requires neither inference code nor a deployed service. The example ONNX artifact is exported explicitly from the official `Ultralytics/YOLO26` checkpoint; preparing a model is separate from query logic. The interval from `pip install` to the first result must remain under five minutes, which is the TTFV definition used in Section 7 and Acceptance Scenario A.
@@ -202,11 +202,13 @@ A **MODEL is one typed inference capability**. Its `TYPE` fixes the callable SQL
 
 | Model `TYPE` | Built-in SQL function | Canonical result | Availability |
 |---|---|---|---|
-| `OBJECT_DETECTION` | `DETECT_OBJECTS` over `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
-| `IMAGE_CLASSIFICATION` | `CLASSIFY_IMAGE` over `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Roadmap-gated |
-| `IMAGE_EMBEDDING(n)` | `EMBED_IMAGE` over `IMAGE` | `VECTOR(n)` | v0.4 |
-| `TEXT_EMBEDDING(n)` | `EMBED_TEXT` over `STRING` | `VECTOR(n)` | v0.4 |
-| `TEXT_GENERATION` | `GENERATE_TEXT` over `STRING` | `STRING` | Roadmap-gated |
+| `OBJECT_DETECTION` | `IMAGE_DETECTION` over `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
+| `IMAGE_CLASSIFICATION` | `IMAGE_CLASSIFICATION` over `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Roadmap-gated |
+| `IMAGE_EMBEDDING(n)` | `IMAGE_EMBEDDING` over `IMAGE` | `VECTOR(n)` | v0.4 |
+| `TEXT_EMBEDDING(n)` | `TEXT_EMBEDDING` over `STRING` | `VECTOR(n)` | v0.4 |
+| `TEXT_GENERATION` | `TEXT_GENERATION` over `STRING` | `STRING` | Roadmap-gated |
+
+These five typed-inference function names are reserved case-insensitively, including Roadmap-gated markers. `CREATE FUNCTION` cannot redefine them.
 
 These are capability types rather than broad framework labels such as CV or LLM. The same physical bundle may be registered under multiple compatible types—for example, separate CLIP image- and text-embedding Models—while cache and session reuse remain internal optimizations.
 
@@ -258,7 +260,7 @@ The normal open-source integration path is intentionally short: pin the source r
 Inference uses the fixed built-in function owned by the Model type. Required arguments are positional: the Model name first, followed by the type-specific domain input. Optional semantic arguments use DataFusion's `=>` named-argument notation:
 
 ```sql
-SELECT DETECT_OBJECTS(
+SELECT IMAGE_DETECTION(
   'yolo26n',
   image,
   classes => ['person'],
@@ -294,7 +296,7 @@ SELECT ts,
        det.box,
        det.confidence
 FROM cam_entrance,
-     UNNEST(DETECT_OBJECTS('yolo26n', frame)) AS det
+     UNNEST(IMAGE_DETECTION('yolo26n', frame)) AS det
 WHERE det.label = 'person'
   AND det.confidence > 0.6;
 ```
@@ -303,7 +305,7 @@ WHERE det.label = 'person'
 -- Recorded video: the frame table uses the same query shape.
 SELECT f.uri, f.ts, det.box
 FROM traffic_videos AS f,
-     UNNEST(DETECT_OBJECTS('yolo26n', f.frame)) AS det
+     UNNEST(IMAGE_DETECTION('yolo26n', f.frame)) AS det
 WHERE det.label = 'person';
 ```
 
@@ -315,8 +317,8 @@ WHERE det.label = 'person';
 -- Return the 20 images most similar to the text prompt.
 SELECT uri, image
 FROM product_photos
-ORDER BY EMBED_IMAGE('clip_image', image)
-         <-> EMBED_TEXT('clip_text', 'a worker wearing a red helmet')
+ORDER BY IMAGE_EMBEDDING('clip_image', image)
+         <-> TEXT_EMBEDDING('clip_text', 'a worker wearing a red helmet')
 LIMIT 20;
 ```
 
@@ -332,7 +334,7 @@ INSERT INTO people_per_minute SELECT ...;
 INSERT INTO evidence  -- a Lance/Parquet table; native IMAGE storage arrives in v0.4
 SELECT ts, frame, det.box
 FROM cam_entrance,
-     UNNEST(DETECT_OBJECTS('yolo26n', frame)) AS det
+     UNNEST(IMAGE_DETECTION('yolo26n', frame)) AS det
 WHERE det.label = 'person' AND det.confidence > 0.9;
 ```
 
@@ -341,9 +343,9 @@ WHERE det.label = 'person' AND det.confidence > 0.9;
 Every extension must map to a mature extension point in the columnar query engine. VisionQL does not require a fork of that engine.
 
 1. **Extensions reduce to two standard mechanisms.**
-   - Type-owned inference markers such as `DETECT_OBJECTS` are extracted into explicit `Inference` nodes. Ordinary vectorized functions cover array operations (`COUNT_OBJECTS`) and vector predicates (`L2_DISTANCE`); SQL expression functions expand during planning.
+   - Type-owned inference markers such as `IMAGE_DETECTION` are extracted into explicit `Inference` nodes. Ordinary DataFusion functions cover array operations (`CARDINALITY`) and vector predicates (`L2_DISTANCE`); SQL expression functions expand during planning.
    - VQL DDL updates the Catalog or runtime. `CREATE STREAM/MODEL/FUNCTION/SINK` does not enter the relational plan. A video table expands frames inside its scan operator at the fps declared by the table.
-2. **No lambdas or higher-order functions.** Named functions such as `COUNT_OBJECTS(dets, label, min_conf)` keep expressions first-order and easier to analyze and push down.
+2. **No lambdas or higher-order functions.** `IMAGE_DETECTION` owns label and confidence filtering, so native `CARDINALITY` can count its result without another VisionQL-specific function.
 3. **`UNNEST` is the only row-expansion mechanism.** `FROM t, UNNEST(expr) AS x` maps to the engine's native unnest node without requiring general lateral joins.
 4. **`TUMBLE` keeps the same shape in both modes.** Batch lowers it to ordinary time bucketing and aggregation. Streaming adds window state and watermark handling to the same logical plan. `WINDOW` remains reserved for ANSI analytic functions whose output cardinality does not change.
 5. **Every custom operator has a function equivalent.** Operators such as `<->` normalize to functions, leaving a portable fallback when dialect syntax is unavailable.
@@ -366,12 +368,11 @@ sess = vq.connect()
 counts = (
     sess.stream("cam_entrance")
         .with_column("person_cnt",
-                     vq.fn("count_objects")(
-                         vq.fn("detect_objects")(
-                             "yolo26n", vq.col("frame")
-                         ),
-                         "person",
-                         0.6,
+                     vq.fn("cardinality")(
+                         vq.fn("image_detection")(
+                             "yolo26n", vq.col("frame"),
+                             classes=["person"], min_confidence=0.6,
+                         )
                      ))
         .window(vq.tumble("1 minute"))
         .agg(avg_people=vq.avg("person_cnt"), peak_people=vq.max("person_cnt"))
@@ -381,10 +382,10 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 # Batch: tag an image directory and persist the result.
 (
     sess.table("product_photos")
-        .with_column("tags", vq.fn("detect_objects")(
+        .with_column("tags", vq.fn("image_detection")(
             "yolo26n", vq.col("image")
         ))
-        .with_column("embedding", vq.fn("embed_image")(
+        .with_column("embedding", vq.fn("image_embedding")(
             "clip_image", vq.col("image")
         ))
         .write.lance("s3://bucket/photo_index/")
@@ -477,7 +478,7 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 - `IMAGE`, `VIDEO`, `BOX2D`, nested types, and `UNNEST`; `VECTOR` waits for v0.4.
 - Image and video directory tables. Video is expanded by the table's declared fps.
-- One `OBJECT_DETECTION` Model type called through `DETECT_OBJECTS('<model>', image, ...)`; local ONNX Runtime and remote Triton KServe V2 HTTP execution share the same typed pipeline. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
+- One `OBJECT_DETECTION` Model type called through `IMAGE_DETECTION('<model>', image, ...)`; local ONNX Runtime and remote Triton KServe V2 HTTP execution share the same typed pipeline. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
 - Console Sink for foreground debugging. Kafka arrives in v0.2; Parquet and Lance arrive together in v0.4.
 - Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. The chainable DataFrame API arrives in v0.3.
 - Catalog, shell history, and cache live under `VQL_HOME` (default `$HOME/.vql`). The SQLite Catalog is exactly `$VQL_HOME/catalog/vql.db`. Repository development uses `VQL_HOME=./data/.vql`; datasets live separately under `./data/datasets/`.
@@ -487,13 +488,13 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 **v0.3 adds the `vqld` service**, Flight SQL, TLS/authentication, relation-level authorization, durable job management and recovery, the Python DataFrame API, and Workbench.
 
-**v0.4 adds cross-modal retrieval and persisted results:** `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)`, their fixed `EMBED_IMAGE` / `EMBED_TEXT` calls, `VECTOR(n)`, brute-force `<->` TopK, Parquet and Lance with native `IMAGE` and vector columns, and HNSW indexing. Parquet and Lance ship together against one output, CTAS, and logical-type recovery contract so `IMAGE` storage is designed only once.
+**v0.4 adds cross-modal retrieval and persisted results:** `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)`, their fixed `IMAGE_EMBEDDING` / `TEXT_EMBEDDING` calls, `VECTOR(n)`, brute-force `<->` TopK, Parquet and Lance with native `IMAGE` and vector columns, and HNSW indexing. Parquet and Lance ship together against one output, CTAS, and logical-type recovery contract so `IMAGE` storage is designed only once.
 
 Everything else remains intentionally undefined. Candidate directions live in the [Roadmap](../ROADMAP.md) and will be scheduled only after earlier releases produce real feedback.
 
 **Acceptance scenarios:**
 
-- **Scenario A — first value without external services (v0.1):** run locally in a Python host. Register an image directory, use a Python UDF to reject blurry images, call `DETECT_OBJECTS` with a local ONNX Model to select images containing a target object, and display the result in the Python session. An in-process UDF requires a notebook or REPL; `vql shell` must direct the user to a Python host. The pure-SQL first-run path in Section 3.2 runs in the shell. Both paths must produce a first result within five minutes of `pip install`.
+- **Scenario A — first value without external services (v0.1):** run locally in a Python host. Register an image directory, use a Python UDF to reject blurry images, call `IMAGE_DETECTION` with a local ONNX Model to select images containing a target object, and display the result in the Python session. An in-process UDF requires a notebook or REPL; `vql shell` must direct the user to a Python host. The pure-SQL first-run path in Section 3.2 runs in the shell. Both paths must produce a first result within five minutes of `pip install`.
 - **Scenario B — batch/stream parity (v0.2):** start with the per-minute people-count query in Section 3.2, run it over recorded video, then point the same logic at RTSP and use `vql run` to publish to Kafka. With the same model and sample rate, assert equivalent results. Use Console Sink during debugging to inspect `UNNEST` output. Batch is the trusted reference for the streaming comparison.
 
 Scenario A proves that first use is simple. Scenario B proves the differentiated end-to-end streaming capability.
@@ -544,13 +545,13 @@ The first users will be two or three design partners working with the team on on
 | `CREATE STREAM ... FROM 'rtsp://...'` | DDL | Register a video stream |
 | `CREATE TABLE ... USING IMAGES/VIDEOS` | DDL | Register a directory as a table |
 | `CREATE MODEL ... TYPE ... FROM ... WITH (...)` | DDL | Register a typed inference capability with namespaced Runtime and processor options |
-| `DETECT_OBJECTS('<model>', image [, named options])` | Typed inference | Call an `OBJECT_DETECTION` Model; planning resolves the first positional argument and extracts an `Inference` node |
+| `IMAGE_DETECTION('<model>', image [, named options])` | Typed inference | Call an `OBJECT_DETECTION` Model; planning resolves the first positional argument and extracts an `Inference` node |
 | `CREATE FUNCTION ... RETURN <expression> / LANGUAGE PYTHON AS '<entry>'` | DDL | Register a DataFusion-backed SQL expression or batched Python function |
 | `CREATE SINK` | DDL | Declare a result destination |
 | `CREATE INDEX ... USING HNSW` | DDL | Add a vector index; rewrite `ORDER BY <-> LIMIT` to ANN in v0.4 |
 | `TUMBLE(ts, interval)` | Time bucket | Define a tumbling window for batch or streaming `GROUP BY` |
 | `UNNEST(expr) AS x` | Relational | Expand an array of detections into rows |
-| `COUNT_OBJECTS(dets, label, conf)` | Built-in array function | Count by label and confidence without lambdas |
+| `CARDINALITY(array)` | DataFusion scalar function | Count detections after `IMAGE_DETECTION` applies its named filters |
 | `<->` (equivalent to `L2_DISTANCE`) | Vector | Cross-modal similarity in v0.4 |
 | `SUBMIT QUERY name AS INSERT INTO ...` | Operations | Create a durable Sink job explicitly in v0.3; CLI entry point is `vql submit job.sql`; ordinary unbounded SQL stays attached |
 | `SHOW/DESCRIBE QUERY / PAUSE / RESUME / STOP` | Operations | Inspect and manage durable queries |

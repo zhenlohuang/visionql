@@ -15,7 +15,7 @@ fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Res
     let mut output = sql.to_owned();
     let mut cursor = 0usize;
     while let Some((_start, open, close)) =
-        find_function_call_from(&output, "DETECT_OBJECTS", cursor)?
+        find_function_call_from(&output, "IMAGE_DETECTION", cursor)?
     {
         let args = split_args(&output[open + 1..close])?;
         let has_named = args.iter().any(|arg| top_level_arrow(arg).is_some());
@@ -23,7 +23,7 @@ fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Res
             if args.len() > 2 && !allow_canonical_positional {
                 return Err(VqlError::new(
                     ErrorCode::InvalidSql,
-                    "DETECT_OBJECTS optional arguments must use name => value",
+                    "IMAGE_DETECTION optional arguments must use name => value",
                 ));
             }
             cursor = close + 1;
@@ -42,7 +42,7 @@ fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Res
                 if value.is_empty() {
                     return Err(VqlError::new(
                         ErrorCode::InvalidSql,
-                        format!("DETECT_OBJECTS argument '{name}' requires a value"),
+                        format!("IMAGE_DETECTION argument '{name}' requires a value"),
                     ));
                 }
                 let target = match name.as_str() {
@@ -51,21 +51,21 @@ fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Res
                     _ => {
                         return Err(VqlError::new(
                             ErrorCode::InvalidSql,
-                            format!("unknown DETECT_OBJECTS argument '{name}'"),
+                            format!("unknown IMAGE_DETECTION argument '{name}'"),
                         ));
                     }
                 };
                 if target.replace(value.to_owned()).is_some() {
                     return Err(VqlError::new(
                         ErrorCode::InvalidSql,
-                        format!("duplicate DETECT_OBJECTS argument '{name}'"),
+                        format!("duplicate IMAGE_DETECTION argument '{name}'"),
                     ));
                 }
             } else {
                 if seen_named {
                     return Err(VqlError::new(
                         ErrorCode::InvalidSql,
-                        "DETECT_OBJECTS positional arguments must precede named arguments",
+                        "IMAGE_DETECTION positional arguments must precede named arguments",
                     ));
                 }
                 positional.push(arg.trim().to_owned());
@@ -74,7 +74,7 @@ fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Res
         if positional.len() != 2 {
             return Err(VqlError::new(
                 ErrorCode::InvalidSql,
-                "DETECT_OBJECTS requires positional model and image arguments",
+                "IMAGE_DETECTION requires positional model and image arguments",
             ));
         }
         let mut ordered = positional;
@@ -601,65 +601,65 @@ mod tests {
     fn normalizes_named_inference_options() {
         assert_eq!(
             normalize_inference_calls(
-                "SELECT DETECT_OBJECTS('yolo', image, min_confidence => 0.5, classes => ['person', 'car'])",
+                "SELECT IMAGE_DETECTION('yolo', image, min_confidence => 0.5, classes => ['person', 'car'])",
                 false,
             )
             .unwrap(),
-            "SELECT DETECT_OBJECTS('yolo', image, ['person', 'car'], 0.5)"
+            "SELECT IMAGE_DETECTION('yolo', image, ['person', 'car'], 0.5)"
         );
         assert_eq!(
             normalize_inference_calls(
-                "SELECT DETECT_OBJECTS('yolo', image, min_confidence => 0.5)",
+                "SELECT IMAGE_DETECTION('yolo', image, min_confidence => 0.5)",
                 false,
             )
             .unwrap(),
-            "SELECT DETECT_OBJECTS('yolo', image, NULL, 0.5)"
+            "SELECT IMAGE_DETECTION('yolo', image, NULL, 0.5)"
         );
     }
 
     #[test]
     fn rejects_invalid_inference_option_shapes() {
         let positional =
-            normalize_inference_calls("SELECT DETECT_OBJECTS('yolo', image, ['person'])", false)
+            normalize_inference_calls("SELECT IMAGE_DETECTION('yolo', image, ['person'])", false)
                 .unwrap_err();
         assert!(positional.message.contains("must use name => value"));
 
         let duplicate = normalize_inference_calls(
-            "SELECT DETECT_OBJECTS('yolo', image, classes => ['person'], classes => ['car'])",
+            "SELECT IMAGE_DETECTION('yolo', image, classes => ['person'], classes => ['car'])",
             false,
         )
         .unwrap_err();
         assert!(
             duplicate
                 .message
-                .contains("duplicate DETECT_OBJECTS argument 'classes'")
+                .contains("duplicate IMAGE_DETECTION argument 'classes'")
         );
 
         let unknown = normalize_inference_calls(
-            "SELECT DETECT_OBJECTS('yolo', image, threshold => 0.5)",
+            "SELECT IMAGE_DETECTION('yolo', image, threshold => 0.5)",
             false,
         )
         .unwrap_err();
         assert!(
             unknown
                 .message
-                .contains("unknown DETECT_OBJECTS argument 'threshold'")
+                .contains("unknown IMAGE_DETECTION argument 'threshold'")
         );
     }
 
     #[test]
     fn rewrites_correlated_unnest_to_projection_unnest() {
         assert_eq!(
-            rewrite_correlated_unnest("SELECT det.label FROM photos, UNNEST(DETECT_OBJECTS('yolo', image)) AS u(det) WHERE det.confidence > 0.5").unwrap(),
-            "SELECT det.label FROM (SELECT *, UNNEST(DETECT_OBJECTS('yolo', image)) AS det FROM photos) AS photos WHERE det.confidence > 0.5"
+            rewrite_correlated_unnest("SELECT det.label FROM photos, UNNEST(IMAGE_DETECTION('yolo', image)) AS u(det) WHERE det.confidence > 0.5").unwrap(),
+            "SELECT det.label FROM (SELECT *, UNNEST(IMAGE_DETECTION('yolo', image)) AS det FROM photos) AS photos WHERE det.confidence > 0.5"
         );
     }
 
     #[test]
     fn preserves_the_left_relation_alias_after_unnest_rewrite() {
         assert_eq!(
-            rewrite_correlated_unnest("SELECT f.uri, det.box FROM traffic_videos AS f, UNNEST(DETECT_OBJECTS('yolo', f.frame)) AS det WHERE det.label = 'person'").unwrap(),
-            "SELECT f.uri, det.box FROM (SELECT *, UNNEST(DETECT_OBJECTS('yolo', f.frame)) AS det FROM traffic_videos AS f) AS f WHERE det.label = 'person'"
+            rewrite_correlated_unnest("SELECT f.uri, det.box FROM traffic_videos AS f, UNNEST(IMAGE_DETECTION('yolo', f.frame)) AS det WHERE det.label = 'person'").unwrap(),
+            "SELECT f.uri, det.box FROM (SELECT *, UNNEST(IMAGE_DETECTION('yolo', f.frame)) AS det FROM traffic_videos AS f) AS f WHERE det.label = 'person'"
         );
     }
 

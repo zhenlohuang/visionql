@@ -23,7 +23,7 @@ Tests:
 
 ```bash
 cargo test -p vql-kernel --test integration                          # integration suite over real data
-VQL_TEST_CASE=functions/detect_objects cargo test -p vql-kernel --test integration # filter cases
+VQL_TEST_CASE=functions/image_detection cargo test -p vql-kernel --test integration # filter cases
 VQL_INTEGRATION_TEST=1 cargo test -p vql-kernel --test integration   # fail instead of skip when fixtures are missing
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
 VQL_YOLO26_ONNX=./data/models/yolo26n.onnx cargo test real_yolo26_onnx_e2e -- --ignored
@@ -55,9 +55,9 @@ Three crates: `vql-kernel` (everything), `vql-cli` (clap + reedline shell), `vql
 
 ### Two invariants worth preserving
 
-**Model calls are plan nodes, not row UDFs.** A Model type owns a fixed marker such as `DETECT_OBJECTS`; its first argument is a literal Model name resolved from the query's `DefinitionSnapshot`. `planner/inference.rs` validates type and semantic constants, then lifts every call into an `InferenceNode` above the input. Identical calls are deduplicated by operation, Model fingerprint, invocation fingerprint, and input expression, but only for immutable Models. `InferenceExec` uses the `PreProcessor → RuntimeSession → PostProcessor` pipeline: VisionQL batches local ONNX Runtime work, while Triton owns dynamic batching for KServe V2 requests. Tests assert on `InferenceNode` / `InferenceExec` in the plan text — that is the contract.
+**Model calls are plan nodes, not row UDFs.** A Model type owns a fixed marker such as `IMAGE_DETECTION`; its first argument is a literal Model name resolved from the query's `DefinitionSnapshot`. `planner/inference.rs` validates type and semantic constants, then lifts every call into an `InferenceNode` above the input. Identical calls are deduplicated by operation, Model fingerprint, invocation fingerprint, and input expression, but only for immutable Models. `InferenceExec` uses the `PreProcessor → RuntimeSession → PostProcessor` pipeline: VisionQL batches local ONNX Runtime work, while Triton owns dynamic batching for KServe V2 requests. Tests assert on `InferenceNode` / `InferenceExec` in the plan text — that is the contract.
 
-**`IMAGE` carries references, not pixels.** `IMAGE` is an Arrow `Struct` (`types/image.rs`) with `ARROW:extension:name = visionql.image` metadata and ten nullable fields; the three payload shapes are *referenced* (`uri` + `locator`), *arena* (`arena_id`/`arena_slot`, in-process only), and *encoded* (`encoded` + `encoding`, used at process boundaries such as Python and JSON). Scans never decode. Decoding is triggered only by an explicit consumer — `TO_JPEG`, inference preprocessing, or a Python UDF — and `MediaRuntime` counters exist so tests can assert that a metadata-only query decoded zero frames. Preserving that property is a load-bearing part of nearly every media change.
+**`IMAGE` carries references, not pixels.** `IMAGE` is an Arrow `Struct` (`types/image.rs`) with `ARROW:extension:name = visionql.image` metadata and ten nullable fields; the three payload shapes are *referenced* (`uri` + `locator`), *arena* (`arena_id`/`arena_slot`, in-process only), and *encoded* (`encoded` + `encoding`, used at process boundaries such as Python and JSON). Scans never decode. Decoding is triggered only by an explicit consumer such as inference preprocessing or a Python UDF, and `MediaRuntime` counters exist so tests can assert that a metadata-only query decoded zero frames. Preserving that property is a load-bearing part of nearly every media change.
 
 ### Catalog
 
@@ -67,7 +67,7 @@ Three crates: `vql-kernel` (everything), `vql-cli` (clap + reedline shell), `vql
 
 `MediaRuntime` prefers the `ffmpeg-native` decoder (default cargo feature, needs FFmpeg 8 dev libraries) and silently falls back to the `ffmpeg`/`ffprobe` subprocess decoder; `video_available()` gates `USING VIDEOS`. Video tables expand to frame rows inside the scan operator using the table's `WITH (fps = ...)`, sampled by PTS.
 
-A Model stores a typed `RuntimeSpec`, `PreProcessor` spec, and `PostProcessor` spec. `runtime.*` selects and binds execution; processor-specific values live only in complete `pre_processor.options` and `post_processor.options` objects. Unknown fields and unsupported combinations fail before Catalog commit. Invocation-only values such as `classes` and `min_confidence` belong to `DETECT_OBJECTS`, not the Model. Sources resolve through `models/resolver.rs`; the runtime opens a local/cached ONNX artifact or binds a Triton KServe V2 endpoint. `mock://` remains an internal test backend.
+A Model stores a typed `RuntimeSpec`, `PreProcessor` spec, and `PostProcessor` spec. `runtime.*` selects and binds execution; processor-specific values live only in complete `pre_processor.options` and `post_processor.options` objects. Unknown fields and unsupported combinations fail before Catalog commit. Invocation-only values such as `classes` and `min_confidence` belong to `IMAGE_DETECTION`, not the Model. Sources resolve through `models/resolver.rs`; the runtime opens a local/cached ONNX artifact or binds a Triton KServe V2 endpoint. `mock://` remains an internal test backend.
 
 ### Error contract
 

@@ -55,13 +55,10 @@ plausible. `manifest.json` carries the per-image counts by class name, so a quer
 
 ```sql
 SELECT uri,
-       COUNT_OBJECTS(
-         DETECT_OBJECTS(
-           'yolo26n', image,
-           classes => ['person'], min_confidence => 0.6
-         ),
-         'person', 0.6
-       ) AS people
+       CARDINALITY(IMAGE_DETECTION(
+         'yolo26n', image,
+         classes => ['person'], min_confidence => 0.6
+       )) AS people
 FROM photos
 ORDER BY uri
 ```

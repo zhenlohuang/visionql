@@ -16,7 +16,7 @@ Then run all cases or filter by path:
 
 ```bash
 cargo test -p vql-kernel --test integration
-VQL_TEST_CASE=functions/detect_objects cargo test -p vql-kernel --test integration
+VQL_TEST_CASE=functions/image_detection cargo test -p vql-kernel --test integration
 ```
 
 Every main `.sql` file is registered as an individual test, so the output names each case and the
@@ -46,10 +46,10 @@ tests/
 A case consists of one main statement and its expected result. Setup and teardown are optional:
 
 ```text
-detect_objects.setup.sql
-detect_objects.sql
-detect_objects.expected.json
-detect_objects.teardown.sql
+image_detection.setup.sql
+image_detection.sql
+image_detection.expected.json
+image_detection.teardown.sql
 ```
 
 The runner creates a fresh catalog and `VQL_HOME` for every case, then executes setup, the main

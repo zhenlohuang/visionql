@@ -1,6 +1,6 @@
 SELECT COUNT(*) > 0 AS found
 FROM photos,
-     UNNEST(DETECT_OBJECTS(
+     UNNEST(IMAGE_DETECTION(
        'detector',
        image,
        classes => ['person'],

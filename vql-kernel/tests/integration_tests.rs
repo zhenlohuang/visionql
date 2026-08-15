@@ -4,10 +4,10 @@
 //! one expected JSON file, and optional setup and teardown scripts:
 //!
 //! ```text
-//! detect_objects.setup.sql
-//! detect_objects.sql
-//! detect_objects.expected.json
-//! detect_objects.teardown.sql
+//! image_detection.setup.sql
+//! image_detection.sql
+//! image_detection.expected.json
+//! image_detection.teardown.sql
 //! ```
 //!
 //! See `tests/README.md` for the file format and commands.

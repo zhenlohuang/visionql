@@ -949,7 +949,7 @@ mod tests {
             ))
             .unwrap();
         session
-            .sql("SELECT DETECT_OBJECTS('detector', image) FROM photos")
+            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
             .unwrap()
             .collect()
             .unwrap();
@@ -962,7 +962,7 @@ mod tests {
             .sql("CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'")
             .unwrap();
         session
-            .sql("SELECT DETECT_OBJECTS('detector', image) FROM photos")
+            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
             .unwrap()
             .collect()
             .unwrap();
@@ -1011,6 +1011,39 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, ErrorCode::InvalidSql);
+        let functions = session.sql("SHOW FUNCTIONS").unwrap().collect().unwrap();
+        assert_eq!(functions[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn typed_inference_function_names_are_reserved() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+
+        for name in [
+            "IMAGE_DETECTION",
+            "IMAGE_CLASSIFICATION",
+            "IMAGE_EMBEDDING",
+            "TEXT_EMBEDDING",
+            "TEXT_GENERATION",
+        ] {
+            let error = session
+                .sql(&format!(
+                    "CREATE FUNCTION {name}(BIGINT) RETURNS BIGINT RETURN $1"
+                ))
+                .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::InvalidOption);
+            assert_eq!(
+                error.message,
+                format!(
+                    "function name '{}' is reserved for built-in typed inference",
+                    name.to_ascii_lowercase()
+                )
+            );
+        }
+
         let functions = session.sql("SHOW FUNCTIONS").unwrap().collect().unwrap();
         assert_eq!(functions[0].num_rows(), 0);
     }
@@ -1127,7 +1160,7 @@ mod tests {
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
                  CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';
                  CREATE FUNCTION detect_people(IMAGE)
-                 RETURN DETECT_OBJECTS(
+                 RETURN IMAGE_DETECTION(
                    'detector', $1,
                    classes => ['person'], min_confidence => 0.5
                  );",
@@ -1136,14 +1169,14 @@ mod tests {
             .unwrap();
 
         let batches = session
-            .sql("SELECT COUNT_OBJECTS(detect_people(image), 'person', 0.5) AS people FROM photos")
+            .sql("SELECT CARDINALITY(detect_people(image)) AS people FROM photos")
             .unwrap()
             .collect()
             .unwrap();
         let values = batches[0]
             .column(0)
             .as_any()
-            .downcast_ref::<Int64Array>()
+            .downcast_ref::<arrow::array::UInt64Array>()
             .unwrap();
 
         assert_eq!(values.value(0), 1);
@@ -1171,7 +1204,7 @@ mod tests {
         let batches = session
             .sql(
                 "SELECT f.uri, det.label
-                 FROM photos AS f, UNNEST(DETECT_OBJECTS('detector', f.image)) AS u(det)",
+                 FROM photos AS f, UNNEST(IMAGE_DETECTION('detector', f.image)) AS u(det)",
             )
             .unwrap()
             .collect()
@@ -1227,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn videos_sample_by_pts_and_to_jpeg_decodes_on_demand() {
+    fn videos_sample_by_pts_without_decoding_pixels() {
         if !crate::test_util::ffmpeg_available() {
             return;
         }
@@ -1266,91 +1299,11 @@ mod tests {
         );
 
         let batches = session
-            .sql("SELECT TO_JPEG(frame, 80) AS jpeg FROM clips WHERE pts_ms = 0 LIMIT 1")
-            .unwrap()
-            .collect()
-            .unwrap();
-        let jpeg = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::BinaryArray>()
-            .unwrap();
-        let image = image::load_from_memory(jpeg.value(0)).unwrap();
-        assert_eq!((image.width(), image.height()), (320, 240));
-        assert_eq!(engine.inner.media.counters().decoded_frames, 1);
-
-        let batches = session
             .sql("SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS minute, COUNT(*) FROM clips GROUP BY 1")
             .unwrap()
             .collect()
             .unwrap();
         assert_eq!(batches[0].num_rows(), 1);
-    }
-
-    #[test]
-    fn to_jpeg_rejects_invalid_quality_in_null_mode() {
-        let temp = tempdir().unwrap();
-        let photos = temp.path().join("photos");
-        std::fs::create_dir(&photos).unwrap();
-        RgbImage::from_pixel(8, 8, Rgb([10, 20, 30]))
-            .save(photos.join("one.png"))
-            .unwrap();
-        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let session = engine.session().build().unwrap();
-        session
-            .sql(&format!(
-                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
-                photos.display()
-            ))
-            .unwrap();
-
-        let error = session
-            .sql("SELECT TO_JPEG(image, 0) FROM photos")
-            .unwrap()
-            .collect()
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("quality must be between 1 and 100")
-        );
-    }
-
-    #[test]
-    fn to_jpeg_honors_error_mode_and_counts_null_rows() {
-        let temp = tempdir().unwrap();
-        let photos = temp.path().join("photos");
-        std::fs::create_dir(&photos).unwrap();
-        std::fs::write(photos.join("broken.jpg"), b"not an image").unwrap();
-        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let session = engine.session().build().unwrap();
-        session
-            .sql(&format!(
-                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
-                photos.display()
-            ))
-            .unwrap();
-
-        let query = session
-            .sql("SELECT TO_JPEG(image) AS jpeg FROM photos")
-            .unwrap();
-        let batches = query.collect().unwrap();
-        let jpeg = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::BinaryArray>()
-            .unwrap();
-        assert!(jpeg.is_null(0));
-        assert_eq!(query.metrics().unwrap().error_rows(), 1);
-
-        session.sql("SET vql.on_error='fail'").unwrap();
-        let error = session
-            .sql("SELECT TO_JPEG(image) FROM photos")
-            .unwrap()
-            .collect()
-            .unwrap_err();
-        assert!(error.to_string().contains("failed to decode image"));
     }
 
     #[test]
@@ -1371,14 +1324,14 @@ mod tests {
             ))
             .unwrap();
         let statement = session
-            .sql("SELECT COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.6) AS people FROM photos")
+            .sql("SELECT CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.6)) AS people FROM photos")
             .unwrap();
         let Statement::Query(query) = &statement else {
             panic!("model SELECT must produce a query");
         };
         let logical = query.dataframe.logical_plan().display_indent().to_string();
         assert!(logical.contains("InferenceNode"));
-        assert!(!logical.contains("detect_objects("));
+        assert!(!logical.contains("image_detection("));
         let physical = engine
             .inner
             .runtime
@@ -1393,8 +1346,8 @@ mod tests {
 
         let deduplicated = session
             .sql(
-                "SELECT COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.6), \
-                        COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.8) FROM photos",
+                "SELECT CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.6)) AS first, \
+                        CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.6)) AS second FROM photos",
             )
             .unwrap();
         let Statement::Query(query) = &deduplicated else {
@@ -1423,8 +1376,8 @@ mod tests {
             .unwrap();
         let volatile = session
             .sql(
-                "SELECT DETECT_OBJECTS('remote', image) AS first, \
-                        DETECT_OBJECTS('remote', image) AS second FROM photos",
+                "SELECT IMAGE_DETECTION('remote', image) AS first, \
+                        IMAGE_DETECTION('remote', image) AS second FROM photos",
             )
             .unwrap();
         let Statement::Query(query) = volatile else {
@@ -1487,7 +1440,7 @@ mod tests {
             ))
             .unwrap();
         let Statement::Query(query) = session
-            .sql("SELECT DETECT_OBJECTS('remote', image) FROM photos")
+            .sql("SELECT IMAGE_DETECTION('remote', image) FROM photos")
             .unwrap()
         else {
             panic!("model SELECT must produce a query");
@@ -1581,7 +1534,7 @@ mod tests {
 
         let query = session
             .sql(
-                "SELECT COUNT_OBJECTS(DETECT_OBJECTS('detector', image), 'person', 0.5) AS people \
+                "SELECT CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.5)) AS people \
                  FROM photos",
             )
             .unwrap();
@@ -1594,7 +1547,7 @@ mod tests {
 
         session.sql("SET vql.on_error='fail'").unwrap();
         let error = session
-            .sql("SELECT DETECT_OBJECTS('detector', image) FROM photos")
+            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
             .unwrap()
             .collect()
             .unwrap_err();
