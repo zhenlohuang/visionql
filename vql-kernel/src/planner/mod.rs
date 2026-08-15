@@ -132,8 +132,8 @@ fn validate_stream_node(plan: &LogicalPlan) -> crate::Result<()> {
     match plan {
         LogicalPlan::Aggregate(_) => {
             return Err(crate::VqlError::feature(
-                "streaming aggregates require the v0.2 TUMBLE state implementation; use a stateless preview for RTSP source validation",
-                "v0.2",
+                "streaming aggregates require the unfinished v0.1 TUMBLE state implementation; use a stateless preview for RTSP source validation",
+                "v0.1",
             ));
         }
         LogicalPlan::Sort(_) => {

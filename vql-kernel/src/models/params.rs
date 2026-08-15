@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn known_future_runtimes_are_version_gated() {
         for (kind, target) in [
-            ("transformers", "v0.4"),
+            ("transformers", "v0.3"),
             ("vllm", "未排期"),
             ("sglang", "未排期"),
         ] {

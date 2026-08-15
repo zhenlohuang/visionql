@@ -11,7 +11,7 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
     if sql.contains("<->") {
         return Err(VqlError::feature(
             "vector distance operator is not available",
-            "v0.4",
+            "v0.3",
         ));
     }
     let tokens = significant_tokens(sql)?;
@@ -57,7 +57,7 @@ fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
         Some("STREAM") => parse_create_stream(tokens),
         Some("INDEX") => Err(VqlError::feature(
             "vector indexes are not available",
-            "v0.4",
+            "v0.3",
         )),
         Some("AGGREGATE") | Some("TABLE_FUNCTION") => Err(VqlError::feature(
             "aggregate and table functions are not available",
@@ -201,7 +201,7 @@ fn parse_create_table(tokens: &[Token]) -> Result<VqlStatement> {
     if token_is(tokens.get(3), "AS") {
         return Err(VqlError::feature(
             "CREATE TABLE AS SELECT is not available",
-            "v0.4",
+            "v0.3",
         ));
     }
     let name = identifier(tokens.get(2), "table name")?;
@@ -212,13 +212,13 @@ fn parse_create_table(tokens: &[Token]) -> Result<VqlStatement> {
         Some("KAFKA") => {
             return Err(VqlError::feature(
                 "Kafka table provider is not available",
-                "v0.2",
+                "v0.1",
             ));
         }
         Some("PARQUET") | Some("LANCE") | Some("HNSW") => {
             return Err(VqlError::feature(
                 "columnar/vector providers are not available",
-                "v0.4",
+                "v0.3",
             ));
         }
         Some(provider) => {
@@ -319,7 +319,7 @@ fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
         Some("IMAGE_EMBEDDING") | Some("TEXT_EMBEDDING") => {
             return Err(VqlError::feature(
                 "embedding Model types are not available",
-                "v0.4",
+                "v0.3",
             ));
         }
         Some("IMAGE_CLASSIFICATION") | Some("TEXT_GENERATION") => {
@@ -473,9 +473,9 @@ fn parse_create_sink(tokens: &[Token]) -> Result<VqlStatement> {
     expect_word(tokens.get(3), "TYPE")?;
     let kind = match word(tokens.get(4)).as_deref() {
         Some("CONSOLE") => SinkKind::Console,
-        Some("KAFKA") => return Err(VqlError::feature("Kafka Sink is not available", "v0.2")),
+        Some("KAFKA") => return Err(VqlError::feature("Kafka Sink is not available", "v0.1")),
         Some("PARQUET") | Some("LANCE") => {
-            return Err(VqlError::feature("file Sinks are not available", "v0.4"));
+            return Err(VqlError::feature("file Sinks are not available", "v0.3"));
         }
         _ => return invalid("v0.1 supports TYPE console"),
     };
@@ -732,13 +732,13 @@ mod tests {
     #[test]
     fn future_capabilities_have_stable_target_versions() {
         let cases = [
-            ("CREATE TABLE events USING KAFKA LOCATION 'topic'", "v0.2"),
-            ("CREATE TABLE out USING PARQUET LOCATION './out'", "v0.4"),
-            ("CREATE TABLE out AS SELECT 1", "v0.4"),
-            ("CREATE INDEX idx USING HNSW", "v0.4"),
+            ("CREATE TABLE events USING KAFKA LOCATION 'topic'", "v0.1"),
+            ("CREATE TABLE out USING PARQUET LOCATION './out'", "v0.3"),
+            ("CREATE TABLE out AS SELECT 1", "v0.3"),
+            ("CREATE INDEX idx USING HNSW", "v0.3"),
             (
                 "CREATE MODEL clip TYPE IMAGE_EMBEDDING(512) FROM 'model.safetensors'",
-                "v0.4",
+                "v0.3",
             ),
             (
                 "CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'model.onnx'",
@@ -748,7 +748,7 @@ mod tests {
                 "CREATE MODEL generator TYPE TEXT_GENERATION FROM 'model.gguf'",
                 "未排期",
             ),
-            ("SELECT embedding <-> other FROM values", "v0.4"),
+            ("SELECT embedding <-> other FROM values", "v0.3"),
             ("SUBMIT QUERY q AS SELECT 1", "v0.2"),
             ("CREATE AGGREGATE FUNCTION f", "未排期"),
             ("CREATE TABLE FUNCTION f", "未排期"),

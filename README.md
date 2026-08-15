@@ -25,7 +25,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL or the DataFrame API, users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
-> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, and the first v0.2 RTSP source slice are implemented. Streaming `TUMBLE`, Kafka, `vqld`, Workbench, and vector search remain roadmap items. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
+> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, and the first RTSP source slice are implemented. Streaming `TUMBLE` and Kafka remain v0.1 roadmap items; `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
 
 ## Why VisionQL
 
@@ -33,7 +33,7 @@ Physical AI systems continuously produce camera, vehicle, and robot data. Vision
 
 - **Replace one-off pipelines with queries.** Images become rows and sampled video frames become time-aware relations. Compose visual inference with familiar filters, joins, `UNNEST`, and aggregations instead of rebuilding orchestration for every question.
 - **Optimize inference, not just SQL.** Model calls stay visible in the plan rather than hiding inside black-box UDFs. VisionQL can push down frame sampling and time predicates, batch inference, and avoid decoding columns the query never reads.
-- **Develop on history, move to live data.** The product direction is one query model for bounded image/video data and unbounded camera streams. Historical batch processing ships in v0.1; RTSP streaming and Kafka output are explicitly scoped to v0.2.
+- **Develop on history, move to live data.** v0.1 uses one query model for bounded image/video data and unbounded RTSP camera streams, with attached execution and Kafka output.
 - **Keep execution close to the data.** The v0.1 engine runs in-process and does not require media uploads, a scheduler, or a control plane.
 
 The [PRD](docs/prd.md) covers target users, representative Physical AI workflows, product boundaries, and the longer-term batch/stream value proposition.
@@ -121,13 +121,13 @@ FROM sample_images;
 | Hugging Face bundle | `'hf://owner/repository@<commit>'` | Pin selected files and cache the complete bundle by digest |
 | Inference service | `'endpoint://http://triton-prod:8000'` | Bind through the Runtime's declared protocol, such as Triton KServe V2 |
 
-The Runtime registry is intentionally explicit: `onnxruntime` and Triton with `kserve_v2_http` are v0.1 paths; Triton gRPC, `vllm`, `sglang`, and `llama_cpp` are roadmap-gated, while `transformers` supports v0.4 embedding. `openai` may be a protocol for a compatible Runtime but is not a Runtime kind. ONNX, explicitly classified `.pt`/`.pth`, Safetensors, and GGUF are artifact forms rather than interchangeable loaders.
+The Runtime registry is intentionally explicit: `onnxruntime` and Triton with `kserve_v2_http` are v0.1 paths; Triton gRPC, `vllm`, `sglang`, and `llama_cpp` are roadmap-gated, while `transformers` supports v0.3 embedding. `openai` may be a protocol for a compatible Runtime but is not a Runtime kind. ONNX, explicitly classified `.pt`/`.pth`, Safetensors, and GGUF are artifact forms rather than interchangeable loaders.
 
 Set `HF_TOKEN` when resolving a private Hugging Face bundle. Credentials are provided through secret configuration and never persisted in visible Model DDL.
 
 ### RTSP source preview
 
-The first v0.2 slice registers one live camera and runs a stateless attached query until the client cancels it. FFmpeg decodes on a controlled worker, sampling uses event time, watermarks advance outside data rows, and disconnects retry with exponential backoff.
+The first v0.1 streaming slice registers one live camera and runs a stateless attached query until the client cancels it. FFmpeg decodes on a controlled worker, sampling uses event time, watermarks advance outside data rows, and disconnects retry with exponential backoff.
 
 ```sql
 CREATE STREAM cam_entrance

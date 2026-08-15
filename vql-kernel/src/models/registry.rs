@@ -73,7 +73,7 @@ impl PipelineRegistry {
         registry.register_runtime(Arc::new(TritonRuntimeFactory));
         registry.register_runtime(Arc::new(UnavailableRuntimeFactory::new(
             "transformers",
-            "v0.4",
+            "v0.3",
         )));
         for kind in ["vllm", "sglang", "llama_cpp"] {
             registry.register_runtime(Arc::new(UnavailableRuntimeFactory::new(kind, "未排期")));
@@ -504,6 +504,6 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
-        assert_eq!(error.target_version.as_deref(), Some("v0.4"));
+        assert_eq!(error.target_version.as_deref(), Some("v0.3"));
     }
 }

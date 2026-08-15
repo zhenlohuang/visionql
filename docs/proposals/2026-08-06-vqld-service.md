@@ -1,25 +1,25 @@
 ---
 created_at: 2026-08-06
 status: draft
-target_version: v0.3
-updated_at: 2026-08-10
+target_version: v0.2
+updated_at: 2026-08-15
 ---
 
 # vqld Service: Flight SQL, Durable Jobs, and Recovery
 
 ## Summary
 
-The v0.3 service-deployment and job-management feature introduces the `vqld` daemon, built by `vql-server`. Its only public surfaces are Arrow Flight SQL, public SQL system statements, health checks, and a Prometheus metrics endpoint. This proposal fixes the public Flight SQL contract, including capability negotiation, statement classification, and structured errors; the media protocol required by Workbench; the minimum system-query schemas; durable jobs created by `SUBMIT QUERY`; checkpoint and recovery behavior; and the continuous-query state machine.
+The v0.2 service-deployment and job-management feature introduces the `vqld` daemon, built by `vql-server`. Its only public surfaces are Arrow Flight SQL, public SQL system statements, health checks, and a Prometheus metrics endpoint. This proposal fixes the public Flight SQL contract, including capability negotiation, statement classification, and structured errors; the media protocol required by Workbench; the minimum system-query schemas; durable jobs created by `SUBMIT QUERY`; checkpoint and recovery behavior; and the continuous-query state machine.
 
 ## Motivation and Scope
 
-The embedded v0.1 kernel does not listen on a port. In v0.3, `vqld` owns networking, TLS and authentication, durable job management, and recovery. Every client, including CLI `--server`, Workbench, ADBC, and JDBC, uses the contract in this document. The engine exposes no private management API. Any service capability must be implementable by an independent client against this public contract, consistent with ADR-010 and ADR-014 reserved in [design.md](../design.md). The additional service security boundary is defined below.
+The embedded v0.1 kernel does not listen on a port. In v0.2, `vqld` owns networking, TLS and authentication, durable job management, and recovery. Every client, including CLI `--server`, Workbench, ADBC, and JDBC, uses the contract in this document. The engine exposes no private management API. Any service capability must be implementable by an independent client against this public contract, consistent with ADR-010 and ADR-014 reserved in [design.md](../design.md). The additional service security boundary is defined below.
 
 ## Detailed Design
 
 ### Flight SQL Contract
 
-`vql-server` implements the following public capabilities in v0.3:
+`vql-server` implements the following public capabilities in v0.2:
 
 - Flight SQL statement query/update, prepared statements, `GetSchema`, `GetCatalogs`, `GetDbSchemas`, `GetTables`, `GetTableTypes`, `GetSqlInfo`, and `PollFlightInfo` for long-running queries.
 - Both bounded and unbounded statement-query results return Arrow batches through `DoGet`. An unbounded query returns consumable `FlightInfo` as soon as its schema and endpoint are ready, without waiting for completion. Cancellation uses `CancelFlightInfo`; a disconnected client also triggers the server cancellation token.
@@ -84,7 +84,7 @@ message VisionqlErrorV1 {
 
 `code`, source span, and `retryable` are protocol fields; `message` and `hint` are human-readable. The source span is a half-open byte range `[source_start, source_end)` within the current statement's UTF-8 text and is omitted when no reliable location exists. Flight clients unaware of the extension can still consume the standard status. Workbench must read the envelope instead of parsing error strings and adds `statement_index` itself for multi-statement scripts.
 
-The first v0.3 service release includes TLS, authentication, table/stream-level authorization, and the public job SQL `SUBMIT QUERY`, `SHOW/DESCRIBE QUERY`, `SHOW QUERY DEPENDENCIES`, and `PAUSE/RESUME/STOP`. There is no Workbench-only management RPC.
+The first v0.2 service release includes TLS, authentication, table/stream-level authorization, and the public job SQL `SUBMIT QUERY`, `SHOW/DESCRIBE QUERY`, `SHOW QUERY DEPENDENCIES`, and `PAUSE/RESUME/STOP`. There is no Workbench-only management RPC.
 
 Unbounded-statement lifecycle is explicit:
 
@@ -108,7 +108,7 @@ On-demand original-media reads use a locator-backed Flight `DoGet`, not a SQL sc
 
 ### Minimum System-query Schemas
 
-To keep Workbench from parsing logs, v0.3 fixes these minimum columns. Later versions may append columns:
+To keep Workbench from parsing logs, v0.2 fixes these minimum columns. Later versions may append columns:
 
 ```text
 SHOW QUERIES:
@@ -140,11 +140,11 @@ STOP QUERY '<query_id>';
 
 `query_id` is a server-generated UUID string. `SUBMIT QUERY` provides the durable job name, which is unique among the owner's non-terminal jobs. Attached queries have `name=NULL, lifecycle=attached`; durable jobs have `lifecycle=persistent`. Names are only for display and filtering and cannot replace IDs in state changes.
 
-Query metrics do not have a system-SQL channel. In addition to [design.md](../design.md) §12.3, v0.3 exposes a Prometheus endpoint with labels such as `query_id`, plus checkpoint duration and size, last successful epoch, and recovery count. This matches the PRD §3.8 cost panel. Metric names may evolve before v1.0 but must follow Prometheus naming and unit-suffix conventions; clients must not guess units from arbitrary strings.
+Query metrics do not have a system-SQL channel. In addition to [design.md](../design.md) §12.3, v0.2 exposes a Prometheus endpoint with labels such as `query_id`, plus checkpoint duration and size, last successful epoch, and recovery count. This matches the PRD §3.8 cost panel. Metric names may evolve before v1.0 but must follow Prometheus naming and unit-suffix conventions; clients must not guess units from arbitrary strings.
 
 ### Durable-job Checkpoints and Recovery
 
-v0.3 provides checkpoints and crash recovery for jobs created by `SUBMIT QUERY`. RTSP is not replayable, so the goal is not data replay. The contract is: **accumulated window state and watermark survive a crash; recovery resumes from the live position and reports the gap honestly.**
+v0.2 provides checkpoints and crash recovery for jobs created by `SUBMIT QUERY`. RTSP is not replayable, so the goal is not data replay. The contract is: **accumulated window state and watermark survive a crash; recovery resumes from the live position and reports the gap honestly.**
 
 The coordinator selects a completed epoch as a checkpoint boundary based on elapsed time or state growth. Each boundary uses this protocol:
 
@@ -194,7 +194,7 @@ In addition to the embedded security constraints in [design.md](../design.md) §
 - `FRAME_AT` accepts only locators for registered sources. By default, the server blocks cloud metadata addresses, link-local addresses, and targets not explicitly allowed by configuration.
 - `IMAGE.uri` is a sanitized display value. `IMAGE.locator` is the media location that can be reauthorized. Neither contains underlying credentials.
 - Python UDFs run in an out-of-process worker with timeout, memory, and dependency controls. The worker is not a multi-tenant security sandbox.
-- v0.3 has no audit log, but execution context retains principal, query ID, Query Manifest identity, and resolved object fingerprints so provenance can be added later.
+- v0.2 has no audit log, but execution context retains principal, query ID, Query Manifest identity, and resolved object fingerprints so provenance can be added later.
 
 ## Relationship to the System Design
 
@@ -212,7 +212,7 @@ Test all specified metadata RPCs, statement/prepared transport mappings, `statem
 
 | Question | Evidence required | Deadline |
 |---|---|---|
-| `IMAGE` thumbnail and inline limits, and locator TTL | Bandwidth, usability, revocation, and expiry tests across Workbench, Python, and BI clients; reference-by-default and the `uri`/locator split are already fixed | Before the v0.3 Flight schema freeze |
+| `IMAGE` thumbnail and inline limits, and locator TTL | Bandwidth, usability, revocation, and expiry tests across Workbench, Python, and BI clients; reference-by-default and the `uri`/locator split are already fixed | Before the v0.2 Flight schema freeze |
 
 ## References
 
@@ -225,3 +225,4 @@ Test all specified metadata RPCs, statement/prepared transport mappings, `statem
 | 2026-08-06 | Extracted from engine design v0.5.0 §5.6–§5.7 and §11.4–§11.6 |
 | 2026-08-09 | Converted metadata to front matter, adopted date-based naming, and translated to English |
 | 2026-08-10 | Aligned durable jobs, checkpoints, and dependencies with immutable Query Manifests |
+| 2026-08-15 | Retargeted the service from v0.3 to v0.2 after merging the embedded releases |

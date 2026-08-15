@@ -44,7 +44,7 @@ cargo test -p vql-kernel --test rtsp_stream --locked -- --ignored --nocapture
 ```
 
 It is ignored by default because MediaMTX, FFmpeg, the dataset, and the Model are external test
-dependencies. Streaming `TUMBLE` remains a separate v0.2 stateful operator; these RTSP scenarios
+dependencies. Streaming `TUMBLE` remains an unfinished v0.1 stateful operator; these RTSP scenarios
 deliberately exercise the currently supported stateless plan.
 
 ## Layout

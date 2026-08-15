@@ -1,15 +1,15 @@
 ---
 created_at: 2026-08-07
 status: draft
-target_version: v0.4
-updated_at: 2026-08-10
+target_version: v0.3
+updated_at: 2026-08-15
 ---
 
 # Cross-modal Retrieval with Lance Storage
 
 ## Summary
 
-The v0.4 text-to-image retrieval feature registers separate `IMAGE_EMBEDDING(n)` and `TEXT_EMBEDDING(n)` Models, calls them through `IMAGE_EMBEDDING` and `TEXT_EMBEDDING`, persists `VECTOR(n)` results in Lance, and performs Top-K search with the `<->` distance operator and an optional HNSW index. This proposal currently fixes the new types, syntax, and execution model; the remaining implementation detail will be completed when v0.4 begins.
+The v0.3 text-to-image retrieval feature registers separate `IMAGE_EMBEDDING(n)` and `TEXT_EMBEDDING(n)` Models, calls them through `IMAGE_EMBEDDING` and `TEXT_EMBEDDING`, persists `VECTOR(n)` results in Lance, and performs Top-K search with the `<->` distance operator and an optional HNSW index. This proposal currently fixes the new types, syntax, and execution model; the remaining implementation detail will be completed when v0.3 begins.
 
 ## Motivation and Scope
 
@@ -19,7 +19,7 @@ This proposal covers the complete PRD §3.3.5 workflow: embed data, write it to 
 
 ### Vector Top-K
 
-v0.4 normalizes `<->` to `L2_DISTANCE` and then executes a bounded Top-K. Without an index, `EXPLAIN` must report `BruteForceTopK`. With a compatible HNSW index, the engine rewrites `ORDER BY <-> LIMIT` to ANN. Earlier versions return a version-specific unsupported error for `<->`, `L2_DISTANCE`, and `CREATE INDEX ... USING HNSW`; they must not register an index that execution cannot use.
+v0.3 normalizes `<->` to `L2_DISTANCE` and then executes a bounded Top-K. Without an index, `EXPLAIN` must report `BruteForceTopK`. With a compatible HNSW index, the engine rewrites `ORDER BY <-> LIMIT` to ANN. Earlier versions return a version-specific unsupported error for `<->`, `L2_DISTANCE`, and `CREATE INDEX ... USING HNSW`; they must not register an index that execution cannot use.
 
 ### Lance Storage
 
@@ -47,13 +47,13 @@ v0.4 normalizes `<->` to `L2_DISTANCE` and then executes a bounded Top-K. Withou
 
 ## Testing and Acceptance
 
-Test Top-K correctness using an explicit comparison between brute-force and ANN result criteria, truthful `EXPLAIN` output for `BruteForceTopK` and ANN rewrites, logical-type round trips through Lance, and the PRD §3.3.5 end-to-end scenario. Complete the detailed acceptance thresholds with the v0.4 design.
+Test Top-K correctness using an explicit comparison between brute-force and ANN result criteria, truthful `EXPLAIN` output for `BruteForceTopK` and ANN rewrites, logical-type round trips through Lance, and the PRD §3.3.5 end-to-end scenario. Complete the detailed acceptance thresholds with the v0.3 design.
 
 ## Open Questions
 
 | Question | Evidence required | Deadline |
 |---|---|---|
-| Lance streaming append and compaction for small batches | A continuous seven-day write test covering version count, point reads, and compaction | Before the v0.4 Lance Sink release |
+| Lance streaming append and compaction for small batches | A continuous seven-day write test covering version count, point reads, and compaction | Before the v0.3 Lance Sink release |
 
 ## Changelog
 
@@ -62,3 +62,4 @@ Test Top-K correctness using an explicit comparison between brute-force and ANN 
 | 2026-08-06 | Extracted from engine design v0.5.0 §8.4 and §10.2 |
 | 2026-08-09 | Converted metadata to front matter, adopted date-based naming, and translated to English |
 | 2026-08-10 | Aligned embedding types, fixed inference calls, vector dimensions, and Runtime reuse with the active typed-model design |
+| 2026-08-15 | Retargeted cross-modal retrieval from v0.4 to v0.3 after merging the embedded releases |

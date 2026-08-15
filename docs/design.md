@@ -1,6 +1,6 @@
-# VisionQL System Design
+# VisionQL v0.1 System Design
 
-> This document turns the [VisionQL PRD](./prd.md) into an implementable system architecture. It covers planning and execution, multimodal types, data ingress and egress, model serving, resource management, and security constraints.
+> This document turns the [VisionQL PRD](./prd.md) v0.1 scope into an implementable system architecture. It covers planning and execution, multimodal types, data ingress and egress, model serving, resource management, and security constraints.
 >
 > **Document map:** [prd.md](./prd.md) (product scope and requirements) → this document (current system design) → [proposals/](./proposals/README.md) (designs for later capabilities).
 
@@ -20,7 +20,7 @@ The architecture must satisfy five goals:
 
 ### 1.2 Covered Capabilities
 
-This design covers local image and video directory tables, SQL model inference, RTSP with `TUMBLE`, Console and Kafka Sinks, and CLI and Python hosts. The [PRD](./prd.md) and [Roadmap](../ROADMAP.md) define complete scope and delivery order. Capabilities that have a concrete future design live under [proposals/](./proposals/README.md); unscheduled ideas are deliberately left undesigned.
+This document is the v0.1 design baseline. It covers local image and video directory tables, SQL model inference, RTSP with `TUMBLE`, Console and Kafka Sinks, and CLI and Python hosts. The [PRD](./prd.md) and [Roadmap](../ROADMAP.md) define complete scope and delivery order. Capabilities for v0.2 and later that have a concrete design live under [proposals/](./proposals/README.md); unscheduled ideas are deliberately left undesigned.
 
 Syntax that belongs to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, name the target release or state that it is unscheduled, and avoid creating an unusable Catalog object. Section 7.1 defines statement-level behavior.
 
@@ -489,8 +489,8 @@ A MODEL is one typed inference capability backed by an artifact bundle or endpoi
 |---|---|---|---|---|
 | `OBJECT_DETECTION` | `IMAGE_DETECTION` | `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
 | `IMAGE_CLASSIFICATION` | `IMAGE_CLASSIFICATION` | `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Roadmap-gated |
-| `IMAGE_EMBEDDING(n)` | `IMAGE_EMBEDDING` | `IMAGE` | `VECTOR(n)` | v0.4 |
-| `TEXT_EMBEDDING(n)` | `TEXT_EMBEDDING` | `STRING` | `VECTOR(n)` | v0.4 |
+| `IMAGE_EMBEDDING(n)` | `IMAGE_EMBEDDING` | `IMAGE` | `VECTOR(n)` | v0.3 |
+| `TEXT_EMBEDDING(n)` | `TEXT_EMBEDDING` | `STRING` | `VECTOR(n)` | v0.3 |
 | `TEXT_GENERATION` | `TEXT_GENERATION` | `STRING` | `STRING` | Roadmap-gated |
 
 One source bundle may be registered under multiple compatible capability types. For example, CLIP image and text embedding are two Models with different fixed interfaces; artifact-cache or Runtime-session reuse is an internal optimization.
@@ -573,7 +573,7 @@ Typed-inference function names are reserved case-insensitively from v0.1, includ
 |---|---|---|
 | `IMAGE_DETECTION` | `(model STRING, image IMAGE [, named options])` → canonical detection array | v0.1 typed planner marker; the first argument resolves to an `OBJECT_DETECTION` Model and the call must become `Inference` |
 | `IMAGE_CLASSIFICATION` | `(model STRING, image IMAGE [, named options])` → canonical classification array | Roadmap-gated typed planner marker |
-| `IMAGE_EMBEDDING` / `TEXT_EMBEDDING` | `(model STRING, IMAGE)` / `(model STRING, STRING)` → `VECTOR(n)` | v0.4 typed planner markers; dimension comes from Model `TYPE` |
+| `IMAGE_EMBEDDING` / `TEXT_EMBEDDING` | `(model STRING, IMAGE)` / `(model STRING, STRING)` → `VECTOR(n)` | v0.3 typed planner markers; dimension comes from Model `TYPE` |
 | `TEXT_GENERATION` | `(model STRING, prompt STRING [, named options])` → `STRING` | Roadmap-gated bounded final-text marker |
 | `BOX_CENTER` | `(BOX2D) -> POINT2D` | Function form of `box.center` |
 | `POLYGON` / `ST_POLYGON` | `(STRING) -> POLYGON` | Parse constants during planning; require closure, finite values, and `[0,1]` coordinates |
@@ -652,7 +652,7 @@ Event time and reconnect behavior:
 ### 8.5 Kafka Sink
 
 - Encode JSON scalars through stable rules and preserve query output column names. Regression tests fix the wire format.
-- Emit only sanitized URI, locator, and metadata for `IMAGE`; inline pixel payloads are outside the v0.2 Kafka contract.
+- Emit only sanitized URI, locator, and metadata for `IMAGE`; inline pixel payloads are outside the v0.1 Kafka contract.
 - The job coordinator owns retry. A bounded buffer propagates backpressure upstream.
 
 ---
@@ -812,7 +812,7 @@ A Runtime loads an artifact bundle or binds a service endpoint. It deals only in
 |---|---|---|---|---|
 | `onnxruntime` | Local or cached ONNX graph | omitted | VisionQL queues requests; ONNX Runtime executes tensor batches | v0.1 |
 | `triton` | Triton endpoint and model version | `kserve_v2_http`; `kserve_v2_grpc` is roadmap-gated | Triton owns model instances and dynamic batching; VisionQL owns bounded concurrency and backpressure | v0.1 HTTP |
-| `transformers` | Pinned Hugging Face or local bundle | omitted; internal worker protocol | Isolated worker owns PyTorch/Transformers and model-native processing | v0.4 embedding |
+| `transformers` | Pinned Hugging Face or local bundle | omitted; internal worker protocol | Isolated worker owns PyTorch/Transformers and model-native processing | v0.3 embedding |
 | `vllm` | vLLM endpoint and served model | `openai` | vLLM owns continuous batching; VisionQL owns bounded concurrency and backpressure | Roadmap-gated |
 | `sglang` | SGLang endpoint and served model | `openai` | SGLang owns continuous batching; VisionQL owns bounded concurrency and backpressure | Roadmap-gated |
 | `llama_cpp` | Local GGUF bundle or llama-server endpoint | omitted for embedded execution; `openai` for llama-server | llama.cpp owns tokenization and generation | Roadmap-gated |
@@ -988,7 +988,7 @@ visionql/
 │       └── connectors/           # Tables, Streams, and Sinks
 ├── vql-cli/                      # shell / run
 ├── vql-python/                   # PyO3 and Python UDF host
-├── vql-server/                   # Cargo package delivered in v0.3
+├── vql-server/                   # Cargo package delivered in v0.2
 │   └── src/
 │       ├── lib.rs                # vql_server crate
 │       └── bin/vqld.rs           # public daemon
@@ -1009,7 +1009,7 @@ In v0.1, `types`, `catalog`, `sql`, `planner`, `execution`, `media`, `models`, a
 Boundary rules:
 
 - `vql-kernel` cannot depend on PyO3, clap, or Flight.
-- `vql-cli` owns clap, terminal behavior, and signals. `vql-python` owns PyO3 and the Python UDF host. `vql-server` owns Flight SQL, TLS/authentication, configuration, process lifecycle, and recovery in v0.3.
+- `vql-cli` owns clap, terminal behavior, and signals. `vql-python` owns PyO3 and the Python UDF host. `vql-server` owns Flight SQL, TLS/authentication, configuration, process lifecycle, and recovery in v0.2.
 - The Cargo package is `vql-server`, its library crate identifier is `vql_server`, and its public binary and daemon command are `vqld`.
 - Planner does not call execution. Physical compilation belongs to execution. Media, models, and connectors are assembled through narrow traits and cannot depend back on their consumers.
 - `vql-workbench/server` cannot depend directly on `vql-kernel`, `vql-server`, or another root-workspace crate. It is a Flight SQL client.
@@ -1061,6 +1061,7 @@ ADR-010 and ADR-014 are reserved for public-protocol decisions in [proposals/](.
 
 | Date | Change |
 |---|---|
+| 2026-08-15 | Aligned the design baseline with the merged v0.1 batch-and-streaming scope |
 | 2026-08-10 | Specified the inference pipeline factory registry, typed per-kind options, Arrow fixed-shape runtime tensors, compiled-pipeline lifecycle, and async batching paths |
 | 2026-08-10 | Defined type-owned inference calls, immutable Query Manifests, DataFusion-backed user Functions, and the PreProcessor/Runtime/PostProcessor pipeline |
 | 2026-08-08 | Defined `VQL_HOME`, downloaded-model caching, the separate dataset directory, and scenario-oriented examples; performance testing remains separate |

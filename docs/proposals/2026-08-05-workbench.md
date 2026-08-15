@@ -1,13 +1,13 @@
 ---
 created_at: 2026-08-05
 status: draft
-target_version: v0.3
-updated_at: 2026-08-10
+target_version: v0.2
+updated_at: 2026-08-15
 ---
 
 # Workbench
 
-This proposal derives Workbench from [VisionQL PRD](../prd.md) §3.8, [System Design](../design.md), and the [vqld Service proposal](./2026-08-06-vqld-service.md). Workbench is the multimodal SQL client shipped with the v0.3 `vqld` service. It runs queries, previews results, and operates continuous queries without owning business data or depending on private engine interfaces.
+This proposal derives Workbench from [VisionQL PRD](../prd.md) §3.8, [System Design](../design.md), and the [vqld Service proposal](./2026-08-06-vqld-service.md). Workbench is the multimodal SQL client shipped with the v0.2 `vqld` service. It runs queries, previews results, and operates continuous queries without owning business data or depending on private engine interfaces.
 
 ## 1. Product Positioning and Scope
 
@@ -21,9 +21,9 @@ General SQL clients can execute VisionQL SQL but cannot naturally render `IMAGE`
 
 Workbench is not a notebook, general-purpose BI tool, VMS, labeling platform, or independent identity-management system.
 
-### 1.2 v0.3 Scope
+### 1.2 v0.2 Scope
 
-The [PRD](../prd.md) §3.8 capability list is authoritative. v0.3 includes SQL editing and execution, multimodal result rendering, live stream preview, catalog browsing, continuous-query operations, and an actual-cost panel. Sections 6–10 define their implementation. `EXPLAIN` cost estimates, a video timeline, permission or audit views, server-saved queries, and team sharing are not scheduled and will be reconsidered after real feedback.
+The [PRD](../prd.md) §3.8 capability list is authoritative. v0.2 includes SQL editing and execution, multimodal result rendering, live stream preview, catalog browsing, continuous-query operations, and an actual-cost panel. Sections 6–10 define their implementation. `EXPLAIN` cost estimates, a video timeline, permission or audit views, server-saved queries, and team sharing are not scheduled and will be reconsidered after real feedback.
 
 ### 1.3 Design Principles
 
@@ -83,7 +83,7 @@ The [PRD](../prd.md) §3.8 capability list is authoritative. v0.3 includes SQL e
 | Catalog | Full catalog and object details; Query has a compact tree |
 | Jobs | Continuous-query list, detail, metrics, and operations |
 
-v0.3 has no dashboard home page. Login opens Query directly to minimize time to first result.
+v0.2 has no dashboard home page. Login opens Query directly to minimize time to first result.
 
 ### 2.3 Query Workspace
 
@@ -91,7 +91,7 @@ v0.3 has no dashboard home page. Login opens Query directly to minimize time to 
 - The editor supports multiple local tabs, each backed by a browser-local draft.
 - The result area creates a tab per script statement. DDL shows a message; SELECT shows schema and data.
 - Results show elapsed time, received rows and bytes, truncation state, query ID, and a cancel button.
-- Small screens remain readable, but v0.3 targets desktop browsers and does not promise a complete mobile editing experience.
+- Small screens remain readable, but v0.2 targets desktop browsers and does not promise a complete mobile editing experience.
 
 ## 3. System Architecture
 
@@ -158,7 +158,7 @@ Workbench has no persistent business state, but it is not runtime-stateless. Mul
 | Local drafts | IndexedDB | Structured capacity beyond localStorage while remaining browser-local |
 | Short-term charts | uPlot or equivalent | Lightweight time-series plots for query detail |
 
-v0.3 does not ship Arrow JS in the browser. The BFF converts only bounded interactive results, avoiding two parallel Arrow and JSON rendering paths. Direct browser transport can be evaluated later if the ecosystem matures.
+v0.2 does not ship Arrow JS in the browser. The BFF converts only bounded interactive results, avoiding two parallel Arrow and JSON rendering paths. Direct browser transport can be evaluated later if the ecosystem matures.
 
 ## 4. Public Engine Contract
 
@@ -214,7 +214,7 @@ visionql.query.mode = bounded | unbounded | not_applicable
 visionql.statement.side_effect = read_only | write
 ```
 
-Workbench does not infer these semantics with a local parser. `statement_info_v1` is required for Query execution in v0.3. Without it, retain connection diagnostics and read-only catalog browsing but block SQL execution instead of guessing the result lifecycle.
+Workbench does not infer these semantics with a local parser. `statement_info_v1` is required for Query execution in v0.2. Without it, retain connection diagnostics and read-only catalog browsing but block SQL execution instead of guessing the result lifecycle.
 
 ### 4.3 `IMAGE` Transport
 
@@ -342,7 +342,7 @@ Each schema field contains at least name, Arrow storage type, VisionQL logical t
 
 ### 6.1 Editor
 
-v0.3 provides syntax highlighting for SQL, VQL DDL, types, built-ins, and table functions; bracket matching, comments, formatting, find/replace, and basic diagnostics; catalog completion for relations, columns, models, functions, and Sinks; “run selection” and “run current statement”; `Cmd/Ctrl+Enter` to run and `Esc` or a button to cancel; and source-span navigation when available.
+v0.2 provides syntax highlighting for SQL, VQL DDL, types, built-ins, and table functions; bracket matching, comments, formatting, find/replace, and basic diagnostics; catalog completion for relations, columns, models, functions, and Sinks; “run selection” and “run current statement”; `Cmd/Ctrl+Enter` to run and `Esc` or a button to cancel; and source-span navigation when available.
 
 The syntax package handles highlighting and statement boundaries, not final semantics. Completion may briefly be stale; the engine always decides execution.
 
@@ -351,7 +351,7 @@ The syntax package handles highlighting and statement boundaries, not final sema
 The BFF uses a lexer that understands semicolons, strings, quoted identifiers, and line/block comments without copying the full VQL parser. It finds statement boundaries only. Each statement is prepared and executed sequentially, and §4.2 metadata is the sole authority for kind, mode, and side effect.
 
 - Create an independent result tab per statement.
-- Stop at the first error; v0.3 has no continue-on-error mode.
+- Stop at the first error; v0.2 has no continue-on-error mode.
 - Cancel a bounded SELECT and mark it truncated at the display limit, then continue the script.
 - Ordinary unbounded `SELECT` and `INSERT INTO ... SELECT ...` attach and do not complete naturally, so they must be the last statement. If prepare finds one earlier, stop before executing it and ask the user to split the script; never convert it to a background job.
 - Explicit `SUBMIT QUERY <name> AS INSERT INTO ... SELECT ...` has kind `persistent_submission`. It immediately returns query ID, name, state, and definition revision, allowing later script statements. Link its “submitted” result to Jobs.
@@ -409,7 +409,7 @@ The confidence slider filters only already-returned detection arrays or rows. Ke
 
 - Collapse `VECTOR(n)` to dimension, norm, and the first four values; allow per-row expansion without charting large vectors.
 - Show sanitized URI summary, duration, fps, resolution, and codec for `VIDEO`.
-- v0.3 has no video player or timeline. Use SQL `FRAMES` or `FRAME_AT` to inspect a frame.
+- v0.2 has no video player or timeline. Use SQL `FRAMES` or `FRAME_AT` to inspect a frame.
 
 ### 7.5 Accessibility
 
@@ -470,7 +470,7 @@ The engine returns only objects visible to the current principal. Workbench does
 
 Show only public, queryable information: schema, logical types, and nullability; source kind, sanitized location, event time, and watermark; Model type, source digest, Runtime kind/protocol, processor kinds, canonical schema, and constraints; Function signature, implementation language/body digest, and volatility; Sink format and sanitized target; and copyable sanitized DDL.
 
-v0.3 does not edit objects on the detail page. Generate SQL and return to Query for changes, preserving a declarative and reviewable path.
+v0.2 does not edit objects on the detail page. Generate SQL and return to Query for changes, preserving a declarative and reviewable path.
 
 ## 10. Continuous-query Operations and Cost
 
@@ -506,7 +506,7 @@ If metrics are absent, show “No data” or “Unsupported,” never zero. Use 
 
 ### 10.4 Cost Boundary
 
-v0.3 displays only measured values:
+v0.2 displays only measured values:
 
 ```text
 processed_frames
@@ -547,7 +547,7 @@ Workbench does not cache allow/deny decisions. The engine reauthorizes every que
 
 ### 11.4 Multiple Replicas
 
-v0.3 requires load-balancer affinity on the session cookie. Active SSE, Flight streams, and blob caches remain on their creating instance. If health checks fail, the user logs in again, the original Flight connection drops, and the engine cancels it. Do not add Redis or shared persistence merely to preserve short-lived previews.
+v0.2 requires load-balancer affinity on the session cookie. Active SSE, Flight streams, and blob caches remain on their creating instance. If health checks fail, the user logs in again, the original Flight connection drops, and the engine cancels it. Do not add Redis or shared persistence merely to preserve short-lived previews.
 
 ## 12. Errors, Observability, and Performance
 
@@ -599,7 +599,7 @@ vql-workbench \
 ```
 
 - Embed front-end assets in the BFF binary and also publish a container image.
-- Configure one `vqld` endpoint by default. v0.3 does not switch endpoints within a session.
+- Configure one `vqld` endpoint by default. v0.2 does not switch endpoints within a session.
 - Deploy Workbench in a central or management network, not on every edge node.
 - Browser TLS may terminate at Workbench or a reverse proxy; deployment documentation must define trusted headers and secure-cookie behavior.
 - Readiness checks both BFF health and valid engine connection configuration. A temporarily unreachable engine does not prevent process startup; show a diagnostic page.
@@ -667,7 +667,7 @@ Hard constraints:
 
 ### 14.3 Release Gates
 
-Before the v0.3 Workbench release:
+Before the v0.2 Workbench release:
 
 1. Pass the protocol contract suite against real `vqld`.
 2. Complete “remote query → image and box preview → live cancellation → durable-query operations” end to end.
@@ -684,11 +684,11 @@ As defined in §1.1 and PRD §3.8, Workbench is not a notebook, general BI tool,
 
 | Question | Current direction | Decision point |
 |---|---|---|
-| `IMAGE` thumbnail parameters | Engine defaults to reference; display-only `uri` and dereference locator are fixed; Workbench selects thumbnail; size, byte cap, and locator TTL remain open | Before v0.3 Flight schema freeze |
+| `IMAGE` thumbnail parameters | Engine defaults to reference; display-only `uri` and dereference locator are fixed; Workbench selects thumbnail; size, byte cap, and locator TTL remain open | Before v0.2 Flight schema freeze |
 | Live original-frame retention | Bounded engine ring; keep thumbnail after expiry | After a real eight-stream load test |
-| Pagination for large Jobs lists | Prefer public SQL filtering/pagination over loading everything into BFF | Before v0.3 production-scale test |
-| External IdP login | Initially support engine token/basic capability; deployment or engine owns OIDC | Before v0.3 authentication freeze |
-| Large-export UX | Generate explicit SQL and require confirmation; do not download through BFF | After v0.3 usability test |
+| Pagination for large Jobs lists | Prefer public SQL filtering/pagination over loading everything into BFF | Before v0.2 production-scale test |
+| External IdP login | Initially support engine token/basic capability; deployment or engine owns OIDC | Before v0.2 authentication freeze |
+| Large-export UX | Generate explicit SQL and require confirmation; do not download through BFF | After v0.2 usability test |
 | Video timeline, unscheduled | First measure `FRAME_AT` concurrency, cache hits, and object-store cost | Before scheduling |
 
 ## Appendix A: UI-to-engine Mapping
@@ -721,3 +721,4 @@ As defined in §1.1 and PRD §3.8, Workbench is not a notebook, general BI tool,
 | 2026-08-06 | Migrated from workbench.md design v0.3.0 without changing its internal section structure |
 | 2026-08-09 | Converted metadata to front matter, adopted date-based naming, and translated to English |
 | 2026-08-10 | Aligned Catalog and continuous-query views with Query Manifests and typed Model metadata |
+| 2026-08-15 | Retargeted Workbench from v0.3 to v0.2 after merging the embedded releases |
