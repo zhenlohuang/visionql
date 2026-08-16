@@ -23,7 +23,7 @@ VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文�
 - [x] RTSP 视频流摄入（[design.md §8.3](./docs/design.md)）：尽力而为投递、事件时间与水位线、断流自动重连；当前支持单源 attached 查询
 - [x] 流式 `TUMBLE` 窗口聚合（`COUNT/SUM/AVG/MIN/MAX`）
 - [x] Sink：Kafka（JSON 行级消息、`IMAGE` 安全投影、有界背压与 broker ack）
-- [ ] 持续查询前台运行：shell 中的无界 SELECT 持续打印，`vql run` 附着执行，Ctrl-C 先优雅停止、再次立即取消
+- [x] 持续查询前台运行：shell 中的无界 SELECT 持续打印，`vql run` 附着执行且无界语句必须位于脚本末尾，Ctrl-C 先优雅停止、再次立即取消
 
 **验收**：
 

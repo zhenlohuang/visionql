@@ -4594,6 +4594,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "reedline",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "vql-kernel",

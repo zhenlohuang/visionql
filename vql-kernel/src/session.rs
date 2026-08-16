@@ -62,9 +62,42 @@ impl SessionBuilder {
 #[derive(Debug, Clone)]
 pub struct Session {
     engine: Engine,
-    active_query: Arc<Mutex<Option<CancellationToken>>>,
+    active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     fail_on_error: Arc<AtomicBool>,
     python_udf_host: Option<PythonUdfHostRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryInterruptAction {
+    NoActiveQuery,
+    GracefulStopRequested,
+    ImmediateCancellationRequested,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveQueryControl {
+    cancellation: CancellationToken,
+    graceful_stop: Option<CancellationToken>,
+}
+
+impl ActiveQueryControl {
+    fn cancel_immediately(&self) {
+        if let Some(graceful_stop) = self.graceful_stop.as_ref() {
+            graceful_stop.cancel();
+        }
+        self.cancellation.cancel();
+    }
+
+    fn interrupt(&self) -> QueryInterruptAction {
+        if let Some(graceful_stop) = self.graceful_stop.as_ref()
+            && !graceful_stop.is_cancelled()
+        {
+            graceful_stop.cancel();
+            return QueryInterruptAction::GracefulStopRequested;
+        }
+        self.cancel_immediately();
+        QueryInterruptAction::ImmediateCancellationRequested
+    }
 }
 
 #[derive(Debug)]
@@ -93,6 +126,15 @@ impl Statement {
     pub fn cancel(&self) {
         match self {
             Self::Query(query) | Self::Explain(query) | Self::Set(query) => query.cancel(),
+            Self::Ddl(_) => {}
+        }
+    }
+
+    pub fn request_graceful_stop(&self) {
+        match self {
+            Self::Query(query) | Self::Explain(query) | Self::Set(query) => {
+                query.request_graceful_stop()
+            }
             Self::Ddl(_) => {}
         }
     }
@@ -225,7 +267,8 @@ pub struct QueryHandle {
     dataframe: DataFrame,
     runtime: Arc<tokio::runtime::Runtime>,
     cancellation: CancellationToken,
-    active_query: Arc<Mutex<Option<CancellationToken>>>,
+    graceful_stop: CancellationToken,
+    active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     output_schema: SchemaRef,
     metrics: Arc<QueryMetrics>,
     collected: Arc<Mutex<Option<Vec<RecordBatch>>>>,
@@ -253,14 +296,14 @@ struct StreamingQuery {
 #[derive(Debug, Clone)]
 struct QueryResources {
     runtime: Arc<tokio::runtime::Runtime>,
-    active_query: Arc<Mutex<Option<CancellationToken>>>,
+    active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     media: Arc<MediaRuntime>,
     models: Arc<crate::models::ModelRuntime>,
     catalog: Arc<crate::catalog::CatalogStore>,
     fail_on_error: Arc<AtomicBool>,
 }
 
-struct ActiveQueryGuard(Arc<Mutex<Option<CancellationToken>>>);
+struct ActiveQueryGuard(Arc<Mutex<Option<ActiveQueryControl>>>);
 
 impl Drop for ActiveQueryGuard {
     fn drop(&mut self) {
@@ -324,6 +367,7 @@ impl QueryHandle {
             dataframe,
             runtime: resources.runtime,
             cancellation,
+            graceful_stop: CancellationToken::new(),
             active_query: resources.active_query,
             output_schema,
             metrics: Arc::new(QueryMetrics::default()),
@@ -352,25 +396,31 @@ impl QueryHandle {
                 stream,
             )));
         }
+        self.set_active()?;
+        let active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
         let input = if self.streaming.is_some() {
             self.stream_rtsp()?
         } else {
             self.stream_bounded()?
         };
-        let Some(target) = self.sink_target.clone() else {
-            return Ok(input);
+        let input = if let Some(target) = self.sink_target.clone() {
+            close_sink_stream(
+                input,
+                target,
+                Arc::clone(&self.runtime),
+                Arc::clone(&self.output_schema),
+            )
+        } else {
+            input
         };
-        Ok(close_sink_stream(
+        Ok(keep_active_stream(
             input,
-            target,
-            Arc::clone(&self.runtime),
+            active_guard,
             Arc::clone(&self.output_schema),
         ))
     }
 
     fn stream_bounded(&self) -> Result<SendableRecordBatchStream> {
-        self.set_active()?;
-        let active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
         let input = self
             .runtime
             .block_on(self.dataframe.clone().execute_stream())?;
@@ -379,7 +429,6 @@ impl QueryHandle {
         let cancellation = self.cancellation.clone();
         let metrics = Arc::clone(&self.metrics);
         let stream = async_stream::try_stream! {
-            let _active_guard = active_guard;
             let mut input = input;
             loop {
                 let next = tokio::select! {
@@ -417,21 +466,12 @@ impl QueryHandle {
                 futures::stream::empty::<datafusion::error::Result<RecordBatch>>(),
             )));
         }
-        self.set_active()?;
-        let mut source = match start_rtsp_source(
+        let mut source = start_rtsp_source(
             streaming.definition,
             Arc::clone(&self.media),
             Arc::clone(&self.fail_on_error),
-            self.cancellation.clone(),
-        ) {
-            Ok(source) => source,
-            Err(error) => {
-                if let Ok(mut active) = self.active_query.lock() {
-                    *active = None;
-                }
-                return Err(error);
-            }
-        };
+            self.graceful_stop.clone(),
+        )?;
         let stream_name = streaming.name;
         let mut skip_remaining = streaming.skip;
         let mut fetch_remaining = streaming.fetch;
@@ -449,7 +489,6 @@ impl QueryHandle {
         let output_schema = Arc::clone(&self.output_schema);
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
-        let active_query = Arc::clone(&self.active_query);
         let metrics = Arc::clone(&self.metrics);
         let window_state_metric_guard = tumble_state
             .as_ref()
@@ -459,9 +498,7 @@ impl QueryHandle {
         let fail_on_error = Arc::clone(&self.fail_on_error);
         let models = Arc::clone(&self.models);
         let model_start = self.model_start;
-        let active_guard = ActiveQueryGuard(active_query);
         let stream = async_stream::try_stream! {
-            let _active_guard = active_guard;
             let _window_state_metric_guard = window_state_metric_guard;
             'epochs: loop {
                 let next = tokio::select! {
@@ -693,7 +730,16 @@ impl QueryHandle {
     }
 
     pub fn cancel(&self) {
+        self.graceful_stop.cancel();
         self.cancellation.cancel();
+    }
+
+    pub fn request_graceful_stop(&self) {
+        if self.is_unbounded() {
+            self.graceful_stop.cancel();
+        } else {
+            self.cancel();
+        }
     }
 
     pub fn metrics(&self) -> Arc<QueryMetrics> {
@@ -730,7 +776,10 @@ impl QueryHandle {
             .active_query
             .lock()
             .map_err(|_| VqlError::new(ErrorCode::Internal, "active query lock was poisoned"))?;
-        *active = Some(self.cancellation.clone());
+        *active = Some(ActiveQueryControl {
+            cancellation: self.cancellation.clone(),
+            graceful_stop: self.is_unbounded().then(|| self.graceful_stop.clone()),
+        });
         Ok(())
     }
 
@@ -740,6 +789,22 @@ impl QueryHandle {
             .map(|batches| batches.clone())
             .map_err(|_| VqlError::new(ErrorCode::Internal, "query result cache was poisoned"))
     }
+}
+
+fn keep_active_stream(
+    input: SendableRecordBatchStream,
+    active_guard: ActiveQueryGuard,
+    schema: SchemaRef,
+) -> SendableRecordBatchStream {
+    let stream_schema = Arc::clone(&schema);
+    let stream = async_stream::try_stream! {
+        let _active_guard = active_guard;
+        let mut input = input;
+        while let Some(batch) = input.next().await {
+            yield batch?;
+        }
+    };
+    Box::pin(RecordBatchStreamAdapter::new(stream_schema, stream))
 }
 
 fn close_sink_stream(
@@ -853,10 +918,18 @@ impl Session {
 
     pub fn cancel_active_query(&self) {
         if let Ok(active) = self.active_query.lock()
-            && let Some(token) = active.as_ref()
+            && let Some(control) = active.as_ref()
         {
-            token.cancel();
+            control.cancel_immediately();
         }
+    }
+
+    pub fn interrupt_active_query(&self) -> QueryInterruptAction {
+        self.active_query
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().map(ActiveQueryControl::interrupt))
+            .unwrap_or(QueryInterruptAction::NoActiveQuery)
     }
 
     fn query(&self, sql: &str) -> Result<QueryHandle> {
@@ -1038,7 +1111,10 @@ impl Session {
             let mut active = self.active_query.lock().map_err(|_| {
                 VqlError::new(ErrorCode::Internal, "active query lock was poisoned")
             })?;
-            *active = Some(cancellation.clone());
+            *active = Some(ActiveQueryControl {
+                cancellation: cancellation.clone(),
+                graceful_stop: None,
+            });
         }
         let _active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
         let resolved =
@@ -1632,6 +1708,59 @@ mod tests {
             write_http_response(&mut stream, triton_metadata_body());
         });
         Some((address, server))
+    }
+
+    #[test]
+    fn active_unbounded_query_interrupts_gracefully_then_immediately() {
+        let cancellation = CancellationToken::new();
+        let graceful_stop = CancellationToken::new();
+        let control = ActiveQueryControl {
+            cancellation: cancellation.clone(),
+            graceful_stop: Some(graceful_stop.clone()),
+        };
+
+        assert_eq!(
+            control.interrupt(),
+            QueryInterruptAction::GracefulStopRequested
+        );
+        assert!(graceful_stop.is_cancelled());
+        assert!(!cancellation.is_cancelled());
+
+        assert_eq!(
+            control.interrupt(),
+            QueryInterruptAction::ImmediateCancellationRequested
+        );
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn active_bounded_query_interrupts_immediately() {
+        let cancellation = CancellationToken::new();
+        let control = ActiveQueryControl {
+            cancellation: cancellation.clone(),
+            graceful_stop: None,
+        };
+
+        assert_eq!(
+            control.interrupt(),
+            QueryInterruptAction::ImmediateCancellationRequested
+        );
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn immediate_cancellation_stops_an_unbounded_source() {
+        let cancellation = CancellationToken::new();
+        let graceful_stop = CancellationToken::new();
+        let control = ActiveQueryControl {
+            cancellation: cancellation.clone(),
+            graceful_stop: Some(graceful_stop.clone()),
+        };
+
+        control.cancel_immediately();
+
+        assert!(graceful_stop.is_cancelled());
+        assert!(cancellation.is_cancelled());
     }
 
     #[test]
@@ -2957,6 +3086,75 @@ mod tests {
         assert_eq!(metrics.late_rows(), 0);
         assert_eq!(metrics.window_state_bytes(), 0);
         assert!(metrics.watermark_ms().is_some());
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    #[test]
+    fn local_video_stream_completes_after_graceful_stop() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        if !crate::test_util::ffmpeg_available() {
+            return;
+        }
+        let temp = tempdir().unwrap();
+        let video = temp.path().join("graceful-stream.mp4");
+        assert!(crate::test_util::generate_test_video(&video));
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        engine
+            .inner
+            .catalog
+            .create_stream(&StreamDef {
+                name: "graceful_stream".to_owned(),
+                endpoint: video.to_string_lossy().into_owned(),
+                fps: 5.0,
+                event_time: crate::catalog::EventTimePolicy::CaptureTime,
+                watermark_delay_ms: 100,
+                transport: crate::catalog::RtspTransport::Tcp,
+            })
+            .unwrap();
+        let session = engine.session().build().unwrap();
+        let Statement::Query(query) = session.sql("SELECT frame_id FROM graceful_stream").unwrap()
+        else {
+            panic!("unbounded SELECT must produce a query");
+        };
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let execution = std::thread::spawn(move || {
+            let mut started_tx = Some(started_tx);
+            let result = query.for_each_batch(|_| {
+                if let Some(started_tx) = started_tx.take() {
+                    started_tx.send(()).unwrap();
+                }
+                Ok(())
+            });
+            finished_tx.send(result).unwrap();
+        });
+        if let Err(error) = started_rx.recv_timeout(Duration::from_secs(5)) {
+            session.cancel_active_query();
+            let _ = finished_rx.recv_timeout(Duration::from_secs(5));
+            execution.join().unwrap();
+            panic!("unbounded query did not emit a batch: {error}");
+        }
+
+        assert_eq!(
+            session.interrupt_active_query(),
+            QueryInterruptAction::GracefulStopRequested
+        );
+        let result = match finished_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => result,
+            Err(error) => {
+                session.cancel_active_query();
+                panic!("graceful query stop timed out: {error}");
+            }
+        };
+
+        result.expect("graceful stop must complete without a cancellation error");
+        execution.join().unwrap();
+        assert_eq!(
+            session.interrupt_active_query(),
+            QueryInterruptAction::NoActiveQuery
+        );
     }
 
     #[cfg(feature = "ffmpeg-native")]

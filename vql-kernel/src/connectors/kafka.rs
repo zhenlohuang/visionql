@@ -191,7 +191,7 @@ impl KafkaSink {
         self.state.lock().await.active_executions += 1;
     }
 
-    pub(crate) async fn finish_execution(&self) -> Result<()> {
+    pub(crate) async fn finish_execution(&self, cancellation: &CancellationToken) -> Result<()> {
         let producer = {
             let mut state = self.state.lock().await;
             if state.active_executions == 0 {
@@ -214,25 +214,25 @@ impl KafkaSink {
             return Ok(());
         };
         let timeout = Duration::from_millis(self.config.delivery_timeout_ms);
-        tokio::task::spawn_blocking(move || producer.flush(timeout))
-            .await
-            .map_err(|error| {
-                VqlError::new(
-                    ErrorCode::Execution,
-                    format!(
-                        "failed to join Kafka producer close for Sink '{}'",
-                        self.name
-                    ),
-                )
-                .with_source(error)
-            })?
-            .map_err(|error| {
-                VqlError::new(
-                    ErrorCode::Execution,
-                    format!("failed to close Kafka producer for Sink '{}'", self.name),
-                )
-                .with_source(error)
-            })
+        let deadline = tokio::time::Instant::now() + timeout;
+        while producer.in_flight_count() > 0 {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return producer.flush(Duration::ZERO).map_err(|error| {
+                    VqlError::new(
+                        ErrorCode::Execution,
+                        format!("failed to close Kafka producer for Sink '{}'", self.name),
+                    )
+                    .with_source(error)
+                });
+            }
+            let poll_interval = Duration::from_millis(10).min(deadline - now);
+            tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -729,16 +729,17 @@ mod tests {
     #[tokio::test]
     async fn producer_lifecycle_waits_for_the_last_query_execution() {
         let sink = KafkaSink::new("events".to_owned(), kafka_config(2), None);
+        let cancellation = CancellationToken::new();
         sink.begin_execution().await;
         sink.begin_execution().await;
 
-        sink.finish_execution().await.unwrap();
+        sink.finish_execution(&cancellation).await.unwrap();
         assert_eq!(sink.state.lock().await.active_executions, 1);
 
-        sink.finish_execution().await.unwrap();
+        sink.finish_execution(&cancellation).await.unwrap();
         assert_eq!(sink.state.lock().await.active_executions, 0);
         assert_eq!(
-            sink.finish_execution().await.unwrap_err().code,
+            sink.finish_execution(&cancellation).await.unwrap_err().code,
             ErrorCode::Internal
         );
     }

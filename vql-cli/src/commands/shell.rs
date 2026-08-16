@@ -7,13 +7,7 @@ use vql_kernel::{
 };
 
 pub(crate) fn run(session: Session, history_path: &Path) -> Result<()> {
-    let cancel_session = session.clone();
-    ctrlc::set_handler(move || cancel_session.cancel_active_query()).map_err(|error| {
-        VqlError::new(
-            ErrorCode::Execution,
-            format!("failed to install Ctrl-C handler: {error}"),
-        )
-    })?;
+    super::install_interrupt_handler(session.clone())?;
 
     println!(
         "VisionQL v{} — terminate statements with ';'",
@@ -49,7 +43,6 @@ pub(crate) fn run(session: Session, history_path: &Path) -> Result<()> {
             }
             Ok(Signal::CtrlC) => {
                 pending.clear();
-                session.cancel_active_query();
                 println!("^C");
             }
             Ok(Signal::CtrlD) => break,

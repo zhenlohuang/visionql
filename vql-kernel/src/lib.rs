@@ -21,7 +21,9 @@ pub use engine::Engine;
 pub use error::{ErrorCode, Result, VqlError};
 pub use python::{PyUdfHandle, PythonUdfHost, PythonUdfHostRef};
 pub use secrets::{KafkaAuthentication, KafkaTlsConfig, SecretProvider, SecretProviderRef};
-pub use session::{DdlResult, QueryHandle, QueryMetrics, Session, SessionBuilder, Statement};
+pub use session::{
+    DdlResult, QueryHandle, QueryInterruptAction, QueryMetrics, Session, SessionBuilder, Statement,
+};
 pub use sql::{ends_with_statement_terminator, split_statements};
 pub use types::{
     MediaLocator, VqlType, audio_field, box2d_field, image_field, is_image_field, is_image_storage,

@@ -99,7 +99,7 @@ impl SinkTarget {
     pub(crate) async fn finish_execution(&self) -> Result<()> {
         match &self.writer {
             SinkWriter::Console => Ok(()),
-            SinkWriter::Kafka(writer) => writer.finish_execution().await,
+            SinkWriter::Kafka(writer) => writer.finish_execution(&self.cancellation).await,
             #[cfg(test)]
             SinkWriter::Recording(_) => Ok(()),
         }

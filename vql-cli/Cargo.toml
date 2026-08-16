@@ -17,3 +17,6 @@ reedline.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 vql-kernel = { path = "../vql-kernel" }
+
+[dev-dependencies]
+tempfile.workspace = true

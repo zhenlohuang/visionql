@@ -905,8 +905,8 @@ The future chainable DataFrame API constructs `VqlLogicalPlan` directly. Plan in
 
 | Command | Contract |
 |---|---|
-| `vql shell` | Multiline SQL, history, and Catalog browsing; an unbounded SELECT prints continuously; Ctrl-C cancels the active query |
-| `vql run job.sql` | Run statements in order; a continuous query remains attached; first Ctrl-C requests graceful stop and the second cancels immediately |
+| `vql shell` | Multiline SQL, history, and Catalog browsing; an unbounded SELECT prints continuously; first Ctrl-C requests graceful stop and the second cancels immediately |
+| `vql run job.sql` | Run statements in order; an unbounded statement must be last and remains attached; first Ctrl-C requests graceful stop and the second cancels immediately |
 | `vql explain query.sql` | Produce the same plan as SQL `EXPLAIN` |
 
 The executable is `vql`. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
