@@ -112,7 +112,7 @@ If a change affects media decoding, ONNX preprocessing, batching, or postprocess
 The mixed-size image batch scenario exercises the ONNX pipeline through public SQL:
 
 ```bash
-VQL_TEST_CASE=scenarios/detect_objects_in_mixed_size_image_batch \
+VQL_TEST_CASE=scenarios/mixed_size_images \
   cargo test -p vql-kernel --test integration --locked
 ```
 

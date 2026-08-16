@@ -26,7 +26,7 @@ cargo test -p vql-kernel --test integration                          # integrati
 VQL_TEST_CASE=functions/image_detection cargo test -p vql-kernel --test integration # filter cases
 VQL_INTEGRATION_TEST=1 cargo test -p vql-kernel --test integration   # fail instead of skip when fixtures are missing
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
-VQL_TEST_CASE=scenarios/detect_objects_in_mixed_size_image_batch cargo test -p vql-kernel --test integration --locked
+VQL_TEST_CASE=scenarios/mixed_size_images cargo test -p vql-kernel --test integration --locked
 ```
 
 Python (`vql-python` is a PyO3/Maturin extension, not a pure-Python package):

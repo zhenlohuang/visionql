@@ -275,7 +275,7 @@ The real-model mixed-size batch scenario reads `data/models/yolo26n.onnx` direct
 the integration fixtures are available and otherwise reports a skip:
 
 ```bash
-VQL_TEST_CASE=scenarios/detect_objects_in_mixed_size_image_batch \
+VQL_TEST_CASE=scenarios/mixed_size_images \
   cargo test -p vql-kernel --test integration --locked
 ```
 
