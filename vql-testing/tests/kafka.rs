@@ -1,8 +1,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use krafka::admin::{AdminClient, NewTopic};
-use krafka::consumer::{AutoOffsetReset, Consumer};
 use libtest_mimic::{Arguments, Completion, Failed, Trial};
+use rdkafka::Message;
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
+use rdkafka::config::ClientConfig;
+use rdkafka::consumer::{Consumer, StreamConsumer};
 use tempfile::tempdir;
 use vql_kernel::{Engine, EngineConfig};
 use vql_testing::REQUIRE_ENV;
@@ -85,47 +88,37 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
     }
 
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-    let mut messages = runtime.block_on(async {
-        let consumer = Consumer::builder()
-            .bootstrap_servers(bootstrap_servers)
-            .group_id(group)
-            .auto_offset_reset(AutoOffsetReset::Earliest)
-            .enable_auto_commit(false)
-            .build()
-            .await
-            .map_err(|error| format!("create Kafka consumer: {error}"))?;
-        let subscribe_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            match consumer.subscribe(&[&topic]).await {
-                Ok(()) => break,
-                Err(_) if tokio::time::Instant::now() < subscribe_deadline => {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-                Err(error) => return Err(format!("subscribe to Kafka topic: {error}")),
-            }
-        }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        let mut messages = Vec::new();
-        while messages.len() < 2 && tokio::time::Instant::now() < deadline {
-            let records = consumer
-                .poll(Duration::from_millis(500))
-                .await
-                .map_err(|error| format!("poll Kafka topic: {error}"))?;
-            for record in records {
-                if let Some(value) = record.value {
-                    messages.push(
-                        String::from_utf8(value.to_vec())
-                            .map_err(|error| format!("Kafka value is not UTF-8 JSON: {error}"))?,
-                    );
+    let mut messages =
+        runtime.block_on(async {
+            let consumer: StreamConsumer = ClientConfig::new()
+                .set("bootstrap.servers", bootstrap_servers)
+                .set("group.id", group)
+                .set("auto.offset.reset", "earliest")
+                .set("enable.auto.commit", "false")
+                .set("allow.auto.create.topics", "false")
+                .create()
+                .map_err(|error| format!("create Kafka consumer: {error}"))?;
+            consumer
+                .subscribe(&[&topic])
+                .map_err(|error| format!("subscribe to Kafka topic: {error}"))?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            let mut messages = Vec::new();
+            while messages.len() < 2 && tokio::time::Instant::now() < deadline {
+                match tokio::time::timeout(Duration::from_millis(500), consumer.recv()).await {
+                    Ok(Ok(message)) => {
+                        if let Some(value) = message.payload() {
+                            messages.push(String::from_utf8(value.to_vec()).map_err(|error| {
+                                format!("Kafka value is not UTF-8 JSON: {error}")
+                            })?);
+                        }
+                    }
+                    Ok(Err(error)) => return Err(format!("poll Kafka topic: {error}")),
+                    Err(_) => {}
                 }
             }
-        }
-        consumer
-            .close()
-            .await
-            .map_err(|error| format!("close Kafka consumer: {error}"))?;
-        Ok::<_, String>(messages)
-    })?;
+            consumer.unsubscribe();
+            Ok::<_, String>(messages)
+        })?;
     messages.sort();
     let mut expected = vec![
         r#"{"answer":42,"note":null}"#.to_owned(),
@@ -141,22 +134,23 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
 }
 
 async fn create_topic(bootstrap_servers: &str, topic: &str) -> Result<(), String> {
-    let admin = AdminClient::builder()
-        .bootstrap_servers(bootstrap_servers)
-        .client_id("visionql-kafka-sink-integration")
-        .build()
-        .await
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .set("client.id", "visionql-kafka-sink-integration")
+        .create()
         .map_err(|error| format!("create Kafka admin client: {error}"))?;
-    let new_topic = NewTopic::new(topic, 1, 1)
-        .map_err(|error| format!("build Kafka topic definition: {error}"))?;
+    let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+    let options = AdminOptions::new()
+        .request_timeout(Some(Duration::from_secs(10)))
+        .operation_timeout(Some(Duration::from_secs(10)));
     let results = admin
-        .create_topics(vec![new_topic], Duration::from_secs(10), false)
+        .create_topics([&new_topic], &options)
         .await
         .map_err(|error| format!("create Kafka topic: {error}"))?;
-    let topic_error = results.into_iter().find_map(|result| result.error);
-    admin.close().await;
-    if let Some(error) = topic_error {
-        return Err(format!("create Kafka topic '{topic}': {error}"));
+    for result in results {
+        if let Err((name, error)) = result {
+            return Err(format!("create Kafka topic '{name}': {error}"));
+        }
     }
     Ok(())
 }

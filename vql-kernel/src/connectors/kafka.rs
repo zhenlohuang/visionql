@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::sync::Arc;
@@ -9,13 +10,16 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::json::writer::{LineDelimited, WriterBuilder};
 use arrow::record_batch::RecordBatch;
 use futures::stream::{FuturesUnordered, StreamExt};
-use krafka::producer::{Acks, Producer};
+use rdkafka::client::{ClientContext, OAuthToken};
+use rdkafka::config::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::KafkaSinkConfig;
+use crate::secrets::KafkaOAuthToken;
 use crate::types::is_image_field;
-use crate::{ErrorCode, Result, SecretProviderRef, VqlError};
+use crate::{ErrorCode, KafkaAuthentication, Result, SecretProviderRef, VqlError};
 
 const IMAGE_KAFKA_FIELDS: [&str; 7] = [
     "uri", "locator", "pts_ms", "frame_id", "encoding", "width", "height",
@@ -31,8 +35,37 @@ pub(crate) struct KafkaSink {
 
 #[derive(Default)]
 struct KafkaSinkState {
-    producer: Option<Arc<Producer>>,
+    producer: Option<Arc<VisionKafkaProducer>>,
     active_executions: usize,
+}
+
+type VisionKafkaProducer = FutureProducer<KafkaClientContext>;
+
+#[derive(Default)]
+struct KafkaClientContext {
+    oauth: Option<KafkaOAuthToken>,
+}
+
+impl ClientContext for KafkaClientContext {
+    const ENABLE_REFRESH_OAUTH_TOKEN: bool = true;
+
+    fn generate_oauth_token(
+        &self,
+        _oauthbearer_config: Option<&str>,
+    ) -> std::result::Result<OAuthToken, Box<dyn Error>> {
+        let oauth = self
+            .oauth
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Kafka OAUTHBEARER token was not configured"))?;
+        Ok(OAuthToken {
+            token: oauth.token.to_string(),
+            principal_name: "visionql".to_owned(),
+            // librdkafka converts milliseconds to microseconds internally.
+            // Keep a static host-provided token effectively non-expiring
+            // without overflowing that conversion.
+            lifetime_ms: i64::MAX / 1_000,
+        })
+    }
 }
 
 impl KafkaSink {
@@ -101,25 +134,13 @@ impl KafkaSink {
         Ok(())
     }
 
-    async fn producer(&self) -> Result<Arc<Producer>> {
+    async fn producer(&self) -> Result<Arc<VisionKafkaProducer>> {
         let mut state = self.state.lock().await;
-        if let Some(existing) = state.producer.as_ref()
-            && !existing.is_closed()
-        {
+        if let Some(existing) = state.producer.as_ref() {
             return Ok(Arc::clone(existing));
         }
 
-        let mut builder = Producer::builder()
-            .bootstrap_servers(self.config.bootstrap_servers.clone())
-            .client_id(format!("visionql-{}", self.name))
-            .acks(Acks::All)
-            .connect_timeout(Duration::from_millis(self.config.delivery_timeout_ms))
-            .request_timeout(Duration::from_millis(self.config.delivery_timeout_ms))
-            .delivery_timeout(Duration::from_millis(self.config.delivery_timeout_ms))
-            .retries(0)
-            .max_in_flight(self.config.buffer_capacity)
-            .idempotent(false);
-        if let Some(reference) = self.config.credential_ref.as_deref() {
+        let authentication = if let Some(reference) = self.config.credential_ref.as_deref() {
             let provider = self.secret_provider.as_ref().ok_or_else(|| {
                 VqlError::new(
                     ErrorCode::Execution,
@@ -142,15 +163,26 @@ impl KafkaSink {
                         )
                         .with_source(error)
                     })?;
-            builder = builder.auth(authentication.into_auth_config());
-        }
-        let initialized = builder.build().await.map(Arc::new).map_err(|error| {
-            VqlError::new(
-                ErrorCode::Execution,
-                format!("failed to connect Kafka producer for Sink '{}'", self.name),
-            )
-            .with_source(error)
-        })?;
+            Some(authentication)
+        } else {
+            None
+        };
+        let (client_config, context) =
+            producer_config(&self.name, &self.config, authentication.as_ref());
+        let initialized: VisionKafkaProducer =
+            client_config
+                .create_with_context(context)
+                .map_err(|error| {
+                    VqlError::new(
+                        ErrorCode::Execution,
+                        format!(
+                            "failed to initialize Kafka producer for Sink '{}'",
+                            self.name
+                        ),
+                    )
+                    .with_source(error)
+                })?;
+        let initialized = Arc::new(initialized);
         state.producer = Some(Arc::clone(&initialized));
         Ok(initialized)
     }
@@ -181,9 +213,19 @@ impl KafkaSink {
         let Some(producer) = producer else {
             return Ok(());
         };
-        producer
-            .close_with_timeout(Duration::from_millis(self.config.delivery_timeout_ms))
+        let timeout = Duration::from_millis(self.config.delivery_timeout_ms);
+        tokio::task::spawn_blocking(move || producer.flush(timeout))
             .await
+            .map_err(|error| {
+                VqlError::new(
+                    ErrorCode::Execution,
+                    format!(
+                        "failed to join Kafka producer close for Sink '{}'",
+                        self.name
+                    ),
+                )
+                .with_source(error)
+            })?
             .map_err(|error| {
                 VqlError::new(
                     ErrorCode::Execution,
@@ -192,6 +234,31 @@ impl KafkaSink {
                 .with_source(error)
             })
     }
+}
+
+fn producer_config(
+    name: &str,
+    sink: &KafkaSinkConfig,
+    authentication: Option<&KafkaAuthentication>,
+) -> (ClientConfig, KafkaClientContext) {
+    let delivery_timeout = sink.delivery_timeout_ms.to_string();
+    let connection_timeout = sink.delivery_timeout_ms.max(1_000).to_string();
+    let buffer_capacity = sink.buffer_capacity.to_string();
+    let mut config = ClientConfig::new();
+    config
+        .set("bootstrap.servers", &sink.bootstrap_servers)
+        .set("client.id", format!("visionql-{name}"))
+        .set("acks", "all")
+        .set("socket.connection.setup.timeout.ms", connection_timeout)
+        .set("request.timeout.ms", &delivery_timeout)
+        .set("delivery.timeout.ms", delivery_timeout)
+        .set("retries", "0")
+        .set("max.in.flight.requests.per.connection", &buffer_capacity)
+        .set("queue.buffering.max.messages", buffer_capacity)
+        .set("enable.idempotence", "false")
+        .set("allow.auto.create.topics", "false");
+    let oauth = authentication.and_then(|authentication| authentication.configure(&mut config));
+    (config, KafkaClientContext { oauth })
 }
 
 impl Debug for KafkaSink {
@@ -205,16 +272,19 @@ impl Debug for KafkaSink {
 }
 
 async fn deliver(
-    producer: Arc<Producer>,
+    producer: Arc<VisionKafkaProducer>,
     topic: String,
     payload: Vec<u8>,
     _permit: OwnedSemaphorePermit,
 ) -> Result<()> {
     producer
-        .send(&topic, None, &payload)
+        .send(
+            FutureRecord::<(), [u8]>::to(&topic).payload(payload.as_slice()),
+            Duration::ZERO,
+        )
         .await
         .map(|_| ())
-        .map_err(|error| {
+        .map_err(|(error, _message)| {
             VqlError::new(
                 ErrorCode::Execution,
                 format!("Kafka delivery to topic '{topic}' failed: {error}"),
@@ -625,6 +695,35 @@ mod tests {
         );
         drop(first);
         assert!(Arc::clone(&sink.delivery_slots).try_acquire_owned().is_ok());
+    }
+
+    #[test]
+    fn producer_config_preserves_v01_delivery_contract() {
+        let (config, context) = producer_config("events", &kafka_config(2), None);
+
+        assert!(context.oauth.is_none());
+        assert_eq!(config.get("acks"), Some("all"));
+        assert_eq!(config.get("retries"), Some("0"));
+        assert_eq!(config.get("enable.idempotence"), Some("false"));
+        assert_eq!(
+            config.get("max.in.flight.requests.per.connection"),
+            Some("2")
+        );
+        assert_eq!(config.get("queue.buffering.max.messages"), Some("2"));
+        assert_eq!(config.get("delivery.timeout.ms"), Some("30000"));
+        assert_eq!(config.get("request.timeout.ms"), Some("30000"));
+        assert_eq!(config.get("allow.auto.create.topics"), Some("false"));
+    }
+
+    #[test]
+    fn oauth_token_lifetime_is_safe_for_librdkafka_microseconds() {
+        let authentication = KafkaAuthentication::sasl_oauthbearer("opaque-token");
+        let (_config, context) = producer_config("events", &kafka_config(2), Some(&authentication));
+
+        let token = context.generate_oauth_token(None).unwrap();
+
+        assert_eq!(token.token, "opaque-token");
+        assert!(token.lifetime_ms.checked_mul(1_000).is_some());
     }
 
     #[tokio::test]

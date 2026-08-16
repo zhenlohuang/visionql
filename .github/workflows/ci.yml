@@ -34,10 +34,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install FFmpeg development libraries
+      - name: Install native development libraries
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            build-essential \
             clang \
             libavcodec-dev \
             libavdevice-dev \
@@ -47,6 +48,7 @@ jobs:
             libclang-dev \
             libswresample-dev \
             libswscale-dev \
+            perl \
             pkg-config
 
       - name: Cache Rust dependencies
@@ -75,10 +77,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install FFmpeg development libraries
+      - name: Install native development libraries
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            build-essential \
             clang \
             libavcodec-dev \
             libavdevice-dev \
@@ -88,6 +91,7 @@ jobs:
             libclang-dev \
             libswresample-dev \
             libswscale-dev \
+            perl \
             pkg-config
 
       - name: Cache Rust dependencies
