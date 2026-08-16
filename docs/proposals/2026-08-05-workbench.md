@@ -2,7 +2,7 @@
 created_at: 2026-08-05
 status: draft
 target_version: v0.2
-updated_at: 2026-08-15
+updated_at: 2026-08-16
 ---
 
 # Workbench
@@ -647,7 +647,7 @@ Hard constraints:
 | Protocol contract | Fixed SqlInfo IDs/capabilities, all metadata RPCs, `statement_info_v1`, FlightInfo metadata, attached Sink status, prepared statements, cancel, per-RPC session token, Protobuf errors, `IMAGE` schema/version, system SQL |
 | Integration | Mock Flight slow clients, disconnect, cancel, trailing-metadata errors, unknown capability/field fallback |
 | Real engine E2E | Login, DDL, bounded query, multimodal rendering, live preview, Jobs actions, permission denial |
-| Security | CSRF, XSS strings, forged/expired/revoked locators and media references, SSRF, log redaction, cross-user cache and Flight-session isolation |
+| Security | CSRF, XSS strings, forged/expired/revoked locators and media references, log redaction, cross-user cache and Flight-session isolation |
 | Stability | One-hour live preview, BFF restart, failed replica affinity, no orphan queries |
 
 ### 14.2 PRD Acceptance Mapping
@@ -722,3 +722,4 @@ As defined in §1.1 and PRD §3.8, Workbench is not a notebook, general BI tool,
 | 2026-08-09 | Converted metadata to front matter, adopted date-based naming, and translated to English |
 | 2026-08-10 | Aligned Catalog and continuous-query views with Query Manifests and typed Model metadata |
 | 2026-08-15 | Retargeted Workbench from v0.3 to v0.2 after merging the embedded releases |
+| 2026-08-16 | Removed destination-policy and SSRF acceptance requirements while retaining locator authorization and client-isolation coverage |

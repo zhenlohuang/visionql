@@ -105,7 +105,7 @@ VisionQL uses one unifying model: **visual data is represented as relations made
 | **Multimodal type system** | Extends standard SQL with `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)` (enabled for embedding search in v0.3), and nested `STRUCT` / `ARRAY` types |
 | **Table** | A bounded dataset. An image directory is one row per image. A video directory is expanded at its declared sample rate into one row per frame. |
 | **Stream** | An unbounded frame relation such as `(ts TIMESTAMP, frame IMAGE, ...)`, with event-time and watermark semantics |
-| **Model** | A typed inference capability. `TYPE` fixes its built-in SQL function and canonical Arrow result; `FROM` and `USING` select a location and Runtime. Embedded Runtimes derive internal processors from their `WITH` schema; service Runtimes own the full model-facing pipeline. A query names the Model through the built-in function's constant `model` argument, and planning copies the resolved definition into an immutable Query Manifest. |
+| **Model** | A typed inference capability. `TYPE` fixes its built-in SQL function and canonical Arrow result; `FROM` and `USING` select a location and Runtime. Embedded Runtimes derive internal processors from their `WITH` schema; service Runtimes own the full model-facing pipeline. A query names the Model through the built-in function's constant `model` argument, and planning copies the resolved definition into its immutable query definition snapshot. |
 | **Function** | User-defined computation: a SQL expression function or a batched Python function. Function DDL reuses DataFusion's grammar and registry. A SQL function may wrap a typed inference call as an alias or preset. |
 | **Window** | A streaming aggregation boundary. `TUMBLE` is a time-bucketing scalar function used in `GROUP BY`; in batch mode it behaves as an ordinary time-bucketed aggregate. |
 | **Sink** | A destination such as Console, Kafka, Parquet, or Lance |
@@ -245,7 +245,7 @@ RESOLVE MODEL yolo26n;
 
 Runtime names are explicit, including `ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER`. The `WITH` schema is bound to the selected Runtime instead of a global Model option namespace. For `ONNX_RUNTIME`, `input` and `output` describe the VisionQL-owned tensor preprocessing and postprocessing contract. For `TRITON_INFERENCE_SERVER`, `WITH (model=..., version=...)` binds the served model; the service owns preprocessing and postprocessing, while VisionQL handles only transport encoding and conversion of the canonical service response into the public Arrow type. A service exposing only model-specific raw tensors is rejected.
 
-The `WITH` clause contains result-affecting binding data, not deployment policy. Device placement, replicas, queue capacity, batch size, maximum wait, concurrency, timeout, and credentials belong to internal RuntimeConfig or the secret provider. Unknown Runtime options fail rather than being silently retained.
+The `WITH` clause contains result-affecting binding data, not deployment policy. Device placement, replicas, queue capacity, batch size, maximum wait, concurrency, timeout, and credentials belong to scheduler configuration or the secret provider. Unknown Runtime options fail rather than being silently retained.
 
 `FROM` identifies an artifact bundle or endpoint. ONNX graphs, explicitly classified `.pt`/`.pth` artifacts, Safetensors bundles, and GGUF bundles are inputs to compatible Runtimes; a file suffix is not a generic execution strategy. Remote bundles are pinned and content-addressed where possible. VisionQL neither infers a task, label map, tensor contract, or processor from filenames and shapes nor requires a public Profile, Adapter, or `visionql-manifest.json`.
 
@@ -265,7 +265,7 @@ SELECT IMAGE_DETECTION(
 FROM product_photos;
 ```
 
-In v0.1, the first argument must be a non-NULL string literal naming a Model. Planning resolves it from the Catalog, validates that its Model type matches the built-in function, and stores the resolved Model in the Query Manifest; the string never becomes a per-row Arrow value or Runtime request field. Required domain arguments such as `image` or `prompt` may be arbitrary row expressions. Optional semantic arguments such as `classes` and thresholds must be named constants and follow all positional arguments. Dynamic model selection, prepared Model parameters, duplicate or unknown arguments, and type mismatches are planning errors.
+In v0.1, the first argument must be a non-NULL string literal naming a Model. Planning resolves it from the Catalog, validates that its Model type matches the built-in function, and copies the resolved Model into the planned inference node; the string never becomes a per-row Arrow value or Runtime request field. Required domain arguments such as `image` or `prompt` may be arbitrary row expressions. Optional semantic arguments such as `classes` and thresholds must be named constants and follow all positional arguments. Dynamic model selection, prepared Model parameters, duplicate or unknown arguments, and type mismatches are planning errors.
 
 `CREATE FUNCTION` is reserved for genuine user-defined computation:
 
@@ -278,7 +278,7 @@ CREATE FUNCTION blur_score(img IMAGE) RETURNS FLOAT
 LANGUAGE PYTHON AS 'myops.quality:blur_score';
 ```
 
-VisionQL reuses DataFusion's PostgreSQL-style `CREATE FUNCTION` grammar, `CreateFunction`, `FunctionFactory`, named arguments, and UDF registry. VisionQL adds durable Catalog storage and reconstructs the UDF for each Query Manifest; session registration is not the source of truth. SQL functions expand during planning, and Python functions use the batched Arrow ABI. A reusable inference alias or parameter preset may be an ordinary SQL expression function whose expanded body still becomes an explicit `Inference` node.
+VisionQL reuses DataFusion's PostgreSQL-style `CREATE FUNCTION` grammar, `CreateFunction`, `FunctionFactory`, named arguments, and UDF registry. VisionQL adds durable Catalog storage and reconstructs UDFs from each query definition snapshot; session registration is not the source of truth. SQL functions expand during planning, and Python functions use the batched Arrow ABI. A reusable inference alias or parameter preset may be an ordinary SQL expression function whose expanded body still becomes an explicit `Inference` node.
 
 `RETURNS` is required for Python functions. A SQL expression function may omit it when DataFusion can infer the body type; otherwise registration asks for an explicit return type.
 
@@ -396,7 +396,7 @@ VisionQL must satisfy three competing conditions:
 
 - Batch exploration should begin immediately after `pip install`, without a cluster.
 - Continuous queries need a long-lived process for state, recovery, resident model sessions, and GPU sharing.
-- High-volume video should stay close to the camera. A 1080p stream is roughly 4 Mbps; centralizing dozens of feeds creates material network and compliance costs, while query results are often only kilobytes.
+- High-volume video should stay close to the camera. Centralizing many feeds creates material network and compliance costs, while query results are comparatively small.
 
 One deployment form cannot serve all three well. VisionQL therefore uses **one engine kernel with two hosts**, sharing SQL and Catalog semantics. Cluster designs remain out of scope until these forms are validated.
 
@@ -420,7 +420,7 @@ The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`.
 The implementation details live in [System Design](./design.md), but the following constraints are required for the product experience above:
 
 1. **Optimizer:** in the initial scope, push only user-declared fps/time ranges and decoding, plus query-local common-expression elimination for deterministic typed inference calls.
-2. **Frame path:** decoded 1080p RGB is about 6 MB per frame; one 5 fps stream produces about 30 MB/s. `IMAGE` should remain a reference or compressed value through most of the plan, with decoding deferred until inference or persistence.
+2. **Frame path:** decoded frames are large. `IMAGE` should remain a reference or compressed value through most of the plan, with decoding deferred until inference or persistence.
 3. **GPU-aware scheduling:** automatic batching, operator/model co-location, and backpressure.
 4. **Streaming semantics:** event time, watermarks, and reconnect behavior. RTSP is non-replayable and therefore best-effort; outages and dropped frames must appear as gaps rather than fabricated data.
 5. **Storage:** columnar multimodal output, with Parquet and Lance plus video references in v0.3.
@@ -431,9 +431,8 @@ The implementation details live in [System Design](./design.md), but the followi
 
 | Area | Requirement |
 |---|---|
-| **Performance (MVP baseline)** | On one machine with one consumer GPU: at least 8 concurrent 1080p@5fps streams running lightweight detection plus window aggregation; batch scans should saturate hardware with decoding as the bottleneck; interactive metadata and persisted-result queries must achieve P95 < 1s |
 | **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. From v0.2, durable service jobs recover after restart without losing Catalog state. |
-| **Error semantics** | A single decode or inference failure produces NULL for that row and increments query error metrics. Alert when the failure rate crosses a threshold. Optional strict mode is `on_error = 'fail'`. Model false positives and false negatives are not engine errors; users manage them with explicit thresholds. |
+| **Error semantics** | A single decode or inference failure produces NULL for that row and increments query error metrics. Optional strict mode is `on_error = 'fail'`. Model false positives and false negatives are not engine errors; users manage them with explicit thresholds. |
 | **Security and privacy** | Data stays in its domain by default. Pin and hash model sources. The v0.2 service adds TLS, authentication, relation-level authorization, and out-of-process Python UDFs. |
 | **Compatibility** | VisionQL v0.1 has not been released, so pre-release SQL and Catalog definitions carry no compatibility guarantee. Compatibility and automatic Catalog migration begin with released versions. `EXPLAIN` text and internal metric names are not stable APIs before 1.0. |
 
@@ -483,7 +482,7 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 RTSP remains non-replayable and best-effort; outages and drops appear as gaps. Scenario B uses recorded-video batch output as the trusted reference for the streaming result, but both paths are required before v0.1 is complete.
 
-**v0.2 adds the `vqld` service**, Flight SQL, TLS/authentication, relation-level authorization, durable job management and recovery, the Python DataFrame API, and Workbench.
+**v0.2 adds the `vqld` service**, Flight SQL, TLS/authentication, relation-level authorization, durable job management and recovery backed by serializable Query Manifests, the Python DataFrame API, and Workbench.
 
 **v0.3 adds cross-modal retrieval and persisted results:** `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)`, their fixed `IMAGE_EMBEDDING` / `TEXT_EMBEDDING` calls, `VECTOR(n)`, brute-force `<->` TopK, Parquet and Lance with native `IMAGE` and vector columns, and HNSW indexing. Parquet and Lance ship together against one output, CTAS, and logical-type recovery contract so `IMAGE` storage is designed only once.
 
@@ -558,7 +557,7 @@ The first users will be two or three design partners working with the team on on
 
 | Date | Change |
 |---|---|
-| 2026-08-16 | Split fast `CREATE MODEL` declaration from slow `RESOLVE MODEL`, moved Runtime selection to `USING`, scoped `WITH` to the selected Runtime, and made service Runtimes own pre/post-processing |
+| 2026-08-16 | Split fast `CREATE MODEL` declaration from slow `RESOLVE MODEL`, moved Runtime selection to `USING`, scoped `WITH` to the selected Runtime, made service Runtimes own pre/post-processing, and removed hardware-specific performance targets from the PRD |
 | 2026-08-15 | Merged embedded batch and streaming into v0.1 and renumbered later releases |
 | 2026-08-10 | Defined type-owned inference calls, namespaced Runtime and processor options, and DataFusion-backed SQL/Python Functions |
 | 2026-08-07 | Initial product design |

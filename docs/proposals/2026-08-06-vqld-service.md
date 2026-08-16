@@ -2,7 +2,7 @@
 created_at: 2026-08-06
 status: draft
 target_version: v0.2
-updated_at: 2026-08-15
+updated_at: 2026-08-16
 ---
 
 # vqld Service: Flight SQL, Durable Jobs, and Recovery
@@ -104,7 +104,7 @@ SET vql.result.image_mode = 'inline';    -- original encoded content, protected 
 
 All three modes use the same `visionql.image` Arrow storage schema. Only the presence and semantic marker of `encoded` change.
 
-On-demand original-media reads use a locator-backed Flight `DoGet`, not a SQL scalar function. The media ticket carries the opaque `IMAGE.locator` and may request another `pts_ms` only within the same authorized video object. `vqld` rejects display URIs, parses only versioned locators, and reauthorizes the current principal against the embedded source revision and range before returning an encoded `IMAGE` row. File and object-store references are rereadable under the locator invariants in [design.md](../design.md) §6.2. A live RTSP frame is available only while it remains in the server's bounded compressed-GOP ring. The ring evicts the oldest GOP by total bytes and TTL, is charged to the service resource budget, and does not affect query semantics. See the [Workbench proposal](./2026-08-05-workbench.md) for client behavior.
+On-demand original-media reads use a locator-backed Flight `DoGet`, not a SQL scalar function. The media ticket carries the opaque `IMAGE.locator` and may request another `pts_ms` only within the same authorized video object. `vqld` rejects display URIs, parses only versioned locators, and reauthorizes the current principal against the embedded source revision and range before returning an encoded `IMAGE` row. Local-file references are rereadable under the locator invariants in [design.md](../design.md) §6.2; remote object-store providers require a separate proposal. A live RTSP frame is available only while it remains in the server's bounded compressed-GOP ring. The ring evicts the oldest GOP by total bytes and TTL, is charged to the service resource budget, and does not affect query semantics. See the [Workbench proposal](./2026-08-05-workbench.md) for client behavior.
 
 ### Minimum System-query Schemas
 
@@ -142,6 +142,21 @@ STOP QUERY '<query_id>';
 
 Query metrics do not have a system-SQL channel. In addition to [design.md](../design.md) §12.3, v0.2 exposes a Prometheus endpoint with labels such as `query_id`, plus checkpoint duration and size, last successful epoch, and recovery count. This matches the PRD §3.8 cost panel. Metric names may evolve before v1.0 but must follow Prometheus naming and unit-suffix conventions; clients must not guess units from arbitrary strings.
 
+### Query Manifest and Recovery ABI
+
+The embedded kernel first creates the process-local query definition snapshot described in [design.md](../design.md) §4.3. `SUBMIT QUERY` resolves that snapshot completely and serializes it as an immutable Query Manifest owned by `vqld`. Attached v0.1 queries do not persist one.
+
+A Manifest records:
+
+- the normalized SQL and fully resolved Table, Stream, Model, Function, and Sink specifications, including internal revisions and semantic fingerprints;
+- resolved Model artifact hashes or service bindings, Runtime and processor contracts, canonical schemas, and determinism;
+- the submitting principal and authorization-relevant object identities;
+- the logical-plan fingerprint and state-format versions required to reject incompatible recovery.
+
+The Manifest receives a server-generated identity and is immutable for the job lifetime. Durable jobs and checkpoints hold leases on referenced Catalog revisions and cached artifacts; terminal-job retention and checkpoint deletion release them. A lease preserves bytes needed for recovery but never bypasses current authorization.
+
+v0.2 also introduces the versioned window recovery ABI that v0.1 deliberately does not need. Every checkpointable aggregate has a `WindowStateCodec` defining its aggregate kind and input types, normalized state schema, update/evaluation rules, size accounting, serialization, and restore behavior. A codec change requires a migration or replay plan. New codecs must pass deterministic-schema, non-destructive-snapshot, restore-round-trip, compatibility-rejection, and resource-accounting tests.
+
 ### Durable-job Checkpoints and Recovery
 
 v0.2 provides checkpoints and crash recovery for jobs created by `SUBMIT QUERY`. RTSP is not replayable, so the goal is not data replay. The contract is: **accumulated window state and watermark survive a crash; recovery resumes from the live position and reports the gap honestly.**
@@ -152,7 +167,7 @@ The coordinator selects a completed epoch as a checkpoint boundary based on elap
 2. Write output to the Sink and wait for every write acknowledgement.
 3. Atomically persist a new checkpoint containing the logical-plan hash, Query Manifest identity, watermark, normalized window state, every `WindowStateCodec` version, and the Sink delivery sequence.
 
-The checkpoint writes the normalized Arrow state defined in [design.md](../design.md) §5.4 and records operator ID, state-schema fingerprint, codec version, and engine state-format version. It does not call `state()` on the active accumulator. Recovery requires those fields to match the Query Manifest. Incompatibility moves the job to `state=FAILED, error_code=RECOVERY_INCOMPATIBLE`; it must not attempt best-effort deserialization.
+The checkpoint extends the process-local normalized state described in [design.md](../design.md) §5.4 with the versioned codec above. It records operator ID, state-schema fingerprint, codec version, and engine state-format version and does not call `state()` on an active accumulator. Recovery requires those fields to match the Query Manifest. Incompatibility moves the job to `state=FAILED, error_code=RECOVERY_INCOMPATIBLE`; it must not attempt best-effort deserialization.
 
 Recovery behavior is:
 
@@ -185,23 +200,23 @@ The service adds one object to the Catalog objects in [design.md](../design.md) 
 |---|---|
 | QueryJob | Name, SQL, immutable Query Manifest, state, checkpoint location, owner |
 
-A `SUBMIT QUERY` name is immutable and unique within the owner's non-terminal jobs. State changes use only the server UUID. Durable jobs and checkpoints hold Manifest leases according to [design.md](../design.md) §4.3.
+A `SUBMIT QUERY` name is immutable and unique within the owner's non-terminal jobs. State changes use only the server UUID. Durable jobs and checkpoints hold the Manifest and revision leases defined by this proposal.
 
 In addition to the embedded security constraints in [design.md](../design.md) §13, the service requires:
 
 - Flight SQL uses TLS, and authenticated identities map to Catalog principals.
 - Both query planning and media dereference enforce table/stream-level authorization. Hiding an object from a catalog list is insufficient. Revocation takes effect immediately and is not bypassed by a lease.
-- `FRAME_AT` accepts only locators for registered sources. By default, the server blocks cloud metadata addresses, link-local addresses, and targets not explicitly allowed by configuration.
+- `FRAME_AT` accepts only versioned locators for registered sources and reauthorizes the current principal before reading media.
 - `IMAGE.uri` is a sanitized display value. `IMAGE.locator` is the media location that can be reauthorized. Neither contains underlying credentials.
 - Python UDFs run in an out-of-process worker with timeout, memory, and dependency controls. The worker is not a multi-tenant security sandbox.
 - v0.2 has no audit log, but execution context retains principal, query ID, Query Manifest identity, and resolved object fingerprints so provenance can be added later.
 
 ## Relationship to the System Design
 
-- `vqld` is built on the process-agnostic kernel in [design.md](../design.md) §11.1; the `vql-server` crate boundary is in §14.
-- `IMAGE` transport follows the three payload states and locator invariants in §6.2, which also defines the fixed error-code set.
-- Checkpoint boundaries use the epoch consistency boundary in §5. The recovery ABI for window state is `WindowStateCodec` in §5.4.
-- Query Manifests and their leases follow §4.3 and §7.2.
+- `vqld` is built on the process-agnostic kernel in [design.md](../design.md) §11.1; this proposal introduces and owns the future `vql-server` crate boundary.
+- `IMAGE` transport follows the three payload states and locator invariants in §6.2.
+- Checkpoint boundaries use the epoch consistency boundary in §5. This proposal owns the `WindowStateCodec` recovery ABI layered over v0.1's process-local state.
+- The kernel definition snapshot follows §4.3; this proposal owns durable Query Manifests, their identities, revision leases, retention, and garbage collection.
 - At-least-once delivery corresponds to ADR-008 in §15.
 
 ## Testing and Acceptance
@@ -226,3 +241,4 @@ Test all specified metadata RPCs, statement/prepared transport mappings, `statem
 | 2026-08-09 | Converted metadata to front matter, adopted date-based naming, and translated to English |
 | 2026-08-10 | Aligned durable jobs, checkpoints, and dependencies with immutable Query Manifests |
 | 2026-08-15 | Retargeted the service from v0.3 to v0.2 after merging the embedded releases |
+| 2026-08-16 | Moved durable Query Manifest ownership and the versioned window recovery ABI out of the embedded v0.1 design and into this service proposal; removed the destination-address policy requirement |

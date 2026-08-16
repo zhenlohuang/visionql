@@ -22,7 +22,7 @@
 
 ## What is VisionQL
 
-VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL or the DataFrame API, users can work with images, video files, and live video streams through the same query model.
+VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL today—and a chainable DataFrame API planned for v0.2—users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
 > VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, and Kafka output are implemented. Attached continuous-query foreground execution remains in progress; `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
@@ -212,7 +212,7 @@ During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQ
 
 ## Runtime state
 
-VisionQL keeps local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The Catalog makes table, model, and function definitions reusable across sessions; every planned query receives an immutable Query Manifest.
+VisionQL keeps local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The Catalog makes table, model, and function definitions reusable across sessions; planning takes one immutable definition snapshot so later DDL cannot change a running query.
 
 | State or setting | Default and behavior |
 |---|---|
@@ -236,7 +236,7 @@ flowchart LR
     ARROW --> HOSTS
 ```
 
-The CLI and Python hosts share `vql-kernel`, which owns SQL planning, the Catalog and Query Manifests, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. For design rationale—including lazy media decoding, optimizer-visible inference, and the batch/stream boundary—read the [system design](docs/design.md).
+The CLI and Python hosts share `vql-kernel`, which owns SQL planning, Catalog definition snapshots, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. For design rationale—including lazy media decoding, optimizer-visible inference, and the batch/stream boundary—read the [system design](docs/design.md).
 
 ## Documentation
 
