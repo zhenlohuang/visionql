@@ -22,11 +22,11 @@ cargo run -p vql-cli -- explain "SELECT 1"
 Tests:
 
 ```bash
-cargo test -p vql-kernel --test integration                          # integration suite over real data
-VQL_TEST_CASE=functions/image_detection cargo test -p vql-kernel --test integration # filter cases
-VQL_INTEGRATION_TEST=1 cargo test -p vql-kernel --test integration   # fail instead of skip when fixtures are missing
+cargo test -p vql-testing --test sql --locked                     # shared sqllogictest suite
+VQL_TEST_CASE=functions/image_detection cargo test -p vql-testing --test sql --locked # filter cases
+VQL_INTEGRATION_TEST=1 cargo test -p vql-testing --test sql --locked # fail when fixtures are missing
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
-VQL_TEST_CASE=scenarios/mixed_size_images cargo test -p vql-kernel --test integration --locked
+scripts/run-integration-tests.sh                                  # strict suite with profiled Compose services
 ```
 
 Python (`vql-python` is a PyO3/Maturin extension, not a pure-Python package):
@@ -41,7 +41,7 @@ Toolchain is pinned to Rust 1.91.1 by `rust-toolchain.toml` (workspace MSRV is 1
 
 ## Architecture
 
-Three crates: `vql-kernel` (everything), `vql-cli` (clap + reedline shell), `vql-python` (PyO3 bindings + Python UDF host). The hosts only inject config and optional capabilities; `vql-kernel` never depends on clap or PyO3, never opens a port, and reads no global singletons.
+Four crates: `vql-kernel` (engine and owner tests), `vql-cli` (clap + reedline shell), `vql-python` (PyO3 bindings + Python UDF host), and `vql-testing` (shared SQL conformance and system tests). The hosts only inject config and optional capabilities; `vql-kernel` never depends on clap or PyO3, never opens a port, and reads no global singletons.
 
 `Engine` (`engine.rs`) owns four long-lived pieces shared by every session: the SQLite `CatalogStore`, a Tokio runtime, `MediaRuntime`, and `ModelRuntime`. `Session` is a cheap clone over the engine plus per-session state (`fail_on_error`, active-query cancellation token, optional Python UDF host).
 
@@ -79,13 +79,13 @@ Two layers, split by what each can actually prove.
 
 Rust unit tests live beside their modules and cover everything a synthetic fixture can reach: parser and DDL validation, error codes, catalog lifecycle, plan shape, scheduler batching. `session.rs` holds the broadest ones, using `mock://` models and generated PNGs so they need no downloads. Note that `mock://` never decodes its input, so it cannot exercise decode failures — use a Triton endpoint model for those, as decoding happens before any request.
 
-`vql-kernel/tests/integration_tests.rs` is the only integration target. It uses a dynamic test harness, so every main SQL file appears as an individual Cargo test. Cases are grouped under `tests/{ddl,functions,scenarios}`. Each case has one main `.sql` statement and a `.expected.json` file containing exact `schema` (`"name TYPE"`, in order) and `rows`. When a real-model count can vary by execution provider, return the stable property the case needs to prove, such as `COUNT(*) > 0`.
+`vql-testing/tests/sql.rs` wraps `sqllogictest-rs` with a dynamic harness, so every `.slt` file appears as an individual Cargo test. Cases are grouped under `tests/cases/{ddl,functions,scenarios}` and use `B`, `I`, `R`, and `T` for strict result-column families. Values are compared exactly without whitespace normalization. When a real-model count can vary by execution provider, return the stable property the case needs to prove, such as `COUNT(*) > 0`.
 
-Use `<case>.setup.sql` for prerequisite objects and `<case>.teardown.sql` for cleanup. Every case gets a fresh catalog and temporary `VQL_HOME`, and the runner executes setup, the main statement, and teardown in order. The runner substitutes `${IMAGES_LOCATION}`, `${VIDEOS_LOCATION}`, and `${MODEL}`. Do not pre-create shared objects or combine unrelated assertions in one query.
+Every `.slt` file gets a fresh embedded Engine, catalog, and temporary `VQL_HOME`. It can use `${IMAGES_LOCATION}`, `${VIDEOS_LOCATION}`, and `${MODEL}` after `control substitution on`. Keep one behavior per file and do not add teardown unless teardown is the behavior. Sqllogictest does not carry field names or nullability, so exact metadata contracts stay in focused kernel owner tests.
 
-The fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`; the suite skips when they are absent, and `VQL_INTEGRATION_TEST=1` turns that into a failure. See `vql-kernel/tests/README.md`.
+The fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`; affected tests are ignored when they are absent, and `VQL_INTEGRATION_TEST=1` turns that into a failure. The root `docker-compose.yaml` provides optional external services through profiles. `scripts/run-integration-tests.sh` starts an isolated `rtsp` project and runs the strict suite. See `vql-testing/README.md`.
 
-`cargo test --workspace` therefore stays green on a fresh clone and in CI, which runs no downloads.
+`cargo test --workspace` therefore stays green on a fresh clone and in CI, which runs no fixture downloads or real external-service E2E.
 
 ## Docs
 

@@ -1,4 +1,0 @@
-{
-  "schema": ["width INT32", "height INT32"],
-  "rows": [[640, 480]]
-}

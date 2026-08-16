@@ -43,7 +43,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-CI runs these three gates on Linux and records Rust test coverage in a separate job. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
+CI runs these three gates plus `docker compose config --quiet` on Linux and records Rust test coverage in a separate job. It compiles and parses fixture-free integration paths but does not provision real data, models, or external services. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
 
 ```bash
 python -m pip install pytest
@@ -67,7 +67,7 @@ Open `target/llvm-cov/html/index.html` for file-level results. Coverage is infor
 
 ### Integration tests
 
-`vql-kernel/tests/integration_tests.rs` runs real SQL over the example datasets and the exported YOLO26 model. Fetch the fixtures once:
+`vql-testing` runs shared SQL conformance through `sqllogictest-rs`. Fetch the real fixtures once:
 
 ```bash
 python scripts/fetch_datasets.py          # about 10 MB
@@ -77,33 +77,24 @@ python scripts/export_yolo26.py --size n  # data/models/yolo26n.onnx
 Then run the suite, optionally narrowing it while iterating:
 
 ```bash
-cargo test -p vql-kernel --test integration
-VQL_TEST_CASE=functions/image_detection cargo test -p vql-kernel --test integration
+cargo test -p vql-testing --test sql --locked
+VQL_TEST_CASE=functions/image_detection cargo test -p vql-testing --test sql --locked
 ```
 
-Without the fixtures every case reports a skip and passes, which keeps `cargo test --workspace` green on a fresh clone. Set `VQL_INTEGRATION_TEST=1` to turn a missing fixture into a failure instead.
+Without the fixtures each affected case reports ignored, which keeps `cargo test --workspace` green on a fresh clone. Set `VQL_INTEGRATION_TEST=1` to turn a missing fixture into a failure instead.
 
-Every main SQL file appears as an individual test in Cargo output; use `cargo test -p vql-kernel --test integration -- --list` to list them.
+Every `.slt` file appears as an individual test in Cargo output; use `cargo test -p vql-testing --test sql --locked -- --list` to list them.
 
-A case has one main SQL statement, an expected result, and optional setup and teardown sidecars:
+A case contains its setup statements, behavior query, and expected rows in standard sqllogictest form:
 
 ```text
-image_detection.setup.sql
-image_detection.sql
-image_detection.expected.json
-image_detection.teardown.sql
+query B
+SELECT COUNT(*) > 0 AS found FROM ...;
+----
+true
 ```
 
-Expected JSON contains the exact schema and rows:
-
-```json
-{
-  "schema": ["found BOOLEAN"],
-  "rows": [[true]]
-}
-```
-
-Cases are grouped under `ddl/`, `functions/`, and `scenarios/`. Keep one purpose in each main statement, put prerequisite DDL in `*.setup.sql`, and put cleanup in `*.teardown.sql`. Return stable values that can be compared exactly. Read `vql-kernel/tests/README.md` before adding a case.
+Cases are grouped under `ddl/`, `functions/`, and `scenarios/`. Keep one behavior per file and return stable values that can be compared exactly. Every file receives an isolated temporary catalog, so do not add cleanup SQL unless cleanup is the behavior under test. Read `vql-testing/README.md` before adding a case.
 
 If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
 
@@ -113,7 +104,14 @@ The mixed-size image batch scenario exercises the ONNX pipeline through public S
 
 ```bash
 VQL_TEST_CASE=scenarios/mixed_size_images \
-  cargo test -p vql-kernel --test integration --locked
+  cargo test -p vql-testing --test sql --locked
+```
+
+The real RTSP scenario uses the `rtsp` profile in the root `docker-compose.yaml`. Run every strict
+integration case in an isolated Compose project with:
+
+```bash
+scripts/run-integration-tests.sh
 ```
 
 ## Git hooks

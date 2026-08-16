@@ -1,0 +1,8 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.20.0
+    profiles: [rtsp]
+    environment:
+      MTX_RTSPTRANSPORTS: tcp
+    ports:
+      - "${VQL_RTSP_PORT:-8554}:8554"

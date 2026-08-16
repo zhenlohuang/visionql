@@ -1,0 +1,27 @@
+[package]
+name = "vql-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+arrow.workspace = true
+sqllogictest.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+vql-kernel = { path = "../vql-kernel" }
+
+[dev-dependencies]
+libtest-mimic.workspace = true
+
+[[test]]
+name = "sql"
+path = "tests/sql.rs"
+harness = false
+
+[[test]]
+name = "rtsp"
+path = "tests/rtsp.rs"
+harness = false

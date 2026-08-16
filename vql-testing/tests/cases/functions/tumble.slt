@@ -1,0 +1,17 @@
+control substitution on
+
+query T
+CREATE TABLE clips USING VIDEOS LOCATION '${VIDEOS_LOCATION}' WITH (fps = 1);
+----
+created table 'clips' at revision 1
+
+query I
+SELECT CAST(COUNT(*) AS BIGINT) AS windows
+FROM (
+  SELECT TUMBLE(ts, INTERVAL '5' SECOND)
+  FROM clips
+  WHERE uri LIKE '%/people-detection.mp4'
+  GROUP BY 1
+);
+----
+4

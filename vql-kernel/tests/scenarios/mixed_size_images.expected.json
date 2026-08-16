@@ -1,4 +1,0 @@
-{
-  "schema": ["images INT64", "all_inferred BOOLEAN", "mixed_widths BOOLEAN"],
-  "rows": [[3, true, true]]
-}

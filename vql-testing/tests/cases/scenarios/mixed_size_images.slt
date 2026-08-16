@@ -1,0 +1,34 @@
+control substitution on
+
+query T
+CREATE TABLE photos USING IMAGES LOCATION '${IMAGES_LOCATION}';
+----
+created table 'photos' at revision 1
+
+query T
+CREATE MODEL detector TYPE OBJECT_DETECTION FROM '${MODEL}' USING ONNX_RUNTIME;
+----
+created model 'detector' at revision 2
+
+query T
+RESOLVE MODEL detector;
+----
+resolved model 'detector' at revision 3
+
+query IBB
+WITH inferred AS (
+  SELECT
+    width,
+    IMAGE_DETECTION('detector', image) AS detections
+  FROM photos
+  WHERE uri LIKE '%/000000000049.jpg'
+     OR uri LIKE '%/000000000061.jpg'
+     OR uri LIKE '%/000000000077.jpg'
+)
+SELECT
+  CAST(COUNT(*) AS BIGINT) AS images,
+  COUNT(detections) = 3 AS all_inferred,
+  COUNT(DISTINCT width) = 3 AS mixed_widths
+FROM inferred;
+----
+3 true true

@@ -1,4 +1,0 @@
-{
-  "schema": ["windows INT64", "found_people BOOLEAN"],
-  "rows": [[4, true]]
-}

@@ -237,7 +237,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, the Catalo
 | [System design](docs/design.md) | Engine architecture, contracts, and extension boundaries |
 | [Roadmap](ROADMAP.md) | Delivered and planned capabilities by version |
 | [Proposals](docs/proposals/README.md) | Focused designs for later features |
-| [SQL behavior tests](vql-kernel/tests/README.md) | Golden-case workflow and test fixtures |
+| [Integration tests](vql-testing/README.md) | Sqllogictest cases, fixtures, and Compose services |
 | [Datasets](data/datasets/README.md) / [models](data/models/README.md) | Sample provenance and ONNX export contract |
 | [Contributing](CONTRIBUTING.md) | Development workflow, tests, and pull request expectations |
 | [Security](SECURITY.md) | Supported versions and private vulnerability reporting |
@@ -255,12 +255,20 @@ cargo test --workspace --locked
 Run the integration suite directly with:
 
 ```bash
-cargo test -p vql-kernel --test integration
+cargo test -p vql-testing --test sql --locked
 ```
 
-Cases are grouped under `vql-kernel/tests/{ddl,functions,scenarios}`. Each has one main SQL
-statement, an expected result, and optional setup and teardown scripts. The suite runs against
-`data/datasets` and `data/models/yolo26n.onnx`, and reports a skip when those fixtures are absent.
+Cases are grouped under `vql-testing/tests/cases/{ddl,functions,scenarios}` as one-purpose
+sqllogictest files. Each file gets an isolated Engine and catalog. Real-data cases run against
+`data/datasets` and `data/models/yolo26n.onnx`, and report an ignored test when a required fixture
+is absent.
+
+Optional development and system-test services use profiles in the root Compose file. For example:
+
+```bash
+docker compose --profile rtsp up -d mediamtx
+scripts/run-integration-tests.sh
+```
 
 Install the Git hooks with [pre-commit](https://pre-commit.com/):
 
@@ -276,7 +284,7 @@ the integration fixtures are available and otherwise reports a skip:
 
 ```bash
 VQL_TEST_CASE=scenarios/mixed_size_images \
-  cargo test -p vql-kernel --test integration --locked
+  cargo test -p vql-testing --test sql --locked
 ```
 
 ## Contributing
