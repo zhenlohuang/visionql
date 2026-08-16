@@ -24,19 +24,23 @@ fn ddl_results_keep_the_kernel_owned_schema_contract() {
         ),
         "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME"
             .to_owned(),
-        "CREATE STREAM entrance FROM 'rtsp://127.0.0.1:8554/live' WITH (transport = 'tcp')"
-            .to_owned(),
     ] {
-        let Statement::Ddl(result) = session.sql(&sql).expect("execute DDL") else {
-            panic!("expected DDL result for {sql}");
-        };
-        let schema = result.batches()[0].schema();
-        assert_eq!(schema.fields().len(), 1);
-        let field = schema.field(0);
-        assert_eq!(field.name(), "result");
-        assert_eq!(field.data_type(), &DataType::Utf8);
-        assert!(!field.is_nullable());
+        assert_ddl_result_schema(&session, &sql);
     }
+}
+
+#[cfg(feature = "ffmpeg-native")]
+#[test]
+fn stream_ddl_result_keeps_the_kernel_owned_schema_contract() {
+    let temp = tempdir().expect("create test directory");
+    let engine =
+        Engine::new(EngineConfig::from_home(temp.path().join("vql-home"))).expect("create engine");
+    let session = engine.session().build().expect("create session");
+
+    assert_ddl_result_schema(
+        &session,
+        "CREATE STREAM entrance FROM 'rtsp://127.0.0.1:8554/live' WITH (transport = 'tcp')",
+    );
 }
 
 #[test]
@@ -144,4 +148,16 @@ fn assert_query_schema(session: &Session, sql: &str, expected: &[(&str, DataType
         })
         .collect::<Vec<_>>();
     assert_eq!(actual, expected, "unexpected schema for {sql}");
+}
+
+fn assert_ddl_result_schema(session: &Session, sql: &str) {
+    let Statement::Ddl(result) = session.sql(sql).expect("execute DDL") else {
+        panic!("expected DDL result for {sql}");
+    };
+    let schema = result.batches()[0].schema();
+    assert_eq!(schema.fields().len(), 1);
+    let field = schema.field(0);
+    assert_eq!(field.name(), "result");
+    assert_eq!(field.data_type(), &DataType::Utf8);
+    assert!(!field.is_nullable());
 }

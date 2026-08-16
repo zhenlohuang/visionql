@@ -15,6 +15,7 @@ use datafusion::logical_expr::LogicalPlan;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::ModelRuntime;
+use crate::stream::TumblePlan;
 
 pub(crate) use session_state::{context_for_function_ddl, context_for_snapshot};
 pub(crate) use sink::wrap_console_sink;
@@ -31,6 +32,7 @@ pub(crate) struct PlannedStatement {
     pub(crate) stream_name: Option<String>,
     pub(crate) stream_skip: usize,
     pub(crate) stream_fetch: Option<usize>,
+    pub(crate) tumble: Option<TumblePlan>,
 }
 
 pub(crate) async fn plan_statement(
@@ -51,11 +53,18 @@ pub(crate) async fn plan_statement(
         (plan, 0, None)
     };
     let plan = inference::extract_inference(plan, snapshot, models, fail_on_error, cancellation)?;
+    let dataframe = DataFrame::new(state, plan);
+    let tumble = if stream_name.is_some() {
+        TumblePlan::try_new(&dataframe)?
+    } else {
+        None
+    };
     Ok(PlannedStatement {
-        dataframe: DataFrame::new(state, plan),
+        dataframe,
         stream_name,
         stream_skip,
         stream_fetch,
+        tumble,
     })
 }
 
@@ -64,17 +73,42 @@ pub(crate) fn bind_stream_epoch(
     stream_name: &str,
     batches: Vec<RecordBatch>,
 ) -> crate::Result<DataFrame> {
-    let schema = crate::connectors::rtsp::rtsp_schema();
+    bind_relation(
+        dataframe,
+        stream_name,
+        crate::connectors::rtsp::rtsp_schema(),
+        batches,
+    )
+}
+
+pub(crate) fn bind_tumble_output(
+    tumble: &TumblePlan,
+    batch: RecordBatch,
+) -> crate::Result<DataFrame> {
+    bind_relation(
+        tumble.output(),
+        tumble.output_relation(),
+        tumble.aggregate_schema(),
+        vec![batch],
+    )
+}
+
+fn bind_relation(
+    dataframe: DataFrame,
+    relation: &str,
+    schema: arrow::datatypes::SchemaRef,
+    batches: Vec<RecordBatch>,
+) -> crate::Result<DataFrame> {
     let provider = Arc::new(MemTable::try_new(schema, vec![batches])?);
     let source = provider_as_source(provider);
-    let stream_name = stream_name.to_ascii_lowercase();
+    let relation = relation.to_ascii_lowercase();
     let (state, plan) = dataframe.into_parts();
     let plan = plan
         .transform_up(|plan| {
             let LogicalPlan::TableScan(mut scan) = plan else {
                 return Ok(Transformed::no(plan));
             };
-            if relation_name(&scan.table_name.to_string()) != stream_name {
+            if relation_name(&scan.table_name.to_string()) != relation {
                 return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
             }
             scan.source = Arc::clone(&source);
@@ -130,12 +164,7 @@ fn collect_scans(plan: &LogicalPlan, scans: &mut Vec<String>) {
 
 fn validate_stream_node(plan: &LogicalPlan) -> crate::Result<()> {
     match plan {
-        LogicalPlan::Aggregate(_) => {
-            return Err(crate::VqlError::feature(
-                "streaming aggregates require the unfinished v0.1 TUMBLE state implementation; use a stateless preview for RTSP source validation",
-                "v0.1",
-            ));
-        }
+        LogicalPlan::Aggregate(_) => {}
         LogicalPlan::Sort(_) => {
             return Err(crate::VqlError::new(
                 crate::ErrorCode::InvalidSql,

@@ -22,8 +22,8 @@ use crate::functions::{VqlFunctionFactory, materialize_batch_images};
 use crate::media::{MediaCounters, MediaRuntime};
 use crate::models::{ModelCounters, semantic_fingerprint};
 use crate::planner::{
-    bind_stream_epoch, context_for_function_ddl, context_for_snapshot, normalize_function_ddl,
-    plan_statement, wrap_console_sink,
+    bind_stream_epoch, bind_tumble_output, context_for_function_ddl, context_for_snapshot,
+    normalize_function_ddl, plan_statement, wrap_console_sink,
 };
 use crate::sql::{CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement, parse_statement};
 use crate::types::{image_field, is_image_storage};
@@ -148,6 +148,8 @@ pub struct QueryMetrics {
     source_dropped_frames: AtomicU64,
     watermark_ms: AtomicI64,
     has_watermark: AtomicBool,
+    late_rows: AtomicU64,
+    window_state_bytes: AtomicU64,
 }
 
 impl QueryMetrics {
@@ -208,6 +210,14 @@ impl QueryMetrics {
             .load(Ordering::Relaxed)
             .then(|| self.watermark_ms.load(Ordering::Relaxed))
     }
+
+    pub fn late_rows(&self) -> u64 {
+        self.late_rows.load(Ordering::Relaxed)
+    }
+
+    pub fn window_state_bytes(&self) -> u64 {
+        self.window_state_bytes.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +245,7 @@ struct StreamingQuery {
     definition: StreamDef,
     skip: usize,
     fetch: Option<usize>,
+    tumble: Option<crate::stream::TumblePlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +265,14 @@ impl Drop for ActiveQueryGuard {
         if let Ok(mut active) = self.0.lock() {
             *active = None;
         }
+    }
+}
+
+struct WindowStateMetricGuard(Arc<QueryMetrics>);
+
+impl Drop for WindowStateMetricGuard {
+    fn drop(&mut self) {
+        self.0.window_state_bytes.store(0, Ordering::Relaxed);
     }
 }
 
@@ -368,12 +387,24 @@ impl QueryHandle {
         let stream_name = streaming.name;
         let mut skip_remaining = streaming.skip;
         let mut fetch_remaining = streaming.fetch;
-        let template = self.dataframe.clone();
+        let template = streaming
+            .tumble
+            .as_ref()
+            .map(crate::stream::TumblePlan::input)
+            .unwrap_or_else(|| self.dataframe.clone());
+        let mut tumble_state = streaming
+            .tumble
+            .as_ref()
+            .map(crate::stream::TumblePlan::create_state);
+        let tumble_plan = streaming.tumble;
         let output_schema = Arc::clone(&self.output_schema);
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
         let active_query = Arc::clone(&self.active_query);
         let metrics = Arc::clone(&self.metrics);
+        let window_state_metric_guard = tumble_state
+            .as_ref()
+            .map(|_| WindowStateMetricGuard(Arc::clone(&metrics)));
         let catalog = Arc::clone(&self.catalog);
         let media = Arc::clone(&self.media);
         let fail_on_error = Arc::clone(&self.fail_on_error);
@@ -382,6 +413,7 @@ impl QueryHandle {
         let active_guard = ActiveQueryGuard(active_query);
         let stream = async_stream::try_stream! {
             let _active_guard = active_guard;
+            let _window_state_metric_guard = window_state_metric_guard;
             'epochs: loop {
                 let next = tokio::select! {
                     _ = cancellation.cancelled() => Ok(None),
@@ -418,18 +450,47 @@ impl QueryHandle {
                     epoch.source_progress.dropped_frames,
                     Ordering::Relaxed,
                 );
-                if let Some(watermark_ms) = epoch.watermark_ms {
-                    metrics.watermark_ms.store(watermark_ms, Ordering::Relaxed);
-                    metrics.has_watermark.store(true, Ordering::Relaxed);
-                }
                 let dataframe = bind_stream_epoch(
                     template.clone(),
                     &stream_name,
                     epoch.batches.clone(),
                 )
                 .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
-                let mut output = dataframe.execute_stream().await?;
-                while let Some(batch) = output.next().await {
+                let mut fragment_output = dataframe.execute_stream().await?;
+                let mut output = if let Some(state) = tumble_state.as_mut() {
+                    let mut batches = Vec::new();
+                    while let Some(batch) = fragment_output.next().await {
+                        batches.push(batch?);
+                    }
+                    let window_output = state
+                        .apply_epoch(&batches, epoch.watermark_ms, epoch.epoch_id)
+                        .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+                    metrics.late_rows.fetch_add(window_output.late_rows, Ordering::Relaxed);
+                    metrics.window_state_bytes.store(
+                        window_output.state_bytes as u64,
+                        Ordering::Relaxed,
+                    );
+                    match window_output.closed {
+                        Some(batch) => {
+                            let plan = tumble_plan.as_ref().ok_or_else(|| {
+                                datafusion::error::DataFusionError::Internal(
+                                    "TUMBLE state exists without a streaming plan".to_owned(),
+                                )
+                            })?;
+                            Some(bind_tumble_output(plan, batch)
+                                .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?
+                                .execute_stream()
+                                .await?)
+                        }
+                        None => None,
+                    }
+                } else {
+                    Some(fragment_output)
+                };
+                while let Some(batch) = match output.as_mut() {
+                    Some(output) => output.next().await,
+                    None => None,
+                } {
                     let mut batch = batch?;
                     if skip_remaining >= batch.num_rows() {
                         skip_remaining -= batch.num_rows();
@@ -463,8 +524,16 @@ impl QueryHandle {
                         batch.columns().to_vec(),
                     )?;
                     if fetch_remaining == Some(0) {
+                        if let Some(watermark_ms) = epoch.watermark_ms {
+                            metrics.watermark_ms.store(watermark_ms, Ordering::Relaxed);
+                            metrics.has_watermark.store(true, Ordering::Relaxed);
+                        }
                         break 'epochs;
                     }
+                }
+                if let Some(watermark_ms) = epoch.watermark_ms {
+                    metrics.watermark_ms.store(watermark_ms, Ordering::Relaxed);
+                    metrics.has_watermark.store(true, Ordering::Relaxed);
                 }
                 tracing::debug!(
                     epoch_id = epoch.epoch_id,
@@ -718,6 +787,7 @@ impl Session {
                 definition,
                 skip: planned.stream_skip,
                 fetch: planned.stream_fetch,
+                tumble: planned.tumble.clone(),
             }
         });
         Ok(QueryHandle::new(
@@ -2308,7 +2378,7 @@ mod tests {
 
     #[cfg(feature = "ffmpeg-native")]
     #[test]
-    fn stream_lifecycle_and_stateless_planning_are_available_without_connecting() {
+    fn stream_lifecycle_and_streaming_planning_are_available_without_connecting() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
@@ -2359,7 +2429,62 @@ mod tests {
                 .is_ok()
         );
         let error = session.sql("SELECT COUNT(*) FROM entrance").unwrap_err();
-        assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+        assert!(error.message.contains("require TUMBLE"));
+
+        let windowed = session
+            .sql(
+                "SELECT TUMBLE(ts, INTERVAL '1' SECOND) AS window_start,
+                        source,
+                        COUNT(*) AS frames,
+                        SUM(frame_id) AS frame_sum,
+                        AVG(frame_id) AS frame_avg,
+                        MIN(frame_id) AS first_frame,
+                        MAX(frame_id) AS last_frame
+                 FROM entrance
+                 GROUP BY 1, 2",
+            )
+            .unwrap();
+        assert!(windowed.is_unbounded());
+        let error = session
+            .sql(
+                "SELECT TUMBLE(ts, INTERVAL '1' SECOND), COUNT(DISTINCT frame_id)
+                 FROM entrance
+                 GROUP BY 1",
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+        assert!(error.message.contains("COUNT(DISTINCT"));
+        let error = session
+            .sql(
+                "SELECT TUMBLE(ts, INTERVAL '1' SECOND), COUNT(frame)
+                 FROM entrance
+                 GROUP BY 1",
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+        assert!(error.message.contains("cannot enter window state"));
+        for sql in [
+            "SELECT TUMBLE(ts, INTERVAL '1' SECOND), frame.buffer_id, COUNT(*)
+             FROM entrance
+             GROUP BY 1, 2",
+            "SELECT TUMBLE(ts, INTERVAL '1' SECOND), SUM(frame.buffer_slot)
+             FROM entrance
+             GROUP BY 1",
+        ] {
+            let error = session.sql(sql).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidSql);
+            assert!(error.message.contains("process-local"));
+        }
+        let error = session
+            .sql(
+                "SELECT TUMBLE(ts + INTERVAL '1' SECOND, INTERVAL '1' SECOND), COUNT(*)
+                 FROM entrance
+                 GROUP BY 1",
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+        assert!(error.message.contains("event-time column 'ts'"));
 
         session.sql("DROP STREAM entrance").unwrap();
         assert_eq!(
@@ -2439,6 +2564,92 @@ mod tests {
 
     #[cfg(feature = "ffmpeg-native")]
     #[test]
+    fn local_video_stream_runs_tumble_aggregates() {
+        if !crate::test_util::ffmpeg_available() {
+            return;
+        }
+        let temp = tempdir().unwrap();
+        let video = temp.path().join("window-stream.mp4");
+        assert!(crate::test_util::generate_test_video(&video));
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        engine
+            .inner
+            .catalog
+            .create_stream(&StreamDef {
+                name: "window_stream".to_owned(),
+                endpoint: video.to_string_lossy().into_owned(),
+                fps: 5.0,
+                event_time: crate::catalog::EventTimePolicy::CaptureTime,
+                watermark_delay_ms: 100,
+                transport: crate::catalog::RtspTransport::Tcp,
+            })
+            .unwrap();
+        let session = engine.session().build().unwrap();
+
+        let statement = session
+            .sql(
+                "SELECT TUMBLE(ts, INTERVAL '1' SECOND) AS window_start,
+                        COUNT(*) AS frames,
+                        SUM(frame_id) AS frame_sum,
+                        AVG(frame_id) AS frame_avg,
+                        MIN(frame_id) AS first_frame,
+                        MAX(frame_id) AS last_frame
+                 FROM window_stream
+                 GROUP BY 1
+                 HAVING COUNT(*) > 0
+                 LIMIT 3",
+            )
+            .unwrap();
+        let batches = statement.collect().unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        for batch in &batches {
+            let counts = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let sums = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let averages = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap();
+            let minimums = batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let maximums = batch
+                .column(5)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert!(counts.value(row) > 0);
+                assert!(minimums.value(row) <= maximums.value(row));
+                assert_eq!(
+                    sums.value(row),
+                    counts.value(row) * (minimums.value(row) + maximums.value(row)) / 2
+                );
+                assert_eq!(
+                    averages.value(row),
+                    sums.value(row) as f64 / counts.value(row) as f64
+                );
+            }
+        }
+        let metrics = statement.metrics().unwrap();
+        assert_eq!(metrics.output_rows(), 3);
+        assert_eq!(metrics.late_rows(), 0);
+        assert_eq!(metrics.window_state_bytes(), 0);
+        assert!(metrics.watermark_ms().is_some());
+    }
+
+    #[cfg(feature = "ffmpeg-native")]
+    #[test]
     fn local_video_stream_runs_people_detection_scenario() {
         if !crate::test_util::ffmpeg_available() {
             return;
@@ -2506,5 +2717,49 @@ mod tests {
         assert!(metrics.decode_frames() >= 3);
         assert_eq!(metrics.inference_rows(), 3);
         assert!(metrics.watermark_ms().is_some());
+
+        let windowed = session
+            .sql(
+                "WITH detected AS (
+                   SELECT ts, CARDINALITY(IMAGE_DETECTION(
+                     'detector', frame, classes => ['person'], min_confidence => 0.5
+                   )) AS people
+                   FROM people_stream
+                 )
+                 SELECT TUMBLE(ts, INTERVAL '1' SECOND) AS window_start,
+                        COUNT(*) AS frames,
+                        SUM(people) AS total_people,
+                        AVG(people) AS average_people,
+                        MIN(people) AS minimum_people,
+                        MAX(people) AS maximum_people
+                 FROM detected
+                 GROUP BY 1
+                 LIMIT 2",
+            )
+            .unwrap();
+        let batches = windowed.collect().unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        for batch in &batches {
+            let frames = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let totals = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<arrow::array::UInt64Array>()
+                .unwrap();
+            let averages = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert_eq!(totals.value(row), frames.value(row) as u64);
+                assert_eq!(averages.value(row), 1.0);
+            }
+        }
+        assert!(windowed.metrics().unwrap().inference_rows() > 0);
     }
 }

@@ -10,6 +10,7 @@ mod planner;
 mod python;
 mod session;
 mod sql;
+mod stream;
 #[cfg(test)]
 mod test_util;
 mod types;

@@ -3,13 +3,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use arrow::array::UInt64Array;
+use arrow::array::{Float64Array, Int64Array, UInt64Array};
 use libtest_mimic::{Arguments, Completion, Failed, Trial};
 use tempfile::tempdir;
 use vql_kernel::{Engine, EngineConfig};
 use vql_testing::REQUIRE_ENV;
 
 const RTSP_URL_ENV: &str = "VQL_TEST_RTSP_URL";
+const RTSP_SETUP_SQL: &str = include_str!("fixtures/rtsp/setup.sql");
+const PEOPLE_DETECTION_SQL: &str = include_str!("fixtures/rtsp/detect_people.sql");
+const PEOPLE_PER_WINDOW_SQL: &str = include_str!("fixtures/rtsp/people_per_window.sql");
 
 struct ChildGuard(Child);
 
@@ -58,7 +61,7 @@ fn main() {
     let require_dependencies = std::env::var_os(REQUIRE_ENV).is_some();
 
     let trial = Trial::ignorable_test(
-        "rtsp/real_stream_detects_people_from_local_video",
+        "rtsp/real_stream_detects_people_and_closes_tumble_windows",
         move || {
             if !missing.is_empty() {
                 let message = format!(
@@ -113,34 +116,18 @@ fn run_rtsp_case(endpoint: &str, video: &Path, model: &Path) -> Result<(), Strin
         .session()
         .build()
         .map_err(|error| error.to_string())?;
+    let setup_sql = RTSP_SETUP_SQL
+        .replace("${RTSP_URL}", &escape_sql_literal(endpoint))
+        .replace(
+            "${MODEL_PATH}",
+            &escape_sql_literal(&model.to_string_lossy()),
+        );
     session
-        .sql(&format!(
-            "CREATE STREAM people_stream FROM '{endpoint}' WITH (
-               fps = 1,
-               event_time = 'capture_time',
-               watermark = INTERVAL '2' SECOND,
-               transport = 'tcp'
-             )"
-        ))
-        .map_err(|error| error.to_string())?;
-    session
-        .sql(&format!(
-            "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'file://{}' USING ONNX_RUNTIME",
-            model.display()
-        ))
-        .map_err(|error| error.to_string())?;
-    session
-        .sql("RESOLVE MODEL detector")
-        .map_err(|error| error.to_string())?;
+        .run_script(&setup_sql)
+        .map_err(|error| format!("set up RTSP test objects: {error}"))?;
 
     let statement = session
-        .sql(
-            "SELECT frame_id, CARDINALITY(IMAGE_DETECTION(
-               'detector', frame, classes => ['person'], min_confidence => 0.5
-             )) AS people
-             FROM people_stream
-             LIMIT 8",
-        )
+        .sql(PEOPLE_DETECTION_SQL)
         .map_err(|error| format!("plan RTSP people detection: {error}"))?;
     let (finished, watchdog) = query_watchdog(session.clone());
     let batches = statement
@@ -188,7 +175,82 @@ fn run_rtsp_case(endpoint: &str, video: &Path, model: &Path) -> Result<(), Strin
     if metrics.watermark_ms().is_none() {
         return Err("RTSP query did not publish a watermark".to_owned());
     }
+
+    let windowed = session
+        .sql(PEOPLE_PER_WINDOW_SQL)
+        .map_err(|error| format!("plan RTSP TUMBLE aggregation: {error}"))?;
+    let (finished, watchdog) = query_watchdog(session.clone());
+    let window_batches = windowed
+        .collect()
+        .map_err(|error| format!("run RTSP TUMBLE aggregation: {error}"))?;
+    let _ = finished.send(());
+    watchdog
+        .join()
+        .map_err(|_| "TUMBLE query watchdog panicked".to_owned())?;
+    let mut window_rows = 0_usize;
+    let mut aggregated_frames = 0_u64;
+    for batch in &window_batches {
+        let frames = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("frames is Int64");
+        let totals = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("total_people is UInt64");
+        let averages = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("average_people is Float64");
+        let minimums = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("minimum_people is UInt64");
+        let maximums = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("maximum_people is UInt64");
+        for row in 0..batch.num_rows() {
+            let frames = frames.value(row) as u64;
+            if frames == 0 {
+                return Err("TUMBLE emitted an empty window".to_owned());
+            }
+            let total = totals.value(row);
+            if total < minimums.value(row) * frames || total > maximums.value(row) * frames {
+                return Err("TUMBLE aggregate bounds are inconsistent".to_owned());
+            }
+            if (averages.value(row) - total as f64 / frames as f64).abs() > f64::EPSILON {
+                return Err("TUMBLE AVG does not match SUM / COUNT".to_owned());
+            }
+            aggregated_frames += frames;
+            window_rows += 1;
+        }
+    }
+    if window_rows != 2 {
+        return Err(format!("expected 2 closed windows, found {window_rows}"));
+    }
+    let window_metrics = windowed
+        .metrics()
+        .ok_or_else(|| "RTSP TUMBLE query has no metrics".to_owned())?;
+    if window_metrics.inference_rows() < aggregated_frames {
+        return Err(format!(
+            "expected at least {aggregated_frames} window inference rows, found {}",
+            window_metrics.inference_rows()
+        ));
+    }
+    if window_metrics.watermark_ms().is_none() {
+        return Err("RTSP TUMBLE query did not publish a watermark".to_owned());
+    }
     Ok(())
+}
+
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 fn command_available(name: &str, version_arg: &str) -> bool {

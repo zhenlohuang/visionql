@@ -25,7 +25,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL or the DataFrame API, users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
-> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, and the first RTSP source slice are implemented. Streaming `TUMBLE` and Kafka remain v0.1 roadmap items; `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
+> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, RTSP ingestion, and streaming `TUMBLE` are implemented. Kafka remains a v0.1 roadmap item; `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
 
 ## Why VisionQL
 
@@ -137,9 +137,9 @@ The Runtime registry is intentionally explicit. `ONNX_RUNTIME` and `TRITON_INFER
 
 Set `HF_TOKEN` when resolving a private Hugging Face bundle. Credentials are provided through secret configuration and never persisted in visible Model DDL.
 
-### RTSP source preview
+### RTSP streaming
 
-The first v0.1 streaming slice registers one live camera and runs a stateless attached query until the client cancels it. FFmpeg decodes on a controlled worker, sampling uses event time, watermarks advance outside data rows, and disconnects retry with exponential backoff.
+The v0.1 streaming path registers one live camera and runs an attached query until the client cancels it. FFmpeg decodes on a controlled worker, sampling uses event time, watermarks advance outside data rows, and disconnects retry with exponential backoff.
 
 ```sql
 CREATE STREAM cam_entrance
@@ -153,9 +153,16 @@ WITH (
 
 SELECT ts, frame_id, source, frame
 FROM cam_entrance;
+
+SELECT TUMBLE(ts, INTERVAL '10' SECOND) AS window_start,
+       COUNT(*) AS frames,
+       MIN(frame_id) AS first_frame,
+       MAX(frame_id) AS last_frame
+FROM cam_entrance
+GROUP BY 1;
 ```
 
-The shell and `vql run` print unbounded results incrementally; Ctrl-C cancels the attached query. `Projection`, `Filter`, `UNNEST`, scalar functions, and typed inference are accepted. Streaming aggregation is rejected until the separate `TUMBLE` state work lands. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
+The shell and `vql run` print unbounded results incrementally; Ctrl-C cancels the attached query. `Projection`, `Filter`, `UNNEST`, scalar functions, typed inference, and one `TUMBLE` aggregate are accepted. Streaming windows support `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`; they close only after the watermark reaches the window end. `DISTINCT`, media-valued state, and unsupported unbounded plan shapes are rejected during planning. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
 
 ## Python API
 
