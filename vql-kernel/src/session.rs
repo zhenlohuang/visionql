@@ -22,8 +22,8 @@ use crate::functions::{VqlFunctionFactory, materialize_batch_images};
 use crate::media::{MediaCounters, MediaRuntime};
 use crate::models::{ModelCounters, semantic_fingerprint};
 use crate::planner::{
-    bind_stream_epoch, bind_tumble_output, context_for_function_ddl, context_for_snapshot,
-    normalize_function_ddl, plan_statement, wrap_console_sink,
+    SinkTarget, bind_stream_epoch, bind_tumble_output, context_for_function_ddl,
+    context_for_snapshot, normalize_function_ddl, plan_statement, wrap_sink,
 };
 use crate::sql::{CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement, parse_statement};
 use crate::types::{image_field, is_image_storage};
@@ -237,6 +237,7 @@ pub struct QueryHandle {
     model_start: ModelCounters,
     model_sample_start: usize,
     streaming: Option<StreamingQuery>,
+    sink_target: Option<SinkTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +247,7 @@ struct StreamingQuery {
     skip: usize,
     fetch: Option<usize>,
     tumble: Option<crate::stream::TumblePlan>,
+    sink: Option<SinkTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +278,37 @@ impl Drop for WindowStateMetricGuard {
     }
 }
 
+struct SinkCloseGuard {
+    target: Option<SinkTarget>,
+    runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl SinkCloseGuard {
+    fn new(target: SinkTarget, runtime: Arc<tokio::runtime::Runtime>) -> Self {
+        Self {
+            target: Some(target),
+            runtime,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.target = None;
+    }
+}
+
+impl Drop for SinkCloseGuard {
+    fn drop(&mut self) {
+        let Some(target) = self.target.take() else {
+            return;
+        };
+        self.runtime.handle().spawn(async move {
+            if let Err(error) = target.finish_execution().await {
+                tracing::warn!(error = %error, "failed to close Sink after query stream was dropped");
+            }
+        });
+    }
+}
+
 impl QueryHandle {
     fn new(
         dataframe: DataFrame,
@@ -303,6 +336,7 @@ impl QueryHandle {
             model_start,
             model_sample_start,
             streaming,
+            sink_target: None,
         }
     }
 
@@ -318,9 +352,23 @@ impl QueryHandle {
                 stream,
             )));
         }
-        if self.streaming.is_some() {
-            return self.stream_rtsp();
-        }
+        let input = if self.streaming.is_some() {
+            self.stream_rtsp()?
+        } else {
+            self.stream_bounded()?
+        };
+        let Some(target) = self.sink_target.clone() else {
+            return Ok(input);
+        };
+        Ok(close_sink_stream(
+            input,
+            target,
+            Arc::clone(&self.runtime),
+            Arc::clone(&self.output_schema),
+        ))
+    }
+
+    fn stream_bounded(&self) -> Result<SendableRecordBatchStream> {
         self.set_active()?;
         let active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
         let input = self
@@ -397,6 +445,7 @@ impl QueryHandle {
             .as_ref()
             .map(crate::stream::TumblePlan::create_state);
         let tumble_plan = streaming.tumble;
+        let sink = streaming.sink;
         let output_schema = Arc::clone(&self.output_schema);
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
@@ -491,34 +540,26 @@ impl QueryHandle {
                     Some(output) => output.next().await,
                     None => None,
                 } {
-                    let mut batch = batch?;
-                    if skip_remaining >= batch.num_rows() {
-                        skip_remaining -= batch.num_rows();
-                        continue;
-                    }
-                    if skip_remaining > 0 {
-                        batch = batch.slice(skip_remaining, batch.num_rows() - skip_remaining);
-                        skip_remaining = 0;
-                    }
-                    if let Some(remaining) = fetch_remaining
-                        && batch.num_rows() > remaining
-                    {
-                        batch = batch.slice(0, remaining);
-                    }
-                    if batch.num_rows() == 0 {
-                        continue;
-                    }
-                    let batch = materialize_batch_images(
-                        Arc::clone(&catalog),
-                        Arc::clone(&media),
+                    let batch = batch?;
+                    let Some(batch) = prepare_stream_output(
                         batch,
-                        fail_on_error.load(Ordering::Relaxed),
+                        &mut skip_remaining,
+                        &mut fetch_remaining,
+                        sink.as_ref(),
+                        |batch| {
+                            materialize_batch_images(
+                                Arc::clone(&catalog),
+                                Arc::clone(&media),
+                                batch,
+                                fail_on_error.load(Ordering::Relaxed),
+                            )
+                        },
                     )
-                    .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+                    .await?
+                    else {
+                        continue;
+                    };
                     metrics.output_rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
-                    if let Some(remaining) = fetch_remaining.as_mut() {
-                        *remaining = remaining.saturating_sub(batch.num_rows());
-                    }
                     yield RecordBatch::try_new(
                         Arc::clone(&output_schema),
                         batch.columns().to_vec(),
@@ -701,6 +742,80 @@ impl QueryHandle {
     }
 }
 
+fn close_sink_stream(
+    input: SendableRecordBatchStream,
+    target: SinkTarget,
+    runtime: Arc<tokio::runtime::Runtime>,
+    schema: SchemaRef,
+) -> SendableRecordBatchStream {
+    let stream_schema = Arc::clone(&schema);
+    let stream = async_stream::stream! {
+        target.begin_execution().await;
+        let mut guard = SinkCloseGuard::new(target.clone(), runtime);
+        let mut input = input;
+        let mut terminal_error = None;
+        while let Some(batch) = input.next().await {
+            match batch {
+                Ok(batch) => yield Ok(batch),
+                Err(error) => {
+                    terminal_error = Some(error);
+                    break;
+                }
+            }
+        }
+        let close_result = target.finish_execution().await;
+        guard.disarm();
+        if let Some(error) = terminal_error {
+            if let Err(close_error) = close_result {
+                tracing::warn!(error = %close_error, "failed to close Sink after query error");
+            }
+            yield Err(error);
+        } else if let Err(error) = close_result {
+            yield Err(datafusion::error::DataFusionError::External(Box::new(error)));
+        }
+    };
+    Box::pin(RecordBatchStreamAdapter::new(stream_schema, stream))
+}
+
+async fn prepare_stream_output<F>(
+    mut batch: RecordBatch,
+    skip_remaining: &mut usize,
+    fetch_remaining: &mut Option<usize>,
+    sink: Option<&SinkTarget>,
+    materialize: F,
+) -> datafusion::error::Result<Option<RecordBatch>>
+where
+    F: FnOnce(RecordBatch) -> Result<RecordBatch>,
+{
+    if *skip_remaining >= batch.num_rows() {
+        *skip_remaining -= batch.num_rows();
+        return Ok(None);
+    }
+    if *skip_remaining > 0 {
+        batch = batch.slice(*skip_remaining, batch.num_rows() - *skip_remaining);
+        *skip_remaining = 0;
+    }
+    if let Some(remaining) = *fetch_remaining
+        && batch.num_rows() > remaining
+    {
+        batch = batch.slice(0, remaining);
+    }
+    if batch.num_rows() == 0 {
+        return Ok(None);
+    }
+    let batch = materialize(batch)
+        .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+    if let Some(sink) = sink {
+        sink.write(&batch)
+            .await
+            .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+    }
+    if let Some(remaining) = fetch_remaining.as_mut() {
+        *remaining = remaining.saturating_sub(batch.num_rows());
+    }
+    Ok(Some(batch))
+}
+
 impl Session {
     pub fn sql(&self, sql: &str) -> Result<Statement> {
         match parse_statement(sql)? {
@@ -709,8 +824,8 @@ impl Session {
             VqlStatement::CreateModel(create) => self.create_model(create).map(Statement::Ddl),
             VqlStatement::ResolveModel { name } => self.resolve_model(&name).map(Statement::Ddl),
             VqlStatement::CreateFunction { sql } => self.create_function(&sql).map(Statement::Ddl),
-            VqlStatement::CreateSink { name, kind } => {
-                self.create_sink(&name, kind).map(Statement::Ddl)
+            VqlStatement::CreateSink { name, kind, kafka } => {
+                self.create_sink(&name, kind, kafka).map(Statement::Ddl)
             }
             VqlStatement::Drop { kind, name } => self.drop_object(kind, &name).map(Statement::Ddl),
             VqlStatement::Show(kind) => self.show_objects(kind).map(Statement::Ddl),
@@ -788,6 +903,7 @@ impl Session {
                 skip: planned.stream_skip,
                 fetch: planned.stream_fetch,
                 tumble: planned.tumble.clone(),
+                sink: None,
             }
         });
         Ok(QueryHandle::new(
@@ -972,10 +1088,16 @@ impl Session {
         )))
     }
 
-    fn create_sink(&self, name: &str, kind: crate::catalog::SinkKind) -> Result<DdlResult> {
+    fn create_sink(
+        &self,
+        name: &str,
+        kind: crate::catalog::SinkKind,
+        kafka: Option<crate::catalog::KafkaSinkConfig>,
+    ) -> Result<DdlResult> {
         let sink = SinkDef {
             name: name.to_ascii_lowercase(),
             kind,
+            kafka,
         };
         let revision = self.engine.inner.catalog.create_sink(&sink)?;
         Ok(message_result(format!(
@@ -1025,13 +1147,20 @@ impl Session {
                 format!("sink '{sink_name}' does not exist"),
             )
         })?;
-        match sink.definition.kind {
-            crate::catalog::SinkKind::Console => {
-                let mut handle = self.query(query)?;
-                handle.dataframe = wrap_console_sink(handle.dataframe, sink_name.to_owned());
-                Ok(handle)
-            }
+        let mut handle = self.query(query)?;
+        let target = SinkTarget::try_new(
+            sink.definition.clone(),
+            &handle.output_schema,
+            handle.cancellation.clone(),
+            self.engine.inner.config.secret_provider().cloned(),
+        )?;
+        if let Some(streaming) = handle.streaming.as_mut() {
+            streaming.sink = Some(target.clone());
+        } else {
+            handle.dataframe = wrap_sink(handle.dataframe, target.clone());
         }
+        handle.sink_target = Some(target);
+        Ok(handle)
     }
 
     fn drop_object(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
@@ -1473,7 +1602,7 @@ fn percentile(values: &[u64], percentile: f64) -> u64 {
 mod tests {
     use super::*;
     use crate::EngineConfig;
-    use arrow::array::{Array, Float64Array};
+    use arrow::array::{Array, Float64Array, Int64Array};
     use image::{Rgb, RgbImage};
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
@@ -2193,6 +2322,188 @@ mod tests {
                 .contains("SinkExec")
         );
         insert.collect().unwrap();
+    }
+
+    #[test]
+    fn streaming_kafka_sink_runs_after_the_epoch_plan() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(
+                "CREATE STREAM camera FROM 'rtsp://127.0.0.1/live' \
+                 WITH (event_time='ingest_time', watermark=INTERVAL '0' SECOND);\
+                 CREATE SINK events TYPE KAFKA WITH (\
+                 bootstrap_servers='127.0.0.1:9092', topic='events');",
+            )
+            .unwrap();
+
+        let Statement::Query(insert) = session
+            .sql(
+                "INSERT INTO events \
+                 SELECT TUMBLE(ts, INTERVAL '1' SECOND) AS window_start, COUNT(*) AS frames \
+                 FROM camera GROUP BY TUMBLE(ts, INTERVAL '1' SECOND)",
+            )
+            .unwrap()
+        else {
+            panic!("INSERT INTO Kafka Sink must produce a foreground query");
+        };
+
+        let streaming = insert.streaming.as_ref().expect("streaming query");
+        assert!(streaming.tumble.is_some());
+        assert!(streaming.sink.is_some());
+        assert!(insert.sink_target.is_some());
+        assert!(
+            !insert
+                .dataframe
+                .logical_plan()
+                .display_indent()
+                .to_string()
+                .contains("SinkWrite")
+        );
+    }
+
+    #[test]
+    fn streaming_limit_and_offset_are_applied_before_sink_write() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![10, 20, 30]))])
+                .unwrap();
+        let (sink, written_rows) = SinkTarget::recording();
+        let mut skip = 1;
+        let mut fetch = Some(1);
+
+        let output = engine
+            .inner
+            .runtime
+            .block_on(prepare_stream_output(
+                batch,
+                &mut skip,
+                &mut fetch,
+                Some(&sink),
+                Ok,
+            ))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.num_rows(), 1);
+        assert_eq!(
+            output
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            20
+        );
+        assert_eq!(written_rows.load(Ordering::Relaxed), 1);
+        assert_eq!(skip, 0);
+        assert_eq!(fetch, Some(0));
+    }
+
+    #[test]
+    fn kafka_sink_reopens_from_catalog_without_connecting() {
+        let temp = tempdir().unwrap();
+        let catalog = temp.path().join("catalog.db");
+        {
+            let engine = Engine::new(EngineConfig::new(&catalog)).unwrap();
+            let session = engine.session().build().unwrap();
+            session
+                .sql(
+                    "CREATE SINK events TYPE KAFKA WITH (\
+                     bootstrap_servers='broker-1:9092,broker-2:9092', \
+                     topic='events', delivery_timeout_ms=45000, buffer_capacity=256)",
+                )
+                .unwrap();
+        }
+
+        let engine = Engine::new(EngineConfig::new(catalog)).unwrap();
+        let session = engine.session().build().unwrap();
+        let Statement::Query(insert) = session
+            .sql("INSERT INTO events SELECT 1 AS event_id")
+            .unwrap()
+        else {
+            panic!("reopened Kafka Sink must produce a query");
+        };
+
+        assert!(
+            insert
+                .dataframe
+                .logical_plan()
+                .display_indent()
+                .to_string()
+                .contains("SinkWrite: name=events, type=kafka")
+        );
+    }
+
+    #[test]
+    fn kafka_credential_reference_requires_a_host_provider() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(
+                "CREATE SINK events TYPE KAFKA WITH (\
+                 bootstrap_servers='127.0.0.1:9092', topic='events', \
+                 credential_ref='secret://kafka/producer')",
+            )
+            .unwrap();
+        let insert = session
+            .sql("INSERT INTO events SELECT 1 AS event_id")
+            .unwrap();
+
+        let error = insert.collect().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Execution);
+        assert!(error.message.contains("requires a SecretProvider"));
+    }
+
+    #[test]
+    fn kafka_credential_reference_is_resolved_by_the_host() {
+        #[derive(Default)]
+        struct RecordingProvider(Mutex<Vec<String>>);
+
+        impl crate::SecretProvider for RecordingProvider {
+            fn resolve_kafka_authentication(
+                &self,
+                reference: &str,
+            ) -> Result<crate::KafkaAuthentication> {
+                self.0.lock().unwrap().push(reference.to_owned());
+                Err(VqlError::new(ErrorCode::NotFound, "test secret is absent"))
+            }
+        }
+
+        let temp = tempdir().unwrap();
+        let provider = Arc::new(RecordingProvider::default());
+        let config = EngineConfig::new(temp.path().join("catalog.db"))
+            .with_secret_provider(provider.clone());
+        let engine = Engine::new(config).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(
+                "CREATE SINK events TYPE KAFKA WITH (\
+                 bootstrap_servers='127.0.0.1:9092', topic='events', \
+                 credential_ref='secret://kafka/producer')",
+            )
+            .unwrap();
+        let insert = session
+            .sql("INSERT INTO events SELECT 1 AS event_id")
+            .unwrap();
+
+        let error = insert.collect().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Execution);
+        assert!(error.message.contains("failed to resolve credential_ref"));
+        assert_eq!(
+            provider.0.lock().unwrap().as_slice(),
+            ["secret://kafka/producer"]
+        );
     }
 
     #[test]

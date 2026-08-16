@@ -176,16 +176,29 @@ pub(crate) struct FunctionDef {
     pub(crate) semantic_fingerprint: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SinkKind {
     Console,
+    Kafka,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct KafkaSinkConfig {
+    pub(crate) bootstrap_servers: String,
+    pub(crate) topic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) credential_ref: Option<String>,
+    pub(crate) delivery_timeout_ms: u64,
+    pub(crate) buffer_capacity: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct SinkDef {
     pub(crate) name: String,
     pub(crate) kind: SinkKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kafka: Option<KafkaSinkConfig>,
 }
 
 pub(crate) fn encode_schema(schema: &SchemaRef) -> Result<Vec<u8>> {

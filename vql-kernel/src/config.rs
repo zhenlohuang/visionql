@@ -1,13 +1,15 @@
-use crate::{ErrorCode, Result, VqlError};
+use crate::{ErrorCode, Result, SecretProviderRef, VqlError};
 use std::ffi::OsString;
+use std::fmt::{Debug, Formatter};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EngineConfig {
     vql_home: PathBuf,
     catalog_path: PathBuf,
     model_cache_dir: PathBuf,
     history_path: PathBuf,
+    secret_provider: Option<SecretProviderRef>,
 }
 
 impl EngineConfig {
@@ -36,6 +38,7 @@ impl EngineConfig {
             catalog_path: vql_home.join("catalog/vql.db"),
             model_cache_dir: vql_home.join("cache/models"),
             history_path: vql_home.join("history"),
+            secret_provider: None,
             vql_home,
         }
     }
@@ -71,6 +74,16 @@ impl EngineConfig {
         self
     }
 
+    /// Install the host-owned resolver used by credential references.
+    pub fn with_secret_provider(mut self, provider: SecretProviderRef) -> Self {
+        self.secret_provider = Some(provider);
+        self
+    }
+
+    pub fn secret_provider(&self) -> Option<&SecretProviderRef> {
+        self.secret_provider.as_ref()
+    }
+
     pub(crate) fn prepare(&self) -> Result<()> {
         let parent = self.catalog_path.parent().ok_or_else(|| {
             VqlError::new(
@@ -88,6 +101,22 @@ impl EngineConfig {
             std::fs::create_dir_all(parent)?;
         }
         Ok(())
+    }
+}
+
+impl Debug for EngineConfig {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EngineConfig")
+            .field("vql_home", &self.vql_home)
+            .field("catalog_path", &self.catalog_path)
+            .field("model_cache_dir", &self.model_cache_dir)
+            .field("history_path", &self.history_path)
+            .field(
+                "secret_provider",
+                &self.secret_provider.as_ref().map(|_| "[SecretProvider]"),
+            )
+            .finish()
     }
 }
 

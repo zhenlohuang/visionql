@@ -650,9 +650,44 @@ Event time and reconnect behavior:
 
 ### 8.5 Kafka Sink
 
-- Encode JSON scalars through stable rules and preserve query output column names. Regression tests fix the wire format.
-- Emit only sanitized URI, locator, and metadata for `IMAGE`; inline pixel payloads are outside the v0.1 Kafka contract.
-- The job coordinator owns retry. A bounded buffer propagates backpressure upstream.
+Declare the destination independently from the query:
+
+```sql
+CREATE SINK people_per_minute TYPE KAFKA
+WITH (
+  bootstrap_servers='127.0.0.1:9092',
+  topic='people-per-minute',
+  format='json',
+  credential_ref='secret://kafka/producer',
+  delivery_timeout_ms=30000,
+  buffer_capacity=1024
+);
+
+INSERT INTO people_per_minute
+SELECT window_start, COUNT(*) AS people
+FROM detections
+GROUP BY TUMBLE(ts, INTERVAL '1' MINUTE);
+```
+
+| Option | Contract |
+|---|---|
+| `bootstrap_servers` | Required comma-separated `host:port` endpoints (bracket IPv6 literals). URI schemes and credentials are rejected. |
+| `topic` | Required existing Kafka topic; 1–249 ASCII letters, digits, `.`, `_`, or `-`, excluding `.` and `..`. VisionQL never creates or alters it. |
+| `format` | Optional, defaults to `json`; v0.1 rejects every other format. |
+| `credential_ref` | Optional opaque reference resolved by the host-supplied `SecretProvider` on the first write. The Catalog never stores the resolved authentication material. SASL/TLS details are supplied by the provider, not as DDL options. |
+| `delivery_timeout_ms` | Optional broker connection/request/delivery deadline; defaults to 30,000 and accepts 1–3,600,000. |
+| `buffer_capacity` | Optional global maximum number of in-flight row deliveries for one Sink query execution, across every DataFusion partition; defaults to 1,024 and accepts 1–100,000. Reaching it stops pulling upstream until a delivery completes. |
+
+`CREATE SINK` only validates and stores metadata; it performs no network I/O. Planning the first `INSERT INTO` validates the query output schema. Execution resolves `credential_ref` through `EngineConfig::with_secret_provider`, connects lazily, emits one Kafka record per output row with no key, uses `acks=all`, and waits for every record in a batch to be acknowledged before that batch completes. A referenced Sink fails before connecting when the host did not install a provider or resolution fails. The producer is closed with the configured timeout when the foreground query finishes, fails, is cancelled, or its result stream is dropped. The v0.1 attached coordinator disables producer retries and fails the query on delivery failure or timeout. A batch can therefore be partially visible after an error or cancellation, and replay can duplicate rows; transactions and exactly-once delivery are outside this contract.
+
+The JSON value contract is:
+
+- Preserve query output names and order as JSON object fields; duplicate names are rejected during planning and nulls are explicit.
+- Encode booleans and finite numbers as JSON scalars; encode non-finite floats as `null`. Encode temporal values as ISO-8601 strings at their Arrow precision. Lists, maps, and ordinary structs retain their JSON shape.
+- Project a top-level `IMAGE` to `uri`, `locator`, `pts_ms`, `frame_id`, `encoding`, `width`, and `height`. Strip URI user information, query, and fragment. Never emit `encoded`, `buffer_id`, or `buffer_slot`.
+- Reject raw binary output and nested `IMAGE` values during planning; callers must make any intended binary representation explicit as text.
+
+These rules are fixed by exact wire-format tests. The globally bounded in-flight set propagates Kafka backpressure upstream, while cancellation interrupts connection and delivery waits. For an RTSP query, `OFFSET` and `LIMIT` are applied before the acknowledged Sink write, including closed `TUMBLE` output, so rows outside the visible query result are never published.
 
 ---
 

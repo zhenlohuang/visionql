@@ -11,7 +11,7 @@ license = "Apache-2.0"
 repository = "https://github.com/visionql/visionql"
 
 [workspace.dependencies]
-arrow = { version = "=58.3.0", features = ["prettyprint"] }
+arrow = { version = "=58.3.0", features = ["json", "prettyprint"] }
 arrow-pyarrow = "=58.3.0"
 arrow-schema = { version = "=58.4.0", features = ["canonical_extension_types"] }
 async-stream = "0.3.6"
@@ -33,6 +33,7 @@ percent-encoding = "2.3.2"
 pyo3 = "0.28.0"
 reedline = "0.49.0"
 reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+krafka = { version = "=0.13.0", default-features = false, features = ["ring"] }
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

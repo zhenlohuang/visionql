@@ -8,6 +8,7 @@ mod media;
 mod models;
 mod planner;
 mod python;
+mod secrets;
 mod session;
 mod sql;
 mod stream;
@@ -19,6 +20,7 @@ pub use config::EngineConfig;
 pub use engine::Engine;
 pub use error::{ErrorCode, Result, VqlError};
 pub use python::{PyUdfHandle, PythonUdfHost, PythonUdfHostRef};
+pub use secrets::{KafkaAuthentication, SecretProvider, SecretProviderRef};
 pub use session::{DdlResult, QueryHandle, QueryMetrics, Session, SessionBuilder, Statement};
 pub use sql::{ends_with_statement_terminator, split_statements};
 pub use types::{

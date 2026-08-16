@@ -26,6 +26,7 @@ ort.workspace = true
 percent-encoding.workspace = true
 rusqlite.workspace = true
 reqwest.workspace = true
+krafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

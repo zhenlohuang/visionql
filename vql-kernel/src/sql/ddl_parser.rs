@@ -4,7 +4,9 @@ use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 use std::collections::BTreeMap;
 
 use super::ast::{CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement};
-use crate::catalog::{EventTimePolicy, ModelType, RtspTransport, SinkKind, TableProviderKind};
+use crate::catalog::{
+    EventTimePolicy, KafkaSinkConfig, ModelType, RtspTransport, SinkKind, TableProviderKind,
+};
 use crate::{ErrorCode, Result, VqlError};
 
 pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
@@ -484,20 +486,226 @@ fn parse_json_value(tokens: &[Token], index: &mut usize) -> Result<serde_json::V
 }
 
 fn parse_create_sink(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() != 5 {
-        return invalid("expected CREATE SINK <name> TYPE console");
+    if tokens.len() < 5 {
+        return invalid("expected CREATE SINK <name> TYPE console|kafka");
     }
     let name = identifier(tokens.get(2), "sink name")?;
     expect_word(tokens.get(3), "TYPE")?;
-    let kind = match word(tokens.get(4)).as_deref() {
-        Some("CONSOLE") => SinkKind::Console,
-        Some("KAFKA") => return Err(VqlError::feature("Kafka Sink is not available", "v0.1")),
+    match word(tokens.get(4)).as_deref() {
+        Some("CONSOLE") if tokens.len() == 5 => Ok(VqlStatement::CreateSink {
+            name,
+            kind: SinkKind::Console,
+            kafka: None,
+        }),
+        Some("CONSOLE") => invalid("Console Sink does not accept WITH options"),
+        Some("KAFKA") => parse_kafka_sink(tokens, name),
         Some("PARQUET") | Some("LANCE") => {
-            return Err(VqlError::feature("file Sinks are not available", "v0.3"));
+            Err(VqlError::feature("file Sinks are not available", "v0.3"))
         }
-        _ => return invalid("v0.1 supports TYPE console"),
+        _ => invalid("v0.1 supports TYPE console or kafka"),
+    }
+}
+
+fn parse_kafka_sink(tokens: &[Token], name: String) -> Result<VqlStatement> {
+    let mut bootstrap_servers = None;
+    let mut topic = None;
+    let mut credential_ref = None;
+    let mut delivery_timeout_ms = 30_000_u64;
+    let mut buffer_capacity = 1_024_usize;
+    let mut format = "json".to_owned();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut index = 5;
+    expect_word(tokens.get(index), "WITH")?;
+    index += 1;
+    expect_token(tokens.get(index), Token::LParen, "'(' after WITH")?;
+    index += 1;
+    while tokens.get(index) != Some(&Token::RParen) {
+        let option = identifier(tokens.get(index), "Kafka Sink option")?.to_ascii_lowercase();
+        if !seen.insert(option.clone()) {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                format!("duplicate Kafka Sink option '{option}'"),
+            ));
+        }
+        index += 1;
+        expect_token(tokens.get(index), Token::Eq, "'=' after Kafka Sink option")?;
+        index += 1;
+        match option.as_str() {
+            "bootstrap_servers" => {
+                bootstrap_servers = Some(string_literal(tokens.get(index))?);
+                index += 1;
+            }
+            "topic" => {
+                topic = Some(string_literal(tokens.get(index))?);
+                index += 1;
+            }
+            "credential_ref" => {
+                credential_ref = Some(string_literal(tokens.get(index))?);
+                index += 1;
+            }
+            "format" => {
+                format = string_literal(tokens.get(index))?.to_ascii_lowercase();
+                index += 1;
+            }
+            "delivery_timeout_ms" => {
+                delivery_timeout_ms =
+                    parse_unsigned_integer(tokens.get(index), "delivery_timeout_ms")?;
+                index += 1;
+            }
+            "buffer_capacity" => {
+                let value = parse_unsigned_integer(tokens.get(index), "buffer_capacity")?;
+                buffer_capacity = usize::try_from(value).map_err(|error| {
+                    VqlError::new(
+                        ErrorCode::InvalidOption,
+                        "buffer_capacity is too large for this platform",
+                    )
+                    .with_source(error)
+                })?;
+                index += 1;
+            }
+            _ => {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    format!("unknown Kafka Sink option '{option}'"),
+                ));
+            }
+        }
+        match tokens.get(index) {
+            Some(Token::Comma) => index += 1,
+            Some(Token::RParen) => {}
+            _ => return invalid("expected ',' or ')' after Kafka Sink option"),
+        }
+    }
+    index += 1;
+    if index != tokens.len() {
+        return invalid("unexpected tokens after CREATE SINK");
+    }
+
+    let bootstrap_servers = bootstrap_servers.ok_or_else(|| {
+        VqlError::new(
+            ErrorCode::InvalidOption,
+            "Kafka Sink requires bootstrap_servers",
+        )
+    })?;
+    validate_kafka_bootstrap_servers(&bootstrap_servers)?;
+    let topic = topic
+        .ok_or_else(|| VqlError::new(ErrorCode::InvalidOption, "Kafka Sink requires topic"))?;
+    validate_kafka_topic(&topic)?;
+    if let Some(reference) = credential_ref.as_deref()
+        && (reference.is_empty()
+            || reference.trim() != reference
+            || reference.len() > 1_024
+            || reference.chars().any(char::is_control))
+    {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "credential_ref must be a non-empty opaque reference of at most 1024 characters",
+        ));
+    }
+    if format != "json" {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "v0.1 Kafka Sink format must be 'json'",
+        ));
+    }
+    if !(1..=3_600_000).contains(&delivery_timeout_ms) {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "delivery_timeout_ms must be between 1 and 3600000",
+        ));
+    }
+    if !(1..=100_000).contains(&buffer_capacity) {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "buffer_capacity must be between 1 and 100000",
+        ));
+    }
+
+    Ok(VqlStatement::CreateSink {
+        name,
+        kind: SinkKind::Kafka,
+        kafka: Some(KafkaSinkConfig {
+            bootstrap_servers,
+            topic,
+            credential_ref,
+            delivery_timeout_ms,
+            buffer_capacity,
+        }),
+    })
+}
+
+fn parse_unsigned_integer(token: Option<&Token>, label: &str) -> Result<u64> {
+    match token {
+        Some(Token::Number(value, false)) if value.bytes().all(|byte| byte.is_ascii_digit()) => {
+            value.parse::<u64>().map_err(|error| {
+                VqlError::new(
+                    ErrorCode::InvalidOption,
+                    format!("{label} must be a non-negative integer"),
+                )
+                .with_source(error)
+            })
+        }
+        _ => Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            format!("{label} must be a non-negative integer"),
+        )),
+    }
+}
+
+fn validate_kafka_bootstrap_servers(value: &str) -> Result<()> {
+    let invalid = || {
+        VqlError::new(
+            ErrorCode::InvalidOption,
+            "bootstrap_servers must be a comma-separated list of host:port endpoints without URI schemes or credentials",
+        )
     };
-    Ok(VqlStatement::CreateSink { name, kind })
+    let endpoints = value.split(',').collect::<Vec<_>>();
+    if endpoints.is_empty() {
+        return Err(invalid());
+    }
+    for endpoint in endpoints {
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty()
+            || endpoint.chars().any(|character| {
+                character.is_whitespace() || matches!(character, '@' | '/' | '?' | '#')
+            })
+        {
+            return Err(invalid());
+        }
+        let (host, port) = if let Some(bracketed) = endpoint.strip_prefix('[') {
+            let (host, port) = bracketed.split_once("]:").ok_or_else(&invalid)?;
+            if host.is_empty() || host.contains('[') || host.contains(']') {
+                return Err(invalid());
+            }
+            (host, port)
+        } else {
+            let (host, port) = endpoint.rsplit_once(':').ok_or_else(&invalid)?;
+            if host.is_empty() || host.contains(':') || host.contains('[') || host.contains(']') {
+                return Err(invalid());
+            }
+            (host, port)
+        };
+        if host.is_empty() || port.parse::<u16>().ok().filter(|port| *port > 0).is_none() {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn validate_kafka_topic(topic: &str) -> Result<()> {
+    if topic.is_empty()
+        || topic.len() > 249
+        || matches!(topic, "." | "..")
+        || !topic
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "topic must be 1-249 ASCII letters, digits, '.', '_', or '-' and cannot be '.' or '..'",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
@@ -682,6 +890,61 @@ mod tests {
                 transport: RtspTransport::Tcp,
             })
         );
+    }
+
+    #[test]
+    fn parses_kafka_sink_options() {
+        let parsed = parse_statement(
+            "CREATE SINK people_per_minute TYPE KAFKA WITH (\
+             bootstrap_servers='broker-1:9092,broker-2:9092', \
+             topic='people-per-minute', format='json', \
+             credential_ref='secret://kafka/producer', \
+             delivery_timeout_ms=45000, buffer_capacity=256)",
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed,
+            VqlStatement::CreateSink {
+                name: "people_per_minute".to_owned(),
+                kind: SinkKind::Kafka,
+                kafka: Some(KafkaSinkConfig {
+                    bootstrap_servers: "broker-1:9092,broker-2:9092".to_owned(),
+                    topic: "people-per-minute".to_owned(),
+                    credential_ref: Some("secret://kafka/producer".to_owned()),
+                    delivery_timeout_ms: 45_000,
+                    buffer_capacity: 256,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_kafka_sink_options() {
+        for sql in [
+            "CREATE SINK out TYPE KAFKA WITH (topic='events')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='http://broker:9092', topic='events')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='user:secret@broker:9092', topic='events')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker', topic='events')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:0', topic='events')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:70000', topic='events')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092,', topic='events')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='bad topic')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', format='avro')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', delivery_timeout_ms=0)",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', buffer_capacity=100001)",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', topic='other')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', retries=3)",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', credential_ref='')",
+            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', username='user')",
+        ] {
+            assert_eq!(
+                parse_statement(sql).unwrap_err().code,
+                ErrorCode::InvalidOption,
+                "{sql}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::catalog::{EventTimePolicy, ModelType, RtspTransport, SinkKind, TableProviderKind};
+use crate::catalog::{
+    EventTimePolicy, KafkaSinkConfig, ModelType, RtspTransport, SinkKind, TableProviderKind,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateTable {
@@ -45,13 +47,32 @@ pub(crate) enum VqlStatement {
     CreateTable(CreateTable),
     CreateStream(CreateStream),
     CreateModel(CreateModel),
-    ResolveModel { name: String },
-    CreateFunction { sql: String },
-    CreateSink { name: String, kind: SinkKind },
-    Drop { kind: ShowKind, name: String },
+    ResolveModel {
+        name: String,
+    },
+    CreateFunction {
+        sql: String,
+    },
+    CreateSink {
+        name: String,
+        kind: SinkKind,
+        kafka: Option<KafkaSinkConfig>,
+    },
+    Drop {
+        kind: ShowKind,
+        name: String,
+    },
     Show(ShowKind),
-    Describe { name: String },
-    Query { sql: String },
-    Explain { sql: String },
-    Set { sql: String },
+    Describe {
+        name: String,
+    },
+    Query {
+        sql: String,
+    },
+    Explain {
+        sql: String,
+    },
+    Set {
+        sql: String,
+    },
 }

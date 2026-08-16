@@ -8,9 +8,11 @@ publish = false
 
 [dependencies]
 arrow.workspace = true
+krafka.workspace = true
 sqllogictest.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 vql-kernel = { path = "../vql-kernel" }
 
 [dev-dependencies]
@@ -24,4 +26,9 @@ harness = false
 [[test]]
 name = "rtsp"
 path = "tests/rtsp.rs"
+harness = false
+
+[[test]]
+name = "kafka"
+path = "tests/kafka.rs"
 harness = false

@@ -79,13 +79,13 @@ Keep one behavior per `.slt` file. Put prerequisite statements before the assert
 Explicit teardown is unnecessary because every file owns an isolated temporary catalog; lifecycle
 behavior such as `DROP` belongs in its own case or a kernel owner test.
 
-## Docker Compose and RTSP
+## Docker Compose, RTSP, and Kafka
 
 The root `docker-compose.yaml` is shared by development and tests. Profiles keep optional services
 off by default:
 
 - `rtsp` starts the pinned MediaMTX service.
-- Add `kafka` when Kafka Sink integration tests exist.
+- `kafka` starts the pinned single-node Apache Kafka service.
 - Add `server` when `vql-server` exists and needs a process boundary test.
 
 Start the current development dependency with:
@@ -94,6 +94,19 @@ Start the current development dependency with:
 docker compose --profile rtsp up -d mediamtx
 docker compose --profile rtsp down
 ```
+
+Run the Kafka Sink system test against that profile with:
+
+```bash
+docker compose --profile kafka up -d kafka
+VQL_INTEGRATION_TEST=1 \
+VQL_TEST_KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092 \
+  cargo test -p vql-testing --test kafka --locked -- --nocapture
+docker compose --profile kafka down
+```
+
+The test creates an isolated topic, publishes a bounded SQL result, waits for producer
+acknowledgements, then consumes and compares the exact JSON messages.
 
 Compose owns long-running external services. The RTSP case owns its FFmpeg publisher so each test
 controls its input lifecycle. To run that case against an already-running MediaMTX:
@@ -110,6 +123,6 @@ Or provision an isolated Compose project and run all strict integration tests:
 scripts/run-integration-tests.sh
 ```
 
-The wrapper chooses a free host port when `VQL_RTSP_PORT` is unset, uses a unique Compose project
-name, waits for the RTSP socket, and always tears the project down. Override
-`VQL_COMPOSE_PROJECT` or `VQL_RTSP_PORT` when needed.
+The wrapper chooses free host ports when `VQL_RTSP_PORT` or `VQL_KAFKA_PORT` is unset, uses a
+unique Compose project name, waits for both dependencies, and always tears the project down.
+Override `VQL_COMPOSE_PROJECT`, `VQL_RTSP_PORT`, or `VQL_KAFKA_PORT` when needed.
