@@ -1,111 +1,150 @@
 use std::collections::BTreeMap;
+use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::pipeline::{
-    BatchingOwner, RuntimeRequestBatch, RuntimeResponseBatch, RuntimeSession, TensorBatch,
-    TensorContract, kserve_datatype,
+use super::backend::ModelBackend;
+use super::postprocess::canonical_detection_output;
+use super::registry::{
+    RuntimeFactory, RuntimeResolution, deserialize_model_options, invalid_option,
 };
-use super::registry::{RuntimeFactory, deserialize_runtime_options, invalid_option};
-use crate::catalog::{ModelDef, ModelType, RuntimeSpec};
+use crate::catalog::{ModelDef, ModelType, ResolvedExecutionSpec, ResolvedModelDef, RuntimeSpec};
 use crate::{ErrorCode, Result, VqlError};
 
 const SUPPORTED_TYPES: &[ModelType] = &[ModelType::ObjectDetection];
+const CONTRACT_INPUT: &str = "image";
+const CONTRACT_OUTPUT: &str = "detections";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TritonOptions {
-    model_name: String,
-    #[serde(default)]
-    model_version: Option<String>,
+    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 impl TritonOptions {
-    fn parse(spec: &RuntimeSpec) -> Result<Self> {
-        let model_name = spec.options.get("model_name").ok_or_else(|| {
-            VqlError::new(
-                ErrorCode::InvalidOption,
-                "invalid Model option 'runtime.model_name': is required for triton",
-            )
-        })?;
-        if model_name.as_str().is_none_or(|value| value.is_empty()) {
-            return invalid_option("runtime.model_name", "must be a non-empty string");
-        }
-        if let Some(version) = spec.options.get("model_version")
-            && version.as_str().is_none_or(|value| value.is_empty())
-        {
-            return invalid_option("runtime.model_version", "must be a non-empty string");
-        }
-        let options: Self = deserialize_runtime_options(&spec.options)?;
-        validate_path_segment("runtime.model_name", &options.model_name)?;
-        if let Some(version) = &options.model_version {
-            validate_path_segment("runtime.model_version", version)?;
+    fn parse(options: &BTreeMap<String, serde_json::Value>) -> Result<Self> {
+        let options: Self = deserialize_model_options("TRITON_INFERENCE_SERVER", options)?;
+        validate_path_segment("WITH.model", &options.model)?;
+        if let Some(version) = &options.version {
+            validate_path_segment("WITH.version", version)?;
         }
         Ok(options)
+    }
+
+    fn runtime_spec(&self) -> RuntimeSpec {
+        let mut options = BTreeMap::from([("model".to_owned(), serde_json::json!(self.model))]);
+        if let Some(version) = &self.version {
+            options.insert("version".to_owned(), serde_json::json!(version));
+        }
+        RuntimeSpec {
+            kind: "triton-inference-server".to_owned(),
+            protocol: Some("kserve_v2_http".to_owned()),
+            options,
+        }
     }
 }
 
 #[derive(Debug)]
 pub(super) struct TritonRuntimeFactory;
 
+#[async_trait]
 impl RuntimeFactory for TritonRuntimeFactory {
     fn kind(&self) -> &str {
-        "triton"
+        "triton-inference-server"
     }
 
     fn supported_types(&self) -> &[ModelType] {
         SUPPORTED_TYPES
     }
 
-    fn validate(&self, source: &str, spec: &RuntimeSpec) -> Result<()> {
-        if !source.starts_with("endpoint://") {
-            return invalid_option("runtime.kind", "triton requires endpoint:// source");
-        }
-        let endpoint = source.trim_start_matches("endpoint://");
-        let url = reqwest::Url::parse(endpoint).map_err(|error| {
-            VqlError::new(
-                ErrorCode::InvalidOption,
-                "invalid Model option 'source': Triton endpoint must be an absolute HTTP(S) URL",
-            )
-            .with_source(error)
-        })?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            return invalid_option("source", "Triton endpoint must be an absolute HTTP(S) URL");
-        }
-        if spec.protocol.as_deref() == Some("kserve_v2_grpc") {
-            return Err(VqlError::feature(
-                "Triton kserve_v2_grpc is not available",
-                "未排期",
-            ));
-        }
-        if spec.protocol.as_deref().unwrap_or("kserve_v2_http") != "kserve_v2_http" {
-            return invalid_option(
-                "runtime.protocol",
-                "triton currently supports kserve_v2_http",
-            );
-        }
-        TritonOptions::parse(spec).map(|_| ())
+    fn validate_declaration(&self, model: &ModelDef) -> Result<()> {
+        validate_endpoint(&model.source)?;
+        TritonOptions::parse(&model.options).map(|_| ())
     }
 
-    fn build(
+    async fn resolve(
         &self,
         model: &ModelDef,
-        input: &TensorContract,
-        output: &TensorContract,
-    ) -> Result<Arc<dyn RuntimeSession>> {
-        let options = TritonOptions::parse(&model.runtime)?;
-        Ok(Arc::new(TritonRuntime::new(
-            &model.source,
-            &options.model_name,
-            options.model_version.as_deref(),
-            input.clone(),
-            output.clone(),
+        _cache_dir: &std::path::Path,
+        cancel: CancellationToken,
+    ) -> Result<RuntimeResolution> {
+        self.validate_declaration(model)?;
+        let options = TritonOptions::parse(&model.options)?;
+        let backend =
+            TritonServiceBackend::new(&model.source, &options.model, options.version.as_deref())?;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                return Err(VqlError::new(ErrorCode::QueryCancelled, "model resolve cancelled"));
+            }
+            result = backend.validate_metadata() => result?,
+        }
+        Ok(RuntimeResolution {
+            resolved_source: model.source.clone(),
+            artifact_hash: None,
+            execution: ResolvedExecutionSpec::Service {
+                runtime: options.runtime_spec(),
+            },
+            volatile: options.version.is_none(),
+        })
+    }
+
+    fn build_service(
+        &self,
+        model: &ResolvedModelDef,
+        runtime: &RuntimeSpec,
+    ) -> Result<Arc<dyn ModelBackend>> {
+        let options = runtime_options(runtime)?;
+        Ok(Arc::new(TritonServiceBackend::new_resolved(
+            &model.resolved_source,
+            &options.model,
+            options.version.as_deref(),
         )?))
     }
+}
+
+fn runtime_options(spec: &RuntimeSpec) -> Result<TritonOptions> {
+    if spec.protocol.as_deref() != Some("kserve_v2_http") {
+        return Err(VqlError::new(
+            ErrorCode::Internal,
+            "resolved Triton Runtime has an invalid protocol",
+        ));
+    }
+    TritonOptions::parse(&spec.options)
+}
+
+fn validate_endpoint(endpoint: &str) -> Result<()> {
+    let url = reqwest::Url::parse(endpoint).map_err(|error| {
+        VqlError::new(
+            ErrorCode::InvalidLocation,
+            "TRITON_INFERENCE_SERVER FROM must be an absolute HTTP(S) URL",
+        )
+        .with_source(error)
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return invalid_option(
+            "FROM",
+            "TRITON_INFERENCE_SERVER requires an absolute HTTP(S) URL",
+        );
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return invalid_option(
+            "FROM",
+            "credentials, query parameters, and fragments are not allowed",
+        );
+    }
+    Ok(())
 }
 
 fn validate_path_segment(name: &str, value: &str) -> Result<()> {
@@ -124,69 +163,60 @@ fn validate_path_segment(name: &str, value: &str) -> Result<()> {
 }
 
 #[derive(Debug)]
-pub(super) struct TritonRuntime {
+struct TritonServiceBackend {
     metadata_url: String,
     infer_url: String,
     client: reqwest::Client,
     metadata_validated: OnceLock<()>,
-    input_contract: TensorContract,
-    output_contract: TensorContract,
 }
 
-impl TritonRuntime {
-    fn new(
-        source: &str,
-        model_name: &str,
-        model_version: Option<&str>,
-        input_contract: TensorContract,
-        output_contract: TensorContract,
-    ) -> Result<Self> {
-        Self::with_timeout(
-            source,
-            model_name,
-            model_version,
-            Duration::from_secs(30),
-            input_contract,
-            output_contract,
-        )
+impl TritonServiceBackend {
+    fn new(endpoint: &str, model: &str, version: Option<&str>) -> Result<Self> {
+        Self::with_timeout(endpoint, model, version, Duration::from_secs(30), false)
+    }
+
+    fn new_resolved(endpoint: &str, model: &str, version: Option<&str>) -> Result<Self> {
+        Self::with_timeout(endpoint, model, version, Duration::from_secs(30), true)
     }
 
     fn with_timeout(
-        source: &str,
-        model_name: &str,
-        model_version: Option<&str>,
+        endpoint: &str,
+        model: &str,
+        version: Option<&str>,
         timeout: Duration,
-        input_contract: TensorContract,
-        output_contract: TensorContract,
+        metadata_validated: bool,
     ) -> Result<Self> {
-        let endpoint = source.strip_prefix("endpoint://").unwrap_or(source);
-        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-            return Err(VqlError::new(
-                ErrorCode::InvalidOption,
-                "Triton endpoint source must contain an http:// or https:// URL",
-            ));
+        validate_endpoint(endpoint)?;
+        validate_path_segment("WITH.model", model)?;
+        if let Some(version) = version {
+            validate_path_segment("WITH.version", version)?;
         }
         let endpoint = endpoint.trim_end_matches('/');
-        let metadata_url = if let Some(version) = model_version {
-            format!("{endpoint}/v2/models/{model_name}/versions/{version}")
+        let metadata_url = if let Some(version) = version {
+            format!("{endpoint}/v2/models/{model}/versions/{version}")
         } else {
-            format!("{endpoint}/v2/models/{model_name}")
+            format!("{endpoint}/v2/models/{model}")
         };
         let infer_url = format!("{metadata_url}/infer");
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|error| {
-                VqlError::new(ErrorCode::Execution, "failed to build Triton client")
-                    .with_source(error)
+                VqlError::new(
+                    ErrorCode::Execution,
+                    "failed to build Triton Inference Server client",
+                )
+                .with_source(error)
             })?;
+        let validated = OnceLock::new();
+        if metadata_validated {
+            let _ = validated.set(());
+        }
         Ok(Self {
             metadata_url,
             infer_url,
             client,
-            metadata_validated: OnceLock::new(),
-            input_contract,
-            output_contract,
+            metadata_validated: validated,
         })
     }
 
@@ -200,14 +230,17 @@ impl TritonRuntime {
             .send()
             .await
             .map_err(|error| {
-                VqlError::new(ErrorCode::Execution, "Triton metadata request failed")
-                    .with_source(error)
+                VqlError::new(
+                    ErrorCode::Execution,
+                    "Triton Inference Server metadata request failed",
+                )
+                .with_source(error)
             })?
             .error_for_status()
             .map_err(|error| {
                 VqlError::new(
                     ErrorCode::Execution,
-                    "Triton metadata request returned an error status",
+                    "Triton Inference Server metadata request returned an error status",
                 )
                 .with_source(error)
             })?
@@ -220,30 +253,30 @@ impl TritonRuntime {
                 )
                 .with_source(error)
             })?;
-        validate_metadata_tensor("input", &metadata.inputs, &self.input_contract)?;
-        validate_metadata_tensor("output", &metadata.outputs, &self.output_contract)?;
+        validate_contract_tensor("input", &metadata.inputs, CONTRACT_INPUT)?;
+        validate_contract_tensor("output", &metadata.outputs, CONTRACT_OUTPUT)?;
         let _ = self.metadata_validated.set(());
         Ok(())
     }
 
-    async fn infer_inner(&self, batch: RuntimeRequestBatch) -> Result<RuntimeResponseBatch> {
-        self.input_contract
-            .validate_batch("Triton input", &batch.input)?;
+    async fn infer_inner(&self, images: Vec<DynamicImage>) -> Result<arrow::array::ArrayRef> {
         self.validate_metadata().await?;
-        let datatype = kserve_datatype(batch.input.value_type())?;
+        let data = images
+            .into_iter()
+            .map(encode_image)
+            .collect::<Result<Vec<_>>>()?;
         let request = InferRequest {
             inputs: vec![InferInput {
-                name: batch.input.name().to_owned(),
-                shape: batch.input.shape(),
-                datatype,
-                data: batch.input.as_f32("Triton input")?,
+                name: CONTRACT_INPUT,
+                shape: vec![i64::try_from(data.len()).map_err(|_| {
+                    VqlError::new(ErrorCode::Execution, "model batch is too large")
+                })?],
+                datatype: "BYTES",
+                data,
             }],
-            outputs: batch
-                .output_names
-                .iter()
-                .cloned()
-                .map(|name| RequestedOutput { name })
-                .collect(),
+            outputs: vec![RequestedOutput {
+                name: CONTRACT_OUTPUT,
+            }],
         };
         let response = self
             .client
@@ -252,14 +285,17 @@ impl TritonRuntime {
             .send()
             .await
             .map_err(|error| {
-                VqlError::new(ErrorCode::Execution, "Triton inference request failed")
-                    .with_source(error)
+                VqlError::new(
+                    ErrorCode::Execution,
+                    "Triton Inference Server inference request failed",
+                )
+                .with_source(error)
             })?
             .error_for_status()
             .map_err(|error| {
                 VqlError::new(
                     ErrorCode::Execution,
-                    "Triton inference returned an error status",
+                    "Triton Inference Server inference returned an error status",
                 )
                 .with_source(error)
             })?
@@ -269,30 +305,93 @@ impl TritonRuntime {
                 VqlError::new(ErrorCode::Execution, "Triton KServe V2 response is invalid")
                     .with_source(error)
             })?;
-
-        let mut outputs = BTreeMap::new();
-        for output in response.outputs {
-            if output.datatype != "FP32" {
-                return Err(VqlError::new(
+        let output = response
+            .outputs
+            .into_iter()
+            .find(|output| output.name == CONTRACT_OUTPUT)
+            .ok_or_else(|| {
+                VqlError::new(
                     ErrorCode::Execution,
-                    format!(
-                        "Triton output '{}' has unsupported datatype '{}'",
-                        output.name, output.datatype
-                    ),
-                ));
-            }
-            let name = output.name;
-            let tensor = TensorBatch::from_f32(name.clone(), output.shape, output.data, None)?;
-            self.output_contract
-                .validate_batch("Triton output", &tensor)?;
-            if outputs.insert(name.clone(), tensor).is_some() {
-                return Err(VqlError::new(
-                    ErrorCode::Execution,
-                    format!("Triton returned duplicate output '{name}'"),
-                ));
-            }
+                    "Triton response does not contain canonical 'detections' output",
+                )
+            })?;
+        if output.datatype != "BYTES" || output.shape != [request.inputs[0].shape[0]] {
+            return Err(VqlError::new(
+                ErrorCode::Execution,
+                "Triton canonical 'detections' output must be BYTES with shape [batch]",
+            ));
         }
-        Ok(RuntimeResponseBatch { outputs })
+        let rows = output
+            .data
+            .into_iter()
+            .map(parse_detection_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(canonical_detection_output(rows))
+    }
+}
+
+fn encode_image(image: DynamicImage) -> Result<String> {
+    let mut bytes = Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, ImageFormat::Png)
+        .map_err(|error| {
+            VqlError::new(
+                ErrorCode::Execution,
+                "failed to encode IMAGE for Triton Inference Server",
+            )
+            .with_source(error)
+        })?;
+    Ok(format!(
+        "b64:{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+    ))
+}
+
+fn parse_detection_row(value: String) -> Result<Vec<(String, f32, [f32; 4])>> {
+    let detections = serde_json::from_str::<Vec<ServiceDetection>>(&value).map_err(|error| {
+        VqlError::new(
+            ErrorCode::Execution,
+            "Triton canonical detection row is invalid",
+        )
+        .with_source(error)
+    })?;
+    detections
+        .into_iter()
+        .map(|detection| {
+            if detection.label.is_empty() {
+                return Err(VqlError::new(
+                    ErrorCode::Execution,
+                    "Triton detection label must not be empty",
+                ));
+            }
+            if !detection.confidence.is_finite()
+                || !(0.0..=1.0).contains(&detection.confidence)
+                || detection
+                    .bbox
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+            {
+                return Err(VqlError::new(
+                    ErrorCode::Execution,
+                    "Triton detections must use finite normalized confidence and BOX2D values",
+                ));
+            }
+            Ok((detection.label, detection.confidence, detection.bbox))
+        })
+        .collect()
+}
+
+#[async_trait]
+impl ModelBackend for TritonServiceBackend {
+    async fn infer(
+        &self,
+        images: Vec<DynamicImage>,
+        cancel: CancellationToken,
+    ) -> Result<arrow::array::ArrayRef> {
+        tokio::select! {
+            _ = cancel.cancelled() => Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled")),
+            result = self.infer_inner(images) => result,
+        }
     }
 }
 
@@ -309,67 +408,42 @@ struct TensorMetadata {
     shape: Vec<i64>,
 }
 
-fn validate_metadata_tensor(
-    role: &str,
-    tensors: &[TensorMetadata],
-    contract: &TensorContract,
-) -> Result<()> {
+fn validate_contract_tensor(role: &str, tensors: &[TensorMetadata], name: &str) -> Result<()> {
     let tensor = tensors
         .iter()
-        .find(|tensor| tensor.name == contract.name)
+        .find(|tensor| tensor.name == name)
         .ok_or_else(|| {
             VqlError::new(
                 ErrorCode::Execution,
-                format!(
-                    "Triton model metadata does not declare {role} '{}'",
-                    contract.name
-                ),
+                format!("Triton model does not expose canonical {role} '{name}'"),
             )
         })?;
-    if tensor.datatype != kserve_datatype(&contract.dtype)? {
+    if tensor.datatype != "BYTES" || tensor.shape != [-1] {
         return Err(VqlError::new(
             ErrorCode::Execution,
-            format!(
-                "Triton {role} '{}' has unsupported datatype '{}'",
-                tensor.name, tensor.datatype
-            ),
-        ));
-    }
-    if tensor.shape.len() != contract.shape.len()
-        || tensor
-            .shape
-            .iter()
-            .zip(&contract.shape)
-            .any(|(declared, expected)| *declared >= 0 && *expected >= 0 && declared != expected)
-    {
-        return Err(VqlError::new(
-            ErrorCode::Execution,
-            format!(
-                "Triton {role} '{}' shape {:?} is incompatible with contract {:?}",
-                tensor.name, tensor.shape, contract.shape
-            ),
+            format!("Triton canonical {role} '{name}' must be BYTES with shape [-1]"),
         ));
     }
     Ok(())
 }
 
 #[derive(Debug, Serialize)]
-struct InferRequest<'a> {
-    inputs: Vec<InferInput<'a>>,
+struct InferRequest {
+    inputs: Vec<InferInput>,
     outputs: Vec<RequestedOutput>,
 }
 
 #[derive(Debug, Serialize)]
-struct InferInput<'a> {
-    name: String,
+struct InferInput {
+    name: &'static str,
     shape: Vec<i64>,
     datatype: &'static str,
-    data: &'a [f32],
+    data: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RequestedOutput {
-    name: String,
+    name: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,197 +456,114 @@ struct InferOutput {
     name: String,
     shape: Vec<i64>,
     datatype: String,
-    data: Vec<f32>,
+    data: Vec<String>,
 }
 
-#[async_trait]
-impl RuntimeSession for TritonRuntime {
-    fn kind(&self) -> &str {
-        "triton"
-    }
-
-    fn input_contract(&self) -> &TensorContract {
-        &self.input_contract
-    }
-
-    fn output_contract(&self) -> &TensorContract {
-        &self.output_contract
-    }
-
-    fn batching_owner(&self) -> BatchingOwner {
-        BatchingOwner::Service
-    }
-
-    async fn infer(
-        &self,
-        batch: RuntimeRequestBatch,
-        cancel: CancellationToken,
-    ) -> Result<RuntimeResponseBatch> {
-        tokio::select! {
-            _ = cancel.cancelled() => Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled")),
-            result = self.infer_inner(batch) => result,
-        }
-    }
+#[derive(Debug, Deserialize)]
+struct ServiceDetection {
+    label: String,
+    confidence: f32,
+    bbox: [f32; 4],
 }
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
-
     use super::*;
+    use arrow::array::{Array, ListArray};
+    use image::DynamicImage;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    fn contracts() -> (TensorContract, TensorContract) {
-        (
-            TensorContract {
-                name: "images".to_owned(),
-                dtype: DataType::Float32,
-                shape: vec![-1, 3, 1, 1],
-            },
-            TensorContract {
-                name: "output0".to_owned(),
-                dtype: DataType::Float32,
-                shape: vec![-1, -1, 6],
-            },
-        )
-    }
-
-    fn request() -> RuntimeRequestBatch {
-        RuntimeRequestBatch {
-            input: TensorBatch::from_f32(
-                "images",
-                vec![1, 3, 1, 1],
-                vec![0.0, 0.0, 0.0],
-                Some(vec!["C".to_owned(), "H".to_owned(), "W".to_owned()]),
-            )
-            .unwrap(),
-            output_names: vec!["output0".to_owned()],
-        }
+    fn metadata_body() -> &'static str {
+        r#"{"inputs":[{"name":"image","datatype":"BYTES","shape":[-1]}],"outputs":[{"name":"detections","datatype":"BYTES","shape":[-1]}]}"#
     }
 
     #[tokio::test]
-    async fn triton_runtime_uses_kserve_v2_http_contract() {
+    async fn triton_service_uses_the_canonical_object_detection_contract() {
         let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
             return;
         };
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
+            let mut buffer = [0_u8; 16 * 1024];
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0_u8; 8192];
             let count = stream.read(&mut buffer).unwrap();
-            let request = String::from_utf8_lossy(&buffer[..count]);
-            assert!(request.contains("GET /v2/models/yolo/versions/1"));
-            let body = r#"{"inputs":[{"name":"images","datatype":"FP32","shape":[-1,3,1,1]}],"outputs":[{"name":"output0","datatype":"FP32","shape":[-1,-1,6]}]}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            )
-            .unwrap();
+            assert!(
+                String::from_utf8_lossy(&buffer[..count])
+                    .contains("GET /v2/models/detector/versions/1")
+            );
+            write_response(&mut stream, metadata_body());
 
             let (mut stream, _) = listener.accept().unwrap();
             let count = stream.read(&mut buffer).unwrap();
             let request = String::from_utf8_lossy(&buffer[..count]);
-            assert!(request.contains("POST /v2/models/yolo/versions/1/infer"));
-            assert!(request.contains("\"datatype\":\"FP32\""));
-            let body = r#"{"outputs":[{"name":"output0","shape":[1,1,6],"datatype":"FP32","data":[0.0,0.0,1.0,1.0,0.9,0.0]}]}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            )
-            .unwrap();
+            assert!(request.contains("POST /v2/models/detector/versions/1/infer"));
+            assert!(request.contains("\"name\":\"image\""));
+            assert!(request.contains("b64:"));
+            write_response(
+                &mut stream,
+                r#"{"outputs":[{"name":"detections","shape":[1],"datatype":"BYTES","data":["[{\"label\":\"person\",\"confidence\":0.9,\"bbox\":[0.1,0.2,0.3,0.4]}]"]}]}"#,
+            );
         });
-        let (input, output) = contracts();
-        let runtime = TritonRuntime::new(
-            &format!("endpoint://http://{address}"),
-            "yolo",
-            Some("1"),
-            input,
-            output,
-        )
-        .unwrap();
-        let output = runtime
-            .infer(request(), CancellationToken::new())
+        let backend =
+            TritonServiceBackend::new(&format!("http://{address}"), "detector", Some("1")).unwrap();
+        let output = backend
+            .infer(vec![DynamicImage::new_rgb8(2, 2)], CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(output.outputs["output0"].shape(), vec![1, 1, 6]);
+        assert_eq!(
+            output.as_any().downcast_ref::<ListArray>().unwrap().len(),
+            1
+        );
         server.join().unwrap();
     }
 
     #[tokio::test]
-    async fn triton_runtime_enforces_timeout() {
+    async fn triton_rejects_a_raw_tensor_model() {
         let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
             return;
         };
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0_u8; 8192];
+            let mut buffer = [0_u8; 4096];
             let _ = stream.read(&mut buffer);
-            std::thread::sleep(Duration::from_millis(100));
+            write_response(
+                &mut stream,
+                r#"{"inputs":[{"name":"images","datatype":"FP32","shape":[-1,3,640,640]}],"outputs":[{"name":"output0","datatype":"FP32","shape":[-1,-1,6]}]}"#,
+            );
         });
-        let (input, output) = contracts();
-        let runtime = TritonRuntime::with_timeout(
-            &format!("endpoint://http://{address}"),
-            "yolo",
-            None,
-            Duration::from_millis(20),
-            input,
-            output,
-        )
-        .unwrap();
-        let error = runtime
-            .infer(request(), CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, ErrorCode::Execution);
-        assert!(error.message.contains("request failed"));
+        let backend =
+            TritonServiceBackend::new(&format!("http://{address}"), "detector", None).unwrap();
+        let error = backend.validate_metadata().await.unwrap_err();
+        assert!(error.message.contains("canonical input 'image'"));
         server.join().unwrap();
     }
 
-    #[tokio::test]
-    async fn triton_runtime_aborts_a_pending_request_on_cancellation() {
-        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
-            return;
-        };
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0_u8; 8192];
-            let _ = stream.read(&mut buffer);
-            let body = r#"{"inputs":[{"name":"images","datatype":"FP32","shape":[-1,3,1,1]}],"outputs":[{"name":"output0","datatype":"FP32","shape":[-1,-1,6]}]}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            )
-            .unwrap();
+    #[test]
+    fn triton_rejects_embedded_processor_options() {
+        let options = BTreeMap::from([
+            ("model".to_owned(), serde_json::json!("detector")),
+            (
+                "output".to_owned(),
+                serde_json::json!({"format": "yolo_e2e"}),
+            ),
+        ]);
 
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut buffer);
-            std::thread::sleep(Duration::from_millis(200));
-        });
-        let (input, output) = contracts();
-        let runtime = TritonRuntime::new(
-            &format!("endpoint://http://{address}"),
-            "yolo",
-            None,
-            input,
-            output,
+        let error = TritonOptions::parse(&options).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidOption);
+        assert!(error.message.contains("TRITON_INFERENCE_SERVER"));
+        assert!(error.message.contains("output"));
+    }
+
+    fn write_response(stream: &mut std::net::TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
         )
         .unwrap();
-        let cancel = CancellationToken::new();
-        let trigger = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            trigger.cancel();
-        });
-        let started = std::time::Instant::now();
-        let error = runtime.infer(request(), cancel).await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::QueryCancelled);
-        assert!(started.elapsed() < Duration::from_millis(150));
-        server.join().unwrap();
     }
 }

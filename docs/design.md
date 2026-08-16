@@ -191,14 +191,14 @@ SQL / DataFrame
   → execution
 ```
 
-Planning reads only the Catalog and lightweight metadata. Object listing, model download, video probing, and network connection wait until execution so `EXPLAIN` and completion cannot trigger expensive I/O.
+Planning reads only the Catalog and lightweight metadata. Object listing, model download, service metadata validation, video probing, and network connection never happen implicitly during planning: model materialization belongs exclusively to `RESOLVE MODEL`, while ordinary execution opens only the already-resolved binding. `EXPLAIN` and completion cannot trigger expensive I/O.
 
 ### 4.3 Query Manifests
 
 Planning reads the Catalog in one transaction and emits an immutable Query Manifest. The Manifest, rather than mutable session registration or a public revision object, is the execution source of truth:
 
 - It records fully resolved Table, Stream, Model, user-defined Function, and Sink specifications plus the internal Catalog generation used to construct them.
-- Each typed inference entry records the built-in operation, constant semantic arguments, domain input expressions, and a resolved Model snapshot. The Model snapshot includes type, source identity and bundle digest, Runtime kind and protocol, processor kinds and resolved options, canonical schemas, determinism, and batching ownership.
+- Each typed inference entry records the built-in operation, constant semantic arguments, domain input expressions, and a resolved Model snapshot. The snapshot includes type, source identity and artifact hash or service binding, Runtime kind and execution mode, internal embedded processors when applicable, canonical schemas, determinism, and batching ownership.
 - Each user-defined Function entry records its DataFusion signature, normalized language/body, volatility, and implementation digest.
 - A bounded query holds one Manifest through execution. A continuous query holds it for its entire lifetime. Replacing a Catalog definition affects only plans created afterward.
 - Prepared statements and running queries are never replanned automatically. Prepare again, or cancel and restart a continuous query, to observe a replacement.
@@ -439,7 +439,8 @@ Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs 
 |---|---|
 | `CREATE TABLE ... USING IMAGES/VIDEOS` | Create an external image or video table (Section 8.2) |
 | `CREATE STREAM ... FROM 'rtsp://...'` | Create one RTSP stream (Section 8.3) |
-| `CREATE MODEL ... TYPE ... FROM ... WITH (...)` | Create one typed inference capability |
+| `CREATE MODEL ... TYPE ... FROM ... USING ... WITH (...)` | Store one unresolved typed Model declaration without network I/O |
+| `RESOLVE MODEL <name>` | Download/cache an artifact or validate a service and persist its resolved execution contract |
 | `CREATE FUNCTION ... RETURN <expression>` | Create a DataFusion-backed SQL expression function |
 | `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` | Create a batched Python function; executable only from a Python host |
 | `CREATE SINK ...` | Create a Console or Kafka Sink |
@@ -467,7 +468,7 @@ SQLite is the default Catalog, at exactly `$VQL_HOME/catalog/vql.db`.
 |---|---|
 | Table | Provider, location, options, Arrow schema, internal generation, credential reference |
 | Stream | Connector, sanitized endpoint, fps, event-time policy, watermark, internal generation |
-| Model | Type and structural parameters; source identity and bundle digest; normalized Runtime, PreProcessor, and PostProcessor specifications; canonical schemas; determinism |
+| Model | Type, raw `FROM` location, selected Runtime and Runtime-scoped `WITH` options; optional resolved source/hash, execution mode, canonical schemas, and determinism |
 | Function | DataFusion signature, normalized SQL expression or Python entry point, volatility, implementation digest |
 | Sink | Connector, format, options, credential reference |
 
@@ -515,27 +516,25 @@ Planning enforces these rules:
 - The built-in function, Model type, domain argument types, and canonical output must match exactly. Unknown or duplicate arguments fail planning.
 - Built-in inference functions are typed planner markers. Planning must extract them into `Inference`; their scalar execution method fails defensively if an unextracted call reaches execution.
 
-Model options use dotted framework namespaces and structured processor options:
+Model declarations use one Runtime-owned option schema:
 
 ```text
-model_option_key := identifier ('.' identifier)*
-processor_options := '{' [option_entry (',' option_entry)* [',']] '}'
-option_entry := identifier '=' constant_value
+CREATE MODEL identifier
+  TYPE model_type
+  FROM string_literal
+  USING runtime_identifier
+  [WITH (runtime_option ('=' constant_value) [, ...])]
 ```
 
-| Namespace | Owner | Representative fields |
-|---|---|---|
-| `runtime.*` | Runtime implementation and binding | `kind`, `protocol`, served model/version, artifact subtype |
-| `pre_processor.*` | PreProcessor implementation | `kind`, `options` |
-| `post_processor.*` | PostProcessor implementation | `kind`, `options` |
+`USING` is the only public Runtime selector. SQL identifiers such as `ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER` normalize to internal registry IDs `onnx-runtime` and `triton-inference-server`. `WITH` is not a global Model schema: the selected Runtime deserializes the complete map with unknown fields denied. `ONNX_RUNTIME` owns `sha256`, `input={...}`, and `output={...}`. `TRITON_INFERENCE_SERVER` owns `model` and optional immutable `version`. No public `runtime.*`, `pre_processor.*`, `post_processor.*`, Profile, or Adapter layer exists.
 
-The parser normalizes dotted keys and object literals into one nested Catalog structure. `pre_processor.kind` and `post_processor.kind` are versioned registry identifiers; every implementation-specific field lives inside its complete `options` object. Flat spellings such as `pre_processor.width`, unknown fields, missing required fields, duplicate keys, and scalar/namespace prefix conflicts fail registration. A processor kind may be omitted only when `TYPE + runtime.kind` selects exactly one compatible default; the resolved kind and version are always written to the Query Manifest.
+`CREATE MODEL` is deliberately fast. It validates only facts available locally—the `TYPE`/Runtime pairing, source shape, option schema, and embedded processor options—and commits an unresolved definition without downloading or contacting a service. `RESOLVE MODEL` is the explicit potentially slow operation. For an embedded artifact it resolves the source, streams remote bytes to a temporary file, checks cancellation and checksum while downloading, atomically installs a content-addressed cache entry, and persists the resolved path/hash. For a service it contacts the endpoint, validates the typed service contract, and persists the binding. A query cannot plan against an unresolved Model.
 
-`runtime.kind` selects an implementation such as `onnxruntime`, `triton`, `transformers`, `vllm`, `sglang`, or `llama_cpp`. `runtime.protocol` selects a protocol supported by that implementation, such as `kserve_v2_http`, `kserve_v2_grpc`, or `openai`; `openai` is not a Runtime kind. Unsupported kind/protocol pairs fail before Catalog commit.
+Re-running `RESOLVE MODEL` refreshes the resolved revision. Pinned artifacts and versioned services have stable semantic fingerprints. An unversioned service is `volatile`; it cannot be constant-lifted, deduplicated, or cached as if immutable.
 
 Device selection, replicas, queue capacity, batch size, maximum wait, request concurrency, timeouts, and credentials are not Model options. They belong to internal RuntimeConfig or secret-provider state because they are placement and scheduling concerns. Public Profiles, Adapters, Model revisions, and Deployment objects are deliberately absent.
 
-The semantic fingerprint includes the Model type and structural parameters, source bundle digest or immutable endpoint revision, result-affecting Runtime binding, resolved processor kinds/versions/options, built-in operation and semantic arguments, canonical schemas, and determinism. RuntimeConfig does not enter semantic identity. An unpinned endpoint is `volatile`; it cannot be constant-lifted, deduplicated, or cached as if immutable.
+The declaration fingerprint includes Model type, raw source, selected Runtime, and Runtime-owned options. The resolved semantic fingerprint additionally includes resolved source/hash, execution mode, internal embedded processor specifications or service protocol binding, and determinism. RuntimeConfig does not enter semantic identity.
 
 ### 7.4 User-defined Functions and DataFusion Reuse
 
@@ -676,7 +675,7 @@ Window size never implies a sample rate. User-declared fps is part of result sem
 
 After expanding SQL expression functions, the planner scans Projection, Filter, and aggregate inputs for type-owned inference markers:
 
-1. Require constant Model and semantic arguments, resolve the Model, validate the complete type/processor/Runtime contracts, and copy the resolved specification into the Query Manifest.
+1. Require constant Model and semantic arguments, require a previously resolved Model, validate its typed embedded-pipeline or service contract, and copy the resolved specification into the Query Manifest.
 2. Replace each marker with an internal column reference and insert `Inference` at the earliest point where every domain input exists and semantics remain unchanged.
 3. Deduplicate only when the built-in operation, Model semantic fingerprint, all domain input expressions, and semantic arguments match exactly and determinism is `deterministic` or `stable_within_query`. Preserve every `volatile` call and its order.
 4. Evaluate a constant-domain-input inference call, such as a text query embedding, once as a query-init expression only under the same determinism rule.
@@ -689,7 +688,7 @@ After expanding SQL expression functions, the planner scans Projection, Filter, 
 - Query Manifest identity and query mode;
 - logical plan plus batch plan or streaming job graph;
 - video time range, source fps, and expected sampled fps;
-- Model type and resolved source identity, Runtime kind/protocol, processor kinds, batching owner, input volume, volatility, and deduplication at each inference node;
+- Model type and resolved source identity, Runtime kind/execution mode, embedded processor kinds when applicable, batching owner, input volume, volatility, and deduplication at each inference node;
 - whether decode is required and which `IMAGE` form is used;
 - stateful operators, watermark delay, delivery semantics, and unsupported items for streaming.
 
@@ -701,7 +700,7 @@ It describes work; it does not invent uncalibrated GPU-time or cost estimates.
 
 ### 10.1 Compiled Pipeline and Interfaces
 
-Every typed call compiles to one validated pipeline:
+Every resolved typed call selects one of two execution modes. Embedded Runtimes use the VisionQL-owned tensor pipeline:
 
 ```text
 TYPE canonical input RecordBatch
@@ -713,48 +712,34 @@ TYPE canonical input RecordBatch
   → TYPE canonical Arrow result
 ```
 
-The internal interfaces separate domain semantics from execution protocols:
+Service Runtimes own the full model-facing pipeline:
+
+```text
+TYPE canonical input
+  → VisionQL transport codec
+  → typed service request
+  → service-owned preprocessing → inference → postprocessing
+  → typed service response
+  → VisionQL canonical Arrow conversion
+```
+
+The Runtime factory owns declaration validation, the explicit resolve operation, and construction for its execution mode:
 
 ```rust
-trait PreProcessor {
-    fn domain_input(&self) -> &ArrowSignature;
-    fn runtime_output(&self) -> &RuntimeContract;
-    fn process(
+trait RuntimeFactory {
+    fn validate_declaration(&self, model: &ModelDef) -> Result<()>;
+    async fn resolve(
         &self,
-        input: &RecordBatch,
-        context: &InvokeContext,
-    ) -> Result<PreprocessedBatch>;
-}
-
-trait ModelRuntime {
-    async fn open(&self, spec: &ResolvedRuntimeSpec)
-        -> Result<Arc<dyn RuntimeSession>>;
-}
-
-trait RuntimeSession {
-    fn input_contract(&self) -> &RuntimeContract;
-    fn output_contract(&self) -> &RuntimeContract;
-    fn batching_owner(&self) -> BatchingOwner;
-    async fn infer(
-        &self,
-        batch: RuntimeRequestBatch,
+        model: &ModelDef,
+        cache_dir: &Path,
         cancel: CancellationToken,
-    ) -> Result<RuntimeResponseBatch>;
-}
-
-trait PostProcessor {
-    fn runtime_input(&self) -> &RuntimeContract;
-    fn domain_output(&self) -> &DataType;
-    fn process(
-        &self,
-        output: RuntimeResponseBatch,
-        pre_context: &PreProcessContext,
-        params: &BoundInferenceParams,
-    ) -> Result<ArrayRef>;
+    ) -> Result<RuntimeResolution>;
+    fn build_embedded(...) -> Result<Arc<dyn RuntimeSession>>;
+    fn build_service(...) -> Result<Arc<dyn ModelBackend>>;
 }
 ```
 
-`Engine` owns one crate-private `PipelineRegistry`. The registry maps the versioned `kind` of each stage to a factory; DDL validation and pipeline compilation must both resolve through the same factory instead of repeating `kind` match arms:
+`Engine` owns one crate-private `PipelineRegistry`. Runtime selection, DDL validation, resolution, and backend compilation all use the same Runtime factory. Embedded execution additionally uses internal processor factories:
 
 ```rust
 trait PreProcessorFactory: Send + Sync {
@@ -764,36 +749,25 @@ trait PreProcessorFactory: Send + Sync {
     fn build(&self, spec: &ProcessorSpec) -> Result<Arc<dyn PreProcessor>>;
 }
 
-trait RuntimeFactory: Send + Sync {
-    fn kind(&self) -> &str;
-    fn supported_types(&self) -> &[ModelType];
-    fn validate(&self, source: &str, spec: &RuntimeSpec) -> Result<()>;
-    fn build(
-        &self,
-        model: &ModelDef,
-        input: &RuntimeContract,
-        output: &RuntimeContract,
-    ) -> Result<Arc<dyn RuntimeSession>>;
-}
 ```
 
-`PostProcessorFactory` follows the PreProcessor factory shape. v0.1 registers `vision.image_tensor@1`, `vision.yolo_e2e@1`, `vision.yolo_raw@1`, `vision.xywh_normalized@1`, `onnxruntime`, and `triton`. Known roadmap-gated Runtime kinds are registered as rejecting factories so their stable `FEATURE_NOT_AVAILABLE` responses do not depend on an unrelated fallback branch. These traits are the future host-injection seam, but no public registration API ships until an independent processor or Runtime requires one.
+`PostProcessorFactory` follows the PreProcessor factory shape. v0.1 internally registers `vision.image_tensor@1`, `vision.yolo_e2e@1`, `vision.yolo_raw@1`, and `vision.xywh_normalized@1` for embedded ONNX execution, plus the public Runtime IDs `onnx-runtime` and `triton-inference-server`. Known roadmap-gated Runtime IDs are registered as rejecting factories so their stable `FEATURE_NOT_AVAILABLE` responses do not depend on an unrelated fallback branch. Processor IDs remain internal implementation details; no public registration API ships until an independent embedded Runtime requires one.
 
 Each factory owns a serde option type with unknown fields denied. A PreProcessor receives only its input options; a PostProcessor receives only decoding and result-construction options; a Runtime receives only source, protocol, and binding options. Deserialization failures are rendered through the existing `INVALID_OPTION` contract with the complete option path. Options are deserialized once while compiling a pipeline, not once per input batch.
 
-Registration and planning validate every adjacent contract: Model-type input against PreProcessor input, PreProcessor output against Runtime input, Runtime output against PostProcessor input, and PostProcessor output against the canonical Model-type result. No component may rely on an unchecked tensor name, dtype, shape, or response field.
+For embedded execution, resolution and compilation validate every adjacent contract: Model-type input against PreProcessor input, PreProcessor output against Runtime input, Runtime output against PostProcessor input, and PostProcessor output against the canonical Model-type result. For service execution, `RESOLVE MODEL` validates the service's typed request and response contract. No component may rely on an unchecked tensor name, dtype, shape, or response field.
 
 Runtime tensors use Arrow's canonical `arrow.fixed_shape_tensor` extension type instead of a private dtype-and-buffer enum. The outer Arrow array length is the batch dimension; each slot is one equal-shape tensor backed by a non-nullable `FixedSizeList`, while the extension `Field` records element dtype, per-row shape, optional dimension names, and layout permutation. `TensorBatch` therefore carries the `FieldRef` together with its array so extension metadata cannot be separated from the buffer. Concrete batches contain only positive fixed dimensions after the batch axis; wildcard dimensions remain a contract-only concept.
 
-The image PreProcessor emits `Float32` tensors with `C`, `H`, and `W` dimension names. ONNX Runtime borrows the contiguous Arrow values buffer for input execution; runtime output is wrapped back into a fixed-shape tensor before contract validation and PostProcessor execution. Triton HTTP/JSON derives the KServe datatype and shape from the same Arrow value and serializes its inner contiguous slice. HTTP serialization and Runtime-owned output memory may still require copies; zero-copy is guaranteed only where the consumer accepts the Arrow buffer lifetime directly. Unsupported Arrow element types fail at the Runtime protocol boundary rather than narrowing the shared processor interfaces.
+The image PreProcessor emits `Float32` tensors with `C`, `H`, and `W` dimension names. ONNX Runtime borrows the contiguous Arrow values buffer for input execution; runtime output is wrapped back into a fixed-shape tensor before contract validation and PostProcessor execution. This raw tensor path is embedded-only. A Triton service receives encoded image bytes and returns canonical detections; a raw FP32 Triton model is rejected because it would move service-owned pre/post-processing back into VQL.
 
 A CV PreProcessor resolves and decodes `IMAGE`, converts color and dtype, resizes/crops/pads, normalizes, changes layout, and constructs named tensor batches. It returns row-aligned context such as original dimensions and letterbox transforms. Text PreProcessors construct a protocol request or invoke a tokenizer in an isolated worker while enforcing prompt and payload limits.
 
 A PostProcessor converts Runtime output to the canonical Arrow result. Detection implementations decode tensors, apply activation or NMS only when required, resolve labels, and restore coordinates. Embedding implementations validate dimension `n` and declared pooling/normalization. Generation implementations validate the protocol response and return bounded final text. Inference-call parameters are defined by Model `TYPE`; processors may consume only that allowlist.
 
-The compiled PreProcessor, Runtime session, PostProcessor, and scheduler form one `CompiledPipeline` cache entry keyed by the Model semantic fingerprint. `ModelRuntime` removes entries whose fingerprints are no longer present in the Catalog head; in-flight queries retain their snapshot-owned `Arc`, while removing the cache owner closes the scheduler queue and releases the Runtime session after the last query finishes. Dropping and recreating a Model therefore cannot reuse an obsolete session.
+The compiled embedded pipeline or service backend plus scheduler forms one cache entry keyed by the resolved Model semantic fingerprint. `ModelRuntime` removes entries whose fingerprints are no longer present in the Catalog head; in-flight queries retain their snapshot-owned `Arc`, while removing the cache owner closes the scheduler queue and releases the Runtime session after the last query finishes. Dropping, re-resolving, and recreating a Model therefore cannot reuse an obsolete session.
 
-The v0.1 implementation keeps processor semantics out of Runtime backends:
+The v0.1 implementation keeps embedded processor semantics separate while allowing a service Runtime to own its complete typed protocol:
 
 ```text
 models/
@@ -801,52 +775,51 @@ models/
   preprocess/image_tensor.rs  # vision.image_tensor@1
   postprocess/yolo.rs         # YOLO decoding, NMS, coordinate restore, Arrow output
   ort_backend.rs              # ONNX Runtime session and graph-contract validation
-  triton_backend.rs           # KServe V2 HTTP session and metadata validation
+  triton_backend.rs           # typed KServe V2 service codec and metadata validation
 ```
 
 ### 10.2 Runtime Registry and Batching Ownership
 
-A Runtime loads an artifact bundle or binds a service endpoint. It deals only in declared Runtime contracts and does not infer whether bytes represent detections, vectors, or generated text.
+A Runtime loads an artifact or binds a service endpoint. The Model `TYPE` fixes the semantic capability; the Runtime owns how that capability is executed.
 
-| `runtime.kind` | Source | Allowed `runtime.protocol` | Batching owner | Delivery |
+| `USING` Runtime | Source | Execution ownership | Batching owner | Delivery |
 |---|---|---|---|---|
-| `onnxruntime` | Local or cached ONNX graph | omitted | VisionQL queues requests; ONNX Runtime executes tensor batches | v0.1 |
-| `triton` | Triton endpoint and model version | `kserve_v2_http`; `kserve_v2_grpc` is roadmap-gated | Triton owns model instances and dynamic batching; VisionQL owns bounded concurrency and backpressure | v0.1 HTTP |
-| `transformers` | Pinned Hugging Face or local bundle | omitted; internal worker protocol | Isolated worker owns PyTorch/Transformers and model-native processing | v0.3 embedding |
-| `vllm` | vLLM endpoint and served model | `openai` | vLLM owns continuous batching; VisionQL owns bounded concurrency and backpressure | Roadmap-gated |
-| `sglang` | SGLang endpoint and served model | `openai` | SGLang owns continuous batching; VisionQL owns bounded concurrency and backpressure | Roadmap-gated |
-| `llama_cpp` | Local GGUF bundle or llama-server endpoint | omitted for embedded execution; `openai` for llama-server | llama.cpp owns tokenization and generation | Roadmap-gated |
+| `ONNX_RUNTIME` | Local, cached HTTP(S), or pinned Hugging Face ONNX artifact | VisionQL PreProcessor → ONNX Runtime → VisionQL PostProcessor | VisionQL queues requests; ONNX Runtime executes tensor batches | v0.1 |
+| `TRITON_INFERENCE_SERVER` | Plain absolute HTTP(S) service URL plus `WITH.model/version` | Triton owns preprocessing, inference, and postprocessing; VisionQL owns the typed KServe V2 codec | Triton owns model instances and dynamic batching; VisionQL owns bounded concurrency and backpressure | v0.1 HTTP |
+| `TRANSFORMERS` | Pinned Hugging Face or local bundle | Isolated worker owns model-native processing | Worker-owned | v0.3 embedding |
+| `VLLM` / `SGLANG` | Service endpoint and served model | Service-owned | Service-owned | Roadmap-gated |
+| `LLAMA_CPP` | Local GGUF or llama-server endpoint | Runtime-owned | Runtime-owned | Roadmap-gated |
 
 ONNX Runtime validates graph input/output names, dtypes, and static dimensions against the compiled processor contracts when the session is built. Its blocking `run` executes through Tokio's blocking pool and retains one session mutex because VisionQL-owned batching already serializes calls per session.
 
-Triton uses the selected KServe V2 protocol and validates server model metadata against the compiled processor contracts before inference. v0.1 implements the asynchronous HTTP/JSON tensor contract; gRPC uses the same Runtime boundary when scheduled. Cancellation drops the in-flight HTTP future. VisionQL does not manage Triton repositories or deployments. The vLLM and SGLang integrations are separate Runtime implementations even when both use the OpenAI-compatible protocol: discovery, capabilities, errors, cancellation, and response validation remain implementation-specific.
+`RESOLVE MODEL` validates that Triton exposes a canonical `image` BYTES input and `detections` BYTES output, each with one dynamic batch dimension. Inference sends encoded images and receives one JSON detection list per row; VisionQL validates normalized confidence and box values and converts them to the canonical Arrow result. Raw tensor models are rejected. Cancellation drops the in-flight HTTP future. VisionQL does not manage Triton repositories or deployments.
 
 Each Runtime reports whether batching is VisionQL-owned or service-owned. VisionQL never places a second dynamic-batching queue in front of Triton, vLLM, SGLang, or llama-server. It still applies bounded concurrency, deadlines, cancellation, memory reservation, and backpressure.
 
 ### 10.3 Artifact Bundles and Open-source Models
 
-`FROM` identifies a complete artifact bundle or an endpoint, not necessarily one file. Independent resolvers handle `file://`, `hf://`, and `endpoint://`. A resolver selects required files, pins an immutable source revision when possible, computes a digest for the complete bundle, and never guesses task or tensor semantics.
+`FROM` preserves the Runtime's raw location. `ONNX_RUNTIME` accepts a local path, `file://` path, pinned `hf://owner/repository@revision[/artifact.onnx]`, or an HTTP(S) `.onnx` URL accompanied by `WITH.sha256`. `TRITON_INFERENCE_SERVER` accepts a plain absolute HTTP(S) service URL; there is no `endpoint://` wrapper. A resolver never guesses task or tensor semantics.
 
 | Artifact form | Required interpretation | Compatible execution paths |
 |---|---|---|
-| ONNX | Portable graph plus declared labels, tokenizer, or processor assets | `onnxruntime`; Triton ONNX backend |
-| `.pt` / `.pth` | Explicit TorchScript, exported-program, or weights-bundle subtype; the suffix alone is insufficient | `transformers`; compatible Triton backend |
-| Safetensors | Weights bundled with architecture, configuration, tokenizer, and processor assets | `transformers`, `vllm`, `sglang` |
-| GGUF | llama.cpp-compatible weights and metadata | `llama_cpp` embedded execution or llama-server |
+| ONNX | Portable graph plus declared labels and processor options | `ONNX_RUNTIME`; any compatible service behind `TRITON_INFERENCE_SERVER` |
+| `.pt` / `.pth` | Explicit TorchScript, exported-program, or weights-bundle subtype; the suffix alone is insufficient | Future `TRANSFORMERS`; compatible external service |
+| Safetensors | Weights bundled with architecture, configuration, tokenizer, and processor assets | Future `TRANSFORMERS`, `VLLM`, or `SGLANG` Runtime |
+| GGUF | llama.cpp-compatible weights and metadata | Future `LLAMA_CPP` Runtime |
 
 Unsafe pickle loading and repository `trust_remote_code` are disabled by default. Third-party model code requires a pinned source and an explicitly trusted isolated worker environment; `vql-kernel` never imports it.
 
 Remote bundles are downloaded to a temporary path and atomically installed under `$VQL_HOME/cache/models/<bundle-digest>/`. Local files remain in place and endpoints create no cache entry. The Catalog stores source identity, selected files, immutable revision, and bundle digest rather than model bytes. Offline execution uses local files or a prewarmed cache. Credentials are resolved through the secret provider and never appear in `SHOW CREATE`.
 
-Integrating an open-source model follows five steps:
+Integrating an embedded open-source model follows five steps:
 
 1. Pin its source revision or bundle digest.
 2. Select a Runtime that supports the artifact or endpoint protocol.
-3. Select PreProcessor and PostProcessor implementations compatible with the Model type and Runtime contracts.
-4. Declare their typed options in the Model definition.
+3. Declare the Runtime-owned input and output options.
+4. Run `RESOLVE MODEL` to materialize and validate it.
 5. Pass processor contract tests and one real-model conformance fixture.
 
-A familiar model family should need only Model DDL. A new reusable tensor layout adds one narrow processor implementation and focused fixtures. Model-specific arbitrary code remains in an isolated worker or a supported external inference service.
+A familiar model family should need only Model DDL. A new reusable embedded tensor layout adds one narrow internal processor implementation and focused fixtures. A service Runtime instead owns all model-specific preprocessing and postprocessing and exposes the typed capability contract. Model-specific arbitrary code remains in an isolated worker or a supported external inference service.
 
 ### 10.4 `InferenceExec`, Scheduling, and Failure
 
@@ -855,10 +828,10 @@ The physical operator evaluates only domain arguments into a temporary Arrow `Re
 ```text
 domain Arrow values
   → materialize/decode as required
-  → PreProcessor
+  → embedded pipeline or typed service codec
   → local scheduler or bounded remote submission
-  → RuntimeSession
-  → PostProcessor
+  → embedded RuntimeSession or service-owned pipeline
+  → canonical Arrow conversion
   → nullable canonical Arrow result column
 ```
 

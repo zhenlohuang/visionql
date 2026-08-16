@@ -11,9 +11,10 @@ VisionQL 是面向多模态数据的批流一体查询与处理引擎。本文�
 - [x] 多模态类型系统：`IMAGE`、`VIDEO`、`BOX2D`
 - [x] 图片目录表（`USING IMAGES`）与 `UNNEST` 检测结果展开
 - [x] 视频目录表（`USING VIDEOS`，建表时按 fps 展开为帧表）
-- [x] 类型化模型接口：`CREATE MODEL <name> TYPE OBJECT_DETECTION` + `IMAGE_DETECTION('<model>', image, ...)`，Model 名称与语义参数在规划期解析
-- [x] Model 配置契约：`runtime.*`、`pre_processor.kind/options`、`post_processor.kind/options`，完整配置写入 Query Manifest
-- [x] 通用推理流水线（[design.md §10](./docs/design.md)）：PreProcessor → Runtime → PostProcessor；本地 `onnxruntime` 批量推理与 Triton KServe V2 HTTP 远程推理
+- [x] 类型化模型接口：`CREATE MODEL <name> TYPE OBJECT_DETECTION ... USING <runtime>` + `IMAGE_DETECTION('<model>', image, ...)`，Model 名称与语义参数在规划期解析
+- [x] Model 生命周期：`CREATE MODEL` 仅声明且不触发网络；`RESOLVE MODEL` 显式执行下载、缓存、哈希或服务契约校验；未解析 Model 不可查询
+- [x] Runtime 绑定配置：`WITH` 由 `USING` 选中的 Runtime 独占解析，不存在全局 `runtime.*` / processor 配置命名空间
+- [x] 推理执行（[design.md §10](./docs/design.md)）：`ONNX_RUNTIME` 使用 VisionQL 内部 PreProcessor → Runtime → PostProcessor；`TRITON_INFERENCE_SERVER` 由服务端负责完整前后处理，VisionQL 只处理类型化协议与 Arrow 转换
 - [x] DataFusion `FunctionFactory` 驱动的 SQL 表达式函数与库态 Python UDF
 - [x] Sink：Console
 - [x] SQL shell、`vql run job.sql`（脚本顺序执行）、Python 库接口（`sess.sql()`、Arrow 结果交换、notebook 富显示）

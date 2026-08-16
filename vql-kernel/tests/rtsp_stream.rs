@@ -18,17 +18,24 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-#[ignore = "requires mediamtx, ffmpeg, people-detection.mp4, and yolo26n.onnx"]
 fn real_rtsp_stream_detects_people_from_a_local_video() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("vql-kernel has a workspace parent");
     let video = workspace.join("data/datasets/videos/sample-videos/people-detection.mp4");
     let model = workspace.join("data/models/yolo26n.onnx");
-    assert!(video.is_file(), "missing {}", video.display());
-    assert!(model.is_file(), "missing {}", model.display());
-    require_command("mediamtx", "--version");
-    require_command("ffmpeg", "-version");
+    if !video.is_file()
+        || !model.is_file()
+        || !command_available("mediamtx", "--version")
+        || !command_available("ffmpeg", "-version")
+    {
+        eprintln!(
+            "skipping RTSP system test: mediamtx, ffmpeg, {}, and {} are required",
+            video.display(),
+            model.display()
+        );
+        return;
+    }
 
     let temp = tempdir().expect("create RTSP integration temp directory");
     let address = reserve_address();
@@ -99,10 +106,13 @@ fn real_rtsp_stream_detects_people_from_a_local_video() {
         .expect("create RTSP stream");
     session
         .sql(&format!(
-            "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'file://{}'",
+            "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'file://{}' USING ONNX_RUNTIME",
             model.display()
         ))
         .expect("create YOLO26 Model");
+    session
+        .sql("RESOLVE MODEL detector")
+        .expect("resolve YOLO26 Model");
 
     let statement = session
         .sql(
@@ -142,16 +152,13 @@ fn real_rtsp_stream_detects_people_from_a_local_video() {
     assert!(metrics.watermark_ms().is_some());
 }
 
-fn require_command(name: &str, version_arg: &str) {
-    assert!(
-        Command::new(name)
-            .arg(version_arg)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success()),
-        "{name} is required for the RTSP integration test"
-    );
+fn command_available(name: &str, version_arg: &str) -> bool {
+    Command::new(name)
+        .arg(version_arg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn reserve_address() -> SocketAddr {

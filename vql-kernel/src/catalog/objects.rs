@@ -101,14 +101,63 @@ pub(crate) struct ModelDef {
     pub(crate) name: String,
     pub(crate) model_type: ModelType,
     pub(crate) source: String,
+    pub(crate) runtime_kind: String,
+    #[serde(default)]
+    pub(crate) options: BTreeMap<String, serde_json::Value>,
+    pub(crate) declaration_fingerprint: String,
+    #[serde(default)]
+    pub(crate) resolved: Option<ResolvedModelSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ResolvedModelSpec {
     pub(crate) resolved_source: String,
     pub(crate) artifact_hash: Option<String>,
-    pub(crate) runtime: RuntimeSpec,
-    pub(crate) pre_processor: ProcessorSpec,
-    pub(crate) post_processor: ProcessorSpec,
+    pub(crate) execution: ResolvedExecutionSpec,
     pub(crate) semantic_fingerprint: String,
     #[serde(default)]
     pub(crate) volatile: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub(crate) enum ResolvedExecutionSpec {
+    Embedded {
+        runtime: RuntimeSpec,
+        pre_processor: ProcessorSpec,
+        post_processor: ProcessorSpec,
+    },
+    Service {
+        runtime: RuntimeSpec,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ResolvedModelDef {
+    pub(crate) name: String,
+    pub(crate) model_type: ModelType,
+    pub(crate) source: String,
+    pub(crate) resolved_source: String,
+    pub(crate) artifact_hash: Option<String>,
+    pub(crate) execution: ResolvedExecutionSpec,
+    pub(crate) semantic_fingerprint: String,
+    pub(crate) volatile: bool,
+}
+
+impl ModelDef {
+    pub(crate) fn resolved_definition(&self) -> Option<ResolvedModelDef> {
+        let resolved = self.resolved.as_ref()?;
+        Some(ResolvedModelDef {
+            name: self.name.clone(),
+            model_type: self.model_type,
+            source: self.source.clone(),
+            resolved_source: resolved.resolved_source.clone(),
+            artifact_hash: resolved.artifact_hash.clone(),
+            execution: resolved.execution.clone(),
+            semantic_fingerprint: resolved.semantic_fingerprint.clone(),
+            volatile: resolved.volatile,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 mod yolo;
 
 pub(super) use yolo::{
-    YoloPostProcessorFactory, filter_and_scatter_detections, mock_detection_output,
-    mock_primary_label,
+    YoloPostProcessorFactory, canonical_detection_output, filter_and_scatter_detections,
+    mock_detection_output, mock_primary_label,
 };

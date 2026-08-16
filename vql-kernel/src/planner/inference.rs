@@ -27,7 +27,9 @@ use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::catalog::{DefinitionSnapshot, ModelDef, ModelType};
+use crate::catalog::{
+    DefinitionSnapshot, ModelType, ResolvedExecutionSpec, ResolvedModelDef, RuntimeSpec,
+};
 use crate::models::{
     BoundInferenceParams, ModelRuntime, bind_inference_params, semantic_fingerprint,
 };
@@ -40,7 +42,7 @@ struct InferenceNode {
     output_name: String,
     schema: DFSchemaRef,
     operation: String,
-    model: ModelDef,
+    model: ResolvedModelDef,
     invocation: BoundInferenceParams,
     invocation_fingerprint: String,
     runtime: Arc<ModelRuntime>,
@@ -55,7 +57,7 @@ impl InferenceNode {
         input_expr: Expr,
         output_name: String,
         operation: String,
-        model: ModelDef,
+        model: ResolvedModelDef,
         invocation: BoundInferenceParams,
         invocation_fingerprint: String,
         runtime: Arc<ModelRuntime>,
@@ -93,6 +95,17 @@ impl InferenceNode {
             &self.model.semantic_fingerprint,
             &self.input_expr,
         )
+    }
+}
+
+fn execution_summary(model: &ResolvedModelDef) -> (&RuntimeSpec, &str, &str) {
+    match &model.execution {
+        ResolvedExecutionSpec::Embedded {
+            runtime,
+            pre_processor,
+            post_processor,
+        } => (runtime, &pre_processor.kind, &post_processor.kind),
+        ResolvedExecutionSpec::Service { runtime } => (runtime, "service", "service"),
     }
 }
 
@@ -152,15 +165,16 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
     }
 
     fn fmt_for_explain(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        let (runtime, pre_processor, post_processor) = execution_summary(&self.model);
         write!(
             formatter,
             "InferenceNode: operation={}, model={}, runtime={}, protocol={}, pre_processor={}, post_processor={}, output={}, mutable_endpoint={}",
             self.operation,
             self.model.name,
-            self.model.runtime.kind,
-            self.model.runtime.protocol.as_deref().unwrap_or("embedded"),
-            self.model.pre_processor.kind,
-            self.model.post_processor.kind,
+            runtime.kind,
+            runtime.protocol.as_deref().unwrap_or("embedded"),
+            pre_processor,
+            post_processor,
             self.output_name,
             self.model.volatile
         )
@@ -286,7 +300,12 @@ fn rewrite_plan_node(
             let invocation = bind_inference_params(classes, min_confidence)
                 .map_err(|error| DataFusionError::Plan(error.to_string()))?;
             let invocation_fingerprint = semantic_fingerprint(&invocation);
-            let model = model.definition.clone();
+            let model = model.definition.resolved_definition().ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "model '{}' is not resolved; run RESOLVE MODEL {}",
+                    model.definition.name, model.definition.name
+                ))
+            })?;
             let output_name = inference_output_name(
                 "IMAGE_DETECTION",
                 &model,
@@ -332,7 +351,7 @@ fn rewrite_plan_node(
 
 fn inference_output_name(
     operation: &str,
-    model: &ModelDef,
+    model: &ResolvedModelDef,
     invocation_fingerprint: &str,
     input: &Expr,
     volatile_id: &mut u64,
@@ -535,7 +554,7 @@ struct InferenceExec {
     schema: SchemaRef,
     output_name: String,
     operation: String,
-    model: ModelDef,
+    model: ResolvedModelDef,
     invocation: BoundInferenceParams,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
@@ -551,7 +570,7 @@ impl InferenceExec {
         schema: SchemaRef,
         output_name: String,
         operation: String,
-        model: ModelDef,
+        model: ResolvedModelDef,
         invocation: BoundInferenceParams,
         runtime: Arc<ModelRuntime>,
         fail_on_error: Arc<AtomicBool>,
@@ -596,10 +615,11 @@ impl DisplayAs for InferenceExec {
         _format: DisplayFormatType,
         formatter: &mut Formatter<'_>,
     ) -> std::fmt::Result {
+        let (runtime, _, _) = execution_summary(&self.model);
         write!(
             formatter,
             "InferenceExec: operation={}, model={}, runtime={}, output={}",
-            self.operation, self.model.name, self.model.runtime.kind, self.output_name
+            self.operation, self.model.name, runtime.kind, self.output_name
         )
     }
 }

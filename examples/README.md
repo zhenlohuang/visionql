@@ -74,6 +74,7 @@ with Maturin, run:
 python examples/python/image_filtering.py
 ```
 
-All examples use the same `yolo26n.onnx` export. `CREATE MODEL ... WITH (...)` declares the Runtime,
-PreProcessor, and PostProcessor contract; each `IMAGE_DETECTION` call supplies query-specific classes
-and confidence. Remove `data/.vql/` when you intentionally want a fresh development catalog.
+All examples use the same `yolo26n.onnx` export. `CREATE MODEL ... USING ONNX_RUNTIME WITH (...)`
+declares the Runtime-scoped input and output contract, and `RESOLVE MODEL` validates the artifact
+before use. Each `IMAGE_DETECTION` call supplies query-specific classes and confidence. Remove
+`data/.vql/` when you intentionally want a fresh development catalog.

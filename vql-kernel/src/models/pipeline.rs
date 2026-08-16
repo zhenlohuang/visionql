@@ -48,16 +48,6 @@ impl TensorContract {
     }
 }
 
-pub(super) fn kserve_datatype(dtype: &DataType) -> Result<&'static str> {
-    match dtype {
-        DataType::Float32 => Ok("FP32"),
-        unsupported => Err(VqlError::new(
-            ErrorCode::Execution,
-            format!("tensor dtype {unsupported} is not supported by KServe V2 HTTP/JSON"),
-        )),
-    }
-}
-
 pub(super) fn validate_shape(
     role: &str,
     name: &str,

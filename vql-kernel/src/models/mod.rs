@@ -12,7 +12,7 @@ mod runtime;
 mod scheduler;
 mod triton_backend;
 
-pub(crate) use definition::{resolve_model, semantic_fingerprint};
+pub(crate) use definition::semantic_fingerprint;
 pub(crate) use params::{BoundInferenceParams, bind_inference_params};
 pub(crate) use registry::PipelineRegistry;
 pub(crate) use runtime::{ModelCounters, ModelRuntime, image_detection};

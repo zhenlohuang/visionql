@@ -27,6 +27,7 @@ pub(crate) struct CreateModel {
     pub(crate) name: String,
     pub(crate) model_type: ModelType,
     pub(crate) source: String,
+    pub(crate) runtime_kind: String,
     pub(crate) options: BTreeMap<String, serde_json::Value>,
 }
 
@@ -44,6 +45,7 @@ pub(crate) enum VqlStatement {
     CreateTable(CreateTable),
     CreateStream(CreateStream),
     CreateModel(CreateModel),
+    ResolveModel { name: String },
     CreateFunction { sql: String },
     CreateSink { name: String, kind: SinkKind },
     Drop { kind: ShowKind, name: String },

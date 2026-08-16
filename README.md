@@ -91,15 +91,15 @@ The v0.1 contract registers one typed Model and calls the fixed built-in functio
 CREATE MODEL yolo
 TYPE OBJECT_DETECTION
 FROM 'file:///models/yolo.onnx'
+USING ONNX_RUNTIME
 WITH (
-  runtime.kind = 'onnxruntime',
-  pre_processor.kind = 'vision.image_tensor@1',
-  pre_processor.options = {
-    input_name = 'images', width = 640, height = 640, resize = 'letterbox'
+  input = {
+    name = 'images', width = 640, height = 640, resize = 'letterbox'
   },
-  post_processor.kind = 'vision.yolo_e2e@1',
-  post_processor.options = {output_name = 'output0', labels = 'coco80'}
+  output = {name = 'output0', format = 'yolo_e2e', labels = 'coco80'}
 );
+
+RESOLVE MODEL yolo;
 
 SELECT uri,
        IMAGE_DETECTION(
@@ -111,17 +111,29 @@ SELECT uri,
 FROM sample_images;
 ```
 
-`runtime.kind` selects an implementation; `runtime.protocol` selects a supported wire protocol. Processor-specific fields stay inside `pre_processor.options` and `post_processor.options`. The checked-in inference implementation, SQL cases, and runnable examples use this contract.
+`USING` selects the Runtime, and `WITH` is interpreted only by that Runtime. `CREATE MODEL` is a fast local declaration: it does not download an artifact or contact a service. `RESOLVE MODEL` performs the potentially slow download, cache installation, checksum verification, or service metadata validation. Queries reject a Model that has not been resolved.
+
+Use `SHOW MODELS` to inspect each declaration's `UNRESOLVED` or `RESOLVED` status.
 
 ### Model sources
 
 | Source | Example | Behavior |
 |---|---|---|
-| Local bundle | `'./model.onnx'` or `'file:///models/model.gguf'` | Read in place and open only through a compatible Runtime |
-| Hugging Face bundle | `'hf://owner/repository@<commit>'` | Pin selected files and cache the complete bundle by digest |
-| Inference service | `'endpoint://http://triton-prod:8000'` | Bind through the Runtime's declared protocol, such as Triton KServe V2 |
+| Local ONNX artifact | `'./model.onnx'` or `'file:///models/model.onnx'` | `RESOLVE MODEL` hashes it in place; no cache copy |
+| Hugging Face artifact | `'hf://owner/repository@<commit>/model.onnx'` | `RESOLVE MODEL` downloads and caches it by digest |
+| Inference service | `'http://triton-prod:8000'` | `RESOLVE MODEL` validates the Runtime-specific service contract |
 
-The Runtime registry is intentionally explicit: `onnxruntime` and Triton with `kserve_v2_http` are v0.1 paths; Triton gRPC, `vllm`, `sglang`, and `llama_cpp` are roadmap-gated, while `transformers` supports v0.3 embedding. `openai` may be a protocol for a compatible Runtime but is not a Runtime kind. ONNX, explicitly classified `.pt`/`.pth`, Safetensors, and GGUF are artifact forms rather than interchangeable loaders.
+```sql
+CREATE MODEL production_detector
+TYPE OBJECT_DETECTION
+FROM 'http://triton-prod:8000'
+USING TRITON_INFERENCE_SERVER
+WITH (model = 'detector', version = '42');
+
+RESOLVE MODEL production_detector;
+```
+
+The Runtime registry is intentionally explicit. `ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER` are the v0.1 paths; `TRANSFORMERS`, `VLLM`, `SGLANG`, and `LLAMA_CPP` remain roadmap-gated. Embedded ONNX execution derives its VisionQL-owned pre/post-processing pipeline from `WITH.input` and `WITH.output`. A Triton service instead owns the complete preprocessing, inference, and postprocessing path: VisionQL sends encoded images and accepts only the canonical typed detection result, never service-specific raw tensors.
 
 Set `HF_TOKEN` when resolving a private Hugging Face bundle. Credentials are provided through secret configuration and never persisted in visible Model DDL.
 

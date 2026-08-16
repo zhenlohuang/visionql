@@ -40,12 +40,13 @@ The real-data integration test starts MediaMTX, publishes
 public SQL, and runs `data/models/yolo26n.onnx` over eight sampled RTSP frames:
 
 ```bash
-cargo test -p vql-kernel --test rtsp_stream --locked -- --ignored --nocapture
+cargo test -p vql-kernel --test rtsp_stream --locked -- --nocapture
 ```
 
-It is ignored by default because MediaMTX, FFmpeg, the dataset, and the Model are external test
-dependencies. Streaming `TUMBLE` remains an unfinished v0.1 stateful operator; these RTSP scenarios
-deliberately exercise the currently supported stateless plan.
+It runs by default when MediaMTX, FFmpeg, the dataset, and the Model are present, and reports a skip
+message otherwise because those dependencies are external to the repository. Streaming `TUMBLE`
+remains an unfinished v0.1 stateful operator; these RTSP scenarios deliberately exercise the
+currently supported stateless plan.
 
 ## Layout
 
@@ -64,7 +65,7 @@ tests/
 - `ddl/` covers one DDL statement per case.
 - `functions/` covers one built-in function per case.
 - `scenarios/` covers a complete user query that crosses several features.
-- `rtsp_stream.rs` owns the ignored MediaMTX/FFmpeg real-RTSP system scenario.
+- `rtsp_stream.rs` owns the prerequisite-gated MediaMTX/FFmpeg real-RTSP system scenario.
 
 A case consists of one main statement and its expected result. Setup and teardown are optional:
 

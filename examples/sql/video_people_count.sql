@@ -6,24 +6,25 @@ WITH (fps = 5);
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM './data/models/yolo26n.onnx'
+USING ONNX_RUNTIME
 WITH (
-  runtime.kind = 'onnxruntime',
-  pre_processor.kind = 'vision.image_tensor@1',
-  pre_processor.options = {
-    input_name = 'images',
+  input = {
+    name = 'images',
     width = 640,
     height = 640,
     resize = 'letterbox',
     color_space = 'rgb',
     layout = 'nchw'
   },
-  post_processor.kind = 'vision.yolo_e2e@1',
-  post_processor.options = {
-    output_name = 'output0',
+  output = {
+    name = 'output0',
+    format = 'yolo_e2e',
     box_format = 'xyxy',
     labels = 'coco80'
   }
 );
+
+RESOLVE MODEL yolo26n;
 
 CREATE SINK console_output TYPE console;
 

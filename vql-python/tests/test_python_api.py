@@ -46,8 +46,9 @@ def test_image_filtering_python_udf_then_model(tmp_path):
     ).collect()
     session.sql(
         "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' "
-        "WITH (post_processor.options={labels=['person']})"
+        "USING ONNX_RUNTIME WITH (output={labels=['person']})"
     ).collect()
+    session.sql("RESOLVE MODEL detector").collect()
     table = session.sql(
         "SELECT CARDINALITY("
         "IMAGE_DETECTION('detector', image, "

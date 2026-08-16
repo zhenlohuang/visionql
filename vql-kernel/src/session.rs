@@ -13,14 +13,14 @@ use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{
-    FunctionImplementation, ObjectKind, SinkDef, StreamDef, TableDef, TableProviderKind,
+    FunctionImplementation, ModelDef, ObjectKind, SinkDef, StreamDef, TableDef, TableProviderKind,
 };
 use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::rtsp::{rtsp_schema, start_rtsp_source};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
 use crate::functions::{VqlFunctionFactory, materialize_batch_images};
 use crate::media::{MediaCounters, MediaRuntime};
-use crate::models::{ModelCounters, resolve_model};
+use crate::models::{ModelCounters, semantic_fingerprint};
 use crate::planner::{
     bind_stream_epoch, context_for_function_ddl, context_for_snapshot, normalize_function_ddl,
     plan_statement, wrap_console_sink,
@@ -638,6 +638,7 @@ impl Session {
             VqlStatement::CreateTable(create) => self.create_table(create).map(Statement::Ddl),
             VqlStatement::CreateStream(create) => self.create_stream(create).map(Statement::Ddl),
             VqlStatement::CreateModel(create) => self.create_model(create).map(Statement::Ddl),
+            VqlStatement::ResolveModel { name } => self.resolve_model(&name).map(Statement::Ddl),
             VqlStatement::CreateFunction { sql } => self.create_function(&sql).map(Statement::Ddl),
             VqlStatement::CreateSink { name, kind } => {
                 self.create_sink(&name, kind).map(Statement::Ddl)
@@ -811,24 +812,67 @@ impl Session {
     }
 
     fn create_model(&self, create: CreateModel) -> Result<DdlResult> {
-        let (runtime, pre_processor, post_processor) = self
-            .engine
-            .inner
-            .pipelines
-            .model_specs_for_options(create.model_type, &create.source, &create.options)?;
-        let model = resolve_model(
-            &create.name,
+        let name = create.name.to_ascii_lowercase();
+        let declaration_fingerprint = semantic_fingerprint(&(
             create.model_type,
             &create.source,
-            runtime,
-            pre_processor,
-            post_processor,
-            self.engine.inner.config.model_cache_dir(),
-        )?;
-        self.engine.inner.pipelines.validate_model(&model)?;
+            &create.runtime_kind,
+            &create.options,
+        ));
+        let model = ModelDef {
+            name,
+            model_type: create.model_type,
+            source: create.source,
+            runtime_kind: create.runtime_kind,
+            options: create.options,
+            declaration_fingerprint,
+            resolved: None,
+        };
+        self.engine.inner.pipelines.validate_declaration(&model)?;
         let revision = self.engine.inner.catalog.create_model(&model)?;
         Ok(message_result(format!(
             "created model '{}' at revision {revision}",
+            model.name
+        )))
+    }
+
+    fn resolve_model(&self, name: &str) -> Result<DdlResult> {
+        let name = name.to_ascii_lowercase();
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let model_object = snapshot.model(&name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("model '{name}' does not exist"),
+            )
+        })?;
+        let expected_revision = model_object.revision;
+        let mut model = model_object.definition.clone();
+        let cancellation = CancellationToken::new();
+        {
+            let mut active = self.active_query.lock().map_err(|_| {
+                VqlError::new(ErrorCode::Internal, "active query lock was poisoned")
+            })?;
+            *active = Some(cancellation.clone());
+        }
+        let _active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
+        let resolved =
+            self.engine
+                .inner
+                .runtime
+                .block_on(self.engine.inner.pipelines.resolve_model(
+                    &model,
+                    self.engine.inner.config.model_cache_dir(),
+                    cancellation,
+                ))?;
+        model.resolved = Some(resolved);
+        let revision = self
+            .engine
+            .inner
+            .catalog
+            .update_model(&model, expected_revision)?;
+        self.engine.inner.models.evict_stale()?;
+        Ok(message_result(format!(
+            "resolved model '{}' at revision {revision}",
             model.name
         )))
     }
@@ -954,18 +998,11 @@ impl Session {
         if kind == ShowKind::Streams {
             return self.show_streams();
         }
+        if kind == ShowKind::Models {
+            return self.show_models();
+        }
         let snapshot = self.engine.inner.catalog.snapshot()?;
         let rows = match kind {
-            ShowKind::Models => snapshot
-                .models()
-                .map(|(name, value)| {
-                    (
-                        name.to_owned(),
-                        format!("{:?}", value.definition.model_type),
-                        value.revision,
-                    )
-                })
-                .collect::<Vec<_>>(),
             ShowKind::Functions => snapshot
                 .functions()
                 .map(|(name, value)| {
@@ -986,7 +1023,7 @@ impl Session {
                     )
                 })
                 .collect(),
-            ShowKind::Tables | ShowKind::Streams => unreachable!(),
+            ShowKind::Tables | ShowKind::Streams | ShowKind::Models => unreachable!(),
         };
         named_objects_result(rows)
     }
@@ -1123,6 +1160,65 @@ impl Session {
         })?;
         Ok(DdlResult {
             message: format!("{} stream(s)", batch.num_rows()),
+            batches: vec![batch],
+        })
+    }
+
+    fn show_models(&self) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let models = snapshot.models().collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("model_name", DataType::Utf8, false),
+            Field::new("type", DataType::Utf8, false),
+            Field::new("runtime", DataType::Utf8, false),
+            Field::new("status", DataType::Utf8, false),
+            Field::new("revision", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(
+                    models.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(StringArray::from(vec!["OBJECT_DETECTION"; models.len()])),
+                Arc::new(StringArray::from(
+                    models
+                        .iter()
+                        .map(|(_, model)| {
+                            model
+                                .definition
+                                .runtime_kind
+                                .to_ascii_uppercase()
+                                .replace('-', "_")
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    models
+                        .iter()
+                        .map(|(_, model)| {
+                            if model.definition.resolved.is_some() {
+                                "RESOLVED"
+                            } else {
+                                "UNRESOLVED"
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    models
+                        .iter()
+                        .map(|(_, model)| model.revision)
+                        .collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .map_err(|error| {
+            VqlError::new(ErrorCode::Execution, "failed to build Model catalog result")
+                .with_source(error)
+        })?;
+        Ok(DdlResult {
+            message: format!("{} model(s)", batch.num_rows()),
             batches: vec![batch],
         })
     }
@@ -1309,7 +1405,35 @@ mod tests {
     use crate::EngineConfig;
     use arrow::array::{Array, Float64Array};
     use image::{Rgb, RgbImage};
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
     use tempfile::tempdir;
+
+    fn triton_metadata_body() -> &'static str {
+        r#"{"inputs":[{"name":"image","datatype":"BYTES","shape":[-1]}],"outputs":[{"name":"detections","datatype":"BYTES","shape":[-1]}]}"#
+    }
+
+    fn write_http_response(stream: &mut std::net::TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    }
+
+    fn serve_triton_metadata_once() -> Option<(SocketAddr, std::thread::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+        let address = listener.local_addr().ok()?;
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            write_http_response(&mut stream, triton_metadata_body());
+        });
+        Some((address, server))
+    }
 
     #[test]
     fn catalog_reopens_created_image_table() {
@@ -1350,7 +1474,7 @@ mod tests {
         session
             .sql(
                 "CREATE MODEL detector TYPE OBJECT_DETECTION \
-                 FROM 'mock://person'",
+                 FROM 'mock://person' USING ONNX_RUNTIME",
             )
             .unwrap();
 
@@ -1358,6 +1482,80 @@ mod tests {
 
         assert!(matches!(result, Statement::Ddl(_)));
         assert!(session.sql("SELECT 1").unwrap().collect().is_ok());
+    }
+
+    #[test]
+    fn create_model_is_local_and_inference_requires_resolve() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        RgbImage::from_pixel(8, 8, Rgb([10, 20, 30]))
+            .save(photos.join("one.png"))
+            .unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+
+        session
+            .run_script(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}';
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
+                 CREATE MODEL remote TYPE OBJECT_DETECTION FROM 'http://127.0.0.1:9' \
+                   USING TRITON_INFERENCE_SERVER WITH (model='remote');",
+                photos.display()
+            ))
+            .unwrap();
+
+        let snapshot = engine.inner.catalog.snapshot().unwrap();
+        assert!(
+            snapshot
+                .model("detector")
+                .unwrap()
+                .definition
+                .resolved
+                .is_none()
+        );
+        assert!(
+            snapshot
+                .model("remote")
+                .unwrap()
+                .definition
+                .resolved
+                .is_none()
+        );
+        let shown = session.sql("SHOW MODELS").unwrap().collect().unwrap();
+        assert_eq!(shown[0].schema().field(3).name(), "status");
+        let statuses = shown[0]
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(statuses.value(0), "UNRESOLVED");
+        assert_eq!(statuses.value(1), "UNRESOLVED");
+        let error = session
+            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
+            .unwrap_err();
+        assert!(error.message.contains("RESOLVE MODEL detector"));
+
+        session.sql("RESOLVE MODEL detector").unwrap();
+        assert!(
+            engine
+                .inner
+                .catalog
+                .snapshot()
+                .unwrap()
+                .model("detector")
+                .unwrap()
+                .definition
+                .resolved
+                .is_some()
+        );
+        let shown = session.sql("SHOW MODELS").unwrap().collect().unwrap();
+        let statuses = shown[0]
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(statuses.value(0), "RESOLVED");
     }
 
     #[test]
@@ -1373,7 +1571,8 @@ mod tests {
         session
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
-                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';",
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
+                 RESOLVE MODEL detector;",
                 photos.display()
             ))
             .unwrap();
@@ -1388,7 +1587,10 @@ mod tests {
         assert_eq!(engine.inner.models.cached_pipeline_count(), 0);
 
         session
-            .sql("CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'")
+            .run_script(
+                "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
+                 RESOLVE MODEL detector;",
+            )
             .unwrap();
         session
             .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
@@ -1408,9 +1610,9 @@ mod tests {
             session
                 .sql(
                     "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' \
-                     WITH (runtime.kind='onnxruntime', \
-                           pre_processor.options={input_name='pixels', width=320, height=192}, \
-                           post_processor.options={output_name='detections', labels=['person']})",
+                     USING ONNX_RUNTIME \
+                     WITH (input={name='pixels', width=320, height=192}, \
+                           output={name='detections', labels=['person']})",
                 )
                 .unwrap();
         }
@@ -1419,14 +1621,13 @@ mod tests {
         let snapshot = engine.inner.catalog.snapshot().unwrap();
         let model = &snapshot.model("detector").unwrap().definition;
 
-        assert_eq!(model.runtime.kind, "onnxruntime");
-        assert_eq!(model.pre_processor.kind, "vision.image_tensor@1");
-        assert_eq!(model.pre_processor.options["width"], serde_json::json!(320));
-        assert_eq!(model.post_processor.kind, "vision.yolo_e2e@1");
+        assert_eq!(model.runtime_kind, "onnx-runtime");
+        assert_eq!(model.options["input"]["width"], serde_json::json!(320));
         assert_eq!(
-            model.post_processor.options["labels"],
+            model.options["output"]["labels"],
             serde_json::json!(["person"])
         );
+        assert!(model.resolved.is_none());
     }
 
     #[test]
@@ -1587,7 +1788,8 @@ mod tests {
         session
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
-                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
+                 RESOLVE MODEL detector;
                  CREATE FUNCTION detect_people(IMAGE)
                  RETURN IMAGE_DETECTION(
                    'detector', $1,
@@ -1625,7 +1827,8 @@ mod tests {
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
                  CREATE MODEL detector TYPE OBJECT_DETECTION
-                 FROM 'mock://person';",
+                 FROM 'mock://person' USING ONNX_RUNTIME;
+                 RESOLVE MODEL detector;",
                 photos.display()
             ))
             .unwrap();
@@ -1748,7 +1951,8 @@ mod tests {
         session
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
-                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';",
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
+                 RESOLVE MODEL detector;",
                 photos.display()
             ))
             .unwrap();
@@ -1795,14 +1999,18 @@ mod tests {
         deduplicated.collect().unwrap();
         assert_eq!(deduplicated.metrics().unwrap().inference_rows(), 1);
 
+        let Some((address, server)) = serve_triton_metadata_once() else {
+            return;
+        };
         session
-            .sql(
+            .run_script(&format!(
                 "CREATE MODEL remote TYPE OBJECT_DETECTION \
-                 FROM 'endpoint://http://127.0.0.1:9' \
-                 WITH (runtime.kind='triton', runtime.protocol='kserve_v2_http', \
-                       runtime.model_name='remote')",
-            )
+                 FROM 'http://{address}' USING TRITON_INFERENCE_SERVER \
+                 WITH (model='remote');
+                 RESOLVE MODEL remote;"
+            ))
             .unwrap();
+        server.join().unwrap();
         let volatile = session
             .sql(
                 "SELECT IMAGE_DETECTION('remote', image) AS first, \
@@ -1826,8 +2034,6 @@ mod tests {
 
     #[test]
     fn query_cancellation_reaches_model_scheduler() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
         use std::time::{Duration, Instant};
 
         let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
@@ -1839,16 +2045,14 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0_u8; 8192];
             let _ = stream.read(&mut buffer);
+            write_http_response(&mut stream, triton_metadata_body());
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut buffer);
             accepted_tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(500));
-            let body =
-                r#"{"outputs":[{"name":"output0","shape":[1,0,6],"datatype":"FP32","data":[]}]}"#;
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
+            let body = r#"{"outputs":[{"name":"detections","shape":[1],"datatype":"BYTES","data":["[]"]}]}"#;
+            write_http_response(&mut stream, body);
         });
         let temp = tempdir().unwrap();
         let photos = temp.path().join("photos");
@@ -1862,9 +2066,9 @@ mod tests {
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
                  CREATE MODEL remote TYPE OBJECT_DETECTION
-                 FROM 'endpoint://http://{address}'
-                 WITH (runtime.kind='triton', runtime.protocol='kserve_v2_http',
-                       runtime.model_name='remote');",
+                 FROM 'http://{address}' USING TRITON_INFERENCE_SERVER
+                 WITH (model='remote');
+                 RESOLVE MODEL remote;",
                 photos.display()
             ))
             .unwrap();
@@ -1950,16 +2154,20 @@ mod tests {
                 photos.display()
             ))
             .unwrap();
-        // A Triton endpoint model decodes the IMAGE before it would issue a request, so the
-        // decode failure below is reached without any network access. `mock://` cannot stand in
-        // here: it skips decoding entirely and always answers with a synthetic detection.
+        // A Triton service Model decodes the IMAGE before it issues an inference request, so the
+        // server only needs to serve metadata during RESOLVE MODEL. `mock://` cannot stand in
+        // here because it skips decoding and always returns a synthetic detection.
+        let Some((address, server)) = serve_triton_metadata_once() else {
+            return;
+        };
         session
-            .sql(
-                "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'endpoint://http://127.0.0.1:9' \
-                 WITH (runtime.kind = 'triton', runtime.protocol = 'kserve_v2_http', \
-                 runtime.model_name = 'detector')",
-            )
+            .run_script(&format!(
+                "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'http://{address}' \
+                 USING TRITON_INFERENCE_SERVER WITH (model='detector');
+                 RESOLVE MODEL detector;"
+            ))
             .unwrap();
+        server.join().unwrap();
 
         let query = session
             .sql(
@@ -2253,7 +2461,10 @@ mod tests {
             .unwrap();
         let session = engine.session().build().unwrap();
         session
-            .sql("CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'")
+            .run_script(
+                "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
+                 RESOLVE MODEL detector;",
+            )
             .unwrap();
 
         let statement = session

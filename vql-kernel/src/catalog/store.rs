@@ -128,6 +128,52 @@ impl CatalogStore {
         self.create_object("model", ObjectKind::Model, &definition.name, definition)
     }
 
+    pub(crate) fn update_model(
+        &self,
+        definition: &ModelDef,
+        expected_revision: i64,
+    ) -> Result<i64> {
+        let name = definition.name.to_ascii_lowercase();
+        let definition_json = serde_json::to_string(definition)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let current_revision = transaction
+            .query_row(
+                "SELECT head_revision FROM objects
+                 WHERE namespace='model' AND kind='model' AND name=?1",
+                [&name],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(current_revision) = current_revision else {
+            return Err(VqlError::new(
+                ErrorCode::NotFound,
+                format!("model '{name}' does not exist"),
+            ));
+        };
+        if current_revision != expected_revision {
+            return Err(VqlError::new(
+                ErrorCode::Catalog,
+                format!(
+                    "model '{name}' changed while RESOLVE MODEL was running; retry the statement"
+                ),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO revisions(namespace, kind, name, definition_json)
+             VALUES ('model', 'model', ?1, ?2)",
+            params![name, definition_json],
+        )?;
+        let revision = transaction.last_insert_rowid();
+        transaction.execute(
+            "UPDATE objects SET head_revision=?1
+             WHERE namespace='model' AND kind='model' AND name=?2",
+            params![revision, name],
+        )?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
     pub(crate) fn create_stream(&self, definition: &StreamDef) -> Result<i64> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
@@ -355,7 +401,7 @@ fn load_objects<T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
     use crate::catalog::{
-        EventTimePolicy, ObjectKind, RtspTransport, StreamDef, TableProviderKind,
+        EventTimePolicy, ModelType, ObjectKind, RtspTransport, StreamDef, TableProviderKind,
     };
     use crate::connectors::images::images_schema;
     use tempfile::tempdir;
@@ -448,5 +494,34 @@ mod tests {
         );
         catalog.drop_stream("entrance").unwrap();
         assert!(catalog.snapshot().unwrap().stream("entrance").is_none());
+    }
+
+    #[test]
+    fn model_update_rejects_a_stale_declaration_revision() {
+        let temp = tempdir().unwrap();
+        let catalog = CatalogStore::open(&temp.path().join("catalog.db")).unwrap();
+        let model = ModelDef {
+            name: "detector".to_owned(),
+            model_type: ModelType::ObjectDetection,
+            source: "mock://person".to_owned(),
+            runtime_kind: "onnx-runtime".to_owned(),
+            options: BTreeMap::new(),
+            declaration_fingerprint: "declaration".to_owned(),
+            resolved: None,
+        };
+        let declaration_revision = catalog.create_model(&model).unwrap();
+        catalog.update_model(&model, declaration_revision).unwrap();
+
+        let error = catalog
+            .update_model(&model, declaration_revision)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Catalog);
+        assert!(
+            error
+                .message
+                .contains("changed while RESOLVE MODEL was running")
+        );
+        assert_eq!(catalog.revision_count(ObjectKind::Model).unwrap(), 2);
     }
 }

@@ -21,6 +21,7 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
             sql: sql.to_owned(),
         }),
         "CREATE" => parse_create(&tokens),
+        "RESOLVE" => parse_resolve(&tokens),
         "ALTER" => invalid("ALTER is not supported; DROP and recreate the object"),
         "DROP" => parse_drop(&tokens),
         "SHOW" => parse_show(&tokens),
@@ -43,6 +44,16 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
             format!("unsupported or empty statement starting with '{first}'"),
         )),
     }
+}
+
+fn parse_resolve(tokens: &[Token]) -> Result<VqlStatement> {
+    if tokens.len() != 3 {
+        return invalid("expected RESOLVE MODEL <name>");
+    }
+    expect_word(tokens.get(1), "MODEL")?;
+    Ok(VqlStatement::ResolveModel {
+        name: identifier(tokens.get(2), "model name")?,
+    })
 }
 
 fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
@@ -309,8 +320,10 @@ fn parse_create_table(tokens: &[Token]) -> Result<VqlStatement> {
 }
 
 fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() < 7 {
-        return invalid("expected CREATE MODEL <name> TYPE OBJECT_DETECTION FROM '<source>'");
+    if tokens.len() < 9 {
+        return invalid(
+            "expected CREATE MODEL <name> TYPE OBJECT_DETECTION FROM '<source>' USING <runtime>",
+        );
     }
     let name = identifier(tokens.get(2), "model name")?;
     expect_word(tokens.get(3), "TYPE")?;
@@ -332,7 +345,11 @@ fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
     };
     expect_word(tokens.get(5), "FROM")?;
     let source = string_literal(tokens.get(6))?;
-    let mut index = 7;
+    expect_word(tokens.get(7), "USING")?;
+    let runtime_kind = identifier(tokens.get(8), "Runtime")?
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let mut index = 9;
     let mut options = BTreeMap::new();
     if index < tokens.len() {
         expect_word(tokens.get(index), "WITH")?;
@@ -345,6 +362,7 @@ fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
         name,
         model_type,
         source,
+        runtime_kind,
         options,
     }))
 }
@@ -691,31 +709,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_namespaced_model_options() {
+    fn parses_runtime_scoped_model_options() {
         let parsed = parse_statement(
             "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'file:///model.onnx' \
-             WITH (runtime.kind='onnxruntime', \
-                   pre_processor.kind='vision.image_tensor@1', \
-                   pre_processor.options={input_name='images', width=32, height=24}, \
-                   post_processor.kind='vision.yolo_e2e@1', \
-                   post_processor.options={output_name='output0', labels=['person']})",
+             USING ONNX_RUNTIME \
+             WITH (input={name='images', width=32, height=24}, \
+                   output={name='output0', format='yolo_e2e', labels=['person']})",
         )
         .unwrap();
         let VqlStatement::CreateModel(create) = parsed else {
             panic!("expected CREATE MODEL")
         };
 
+        assert_eq!(create.runtime_kind, "onnx-runtime");
         assert_eq!(
-            create.options["runtime.kind"],
-            serde_json::json!("onnxruntime")
+            create.options["input"],
+            serde_json::json!({"name": "images", "width": 32, "height": 24})
         );
         assert_eq!(
-            create.options["pre_processor.options"],
-            serde_json::json!({"input_name": "images", "width": 32, "height": 24})
+            create.options["output"],
+            serde_json::json!({"name": "output0", "format": "yolo_e2e", "labels": ["person"]})
         );
+    }
+
+    #[test]
+    fn parses_resolve_model() {
         assert_eq!(
-            create.options["post_processor.options"],
-            serde_json::json!({"output_name": "output0", "labels": ["person"]})
+            parse_statement("RESOLVE MODEL detector").unwrap(),
+            VqlStatement::ResolveModel {
+                name: "detector".to_owned(),
+            }
         );
     }
 
@@ -737,15 +760,15 @@ mod tests {
             ("CREATE TABLE out AS SELECT 1", "v0.3"),
             ("CREATE INDEX idx USING HNSW", "v0.3"),
             (
-                "CREATE MODEL clip TYPE IMAGE_EMBEDDING(512) FROM 'model.safetensors'",
+                "CREATE MODEL clip TYPE IMAGE_EMBEDDING(512) FROM 'model.safetensors' USING TRANSFORMERS",
                 "v0.3",
             ),
             (
-                "CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'model.onnx'",
+                "CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'model.onnx' USING ONNX_RUNTIME",
                 "未排期",
             ),
             (
-                "CREATE MODEL generator TYPE TEXT_GENERATION FROM 'model.gguf'",
+                "CREATE MODEL generator TYPE TEXT_GENERATION FROM 'model.gguf' USING LLAMA_CPP",
                 "未排期",
             ),
             ("SELECT embedding <-> other FROM values", "v0.3"),

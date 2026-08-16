@@ -292,6 +292,29 @@ pub(in crate::models) fn mock_detection_output(label: &str, rows: usize) -> Arra
     )
 }
 
+pub(in crate::models) fn canonical_detection_output(
+    rows: Vec<Vec<(String, f32, [f32; 4])>>,
+) -> ArrayRef {
+    let capacity = rows.len();
+    build_detection_array(
+        rows.into_iter().map(|row| {
+            Some(
+                row.into_iter()
+                    .map(|(label, confidence, [x, y, w, h])| Detection {
+                        label,
+                        confidence,
+                        x,
+                        y,
+                        w,
+                        h,
+                    })
+                    .collect(),
+            )
+        }),
+        capacity,
+    )
+}
+
 pub(in crate::models) fn mock_primary_label(spec: &ProcessorSpec) -> Result<String> {
     let format = match spec.kind.as_str() {
         "vision.yolo_e2e@1" => OutputFormat::UltralyticsEndToEnd,

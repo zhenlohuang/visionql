@@ -13,60 +13,105 @@ use super::pipeline::{
     BatchingOwner, RuntimeRequestBatch, RuntimeResponseBatch, RuntimeSession, TensorBatch,
     TensorContract,
 };
-use super::registry::{RuntimeFactory, deserialize_runtime_options, invalid_option};
-use crate::catalog::{ModelDef, ModelType, RuntimeSpec};
+use super::postprocess::YoloPostProcessorFactory;
+use super::preprocess::ImageTensorFactory;
+use super::registry::{
+    PostProcessorFactory, PreProcessorFactory, RuntimeFactory, RuntimeResolution,
+    deserialize_model_options, invalid_option,
+};
+use super::resolver::{resolve_onnx_source, validate_onnx_source};
+use crate::catalog::{
+    ModelDef, ModelType, ProcessorSpec, ResolvedExecutionSpec, ResolvedModelDef, RuntimeSpec,
+};
 use crate::{ErrorCode, Result, VqlError};
 
 const SUPPORTED_TYPES: &[ModelType] = &[ModelType::ObjectDetection];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OrtOptions {}
+struct OrtOptions {
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    input: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    output: BTreeMap<String, serde_json::Value>,
+}
 
 #[derive(Debug)]
 pub(super) struct OrtRuntimeFactory;
 
+#[async_trait]
 impl RuntimeFactory for OrtRuntimeFactory {
     fn kind(&self) -> &str {
-        "onnxruntime"
+        "onnx-runtime"
     }
 
     fn supported_types(&self) -> &[ModelType] {
         SUPPORTED_TYPES
     }
 
-    fn validate(&self, source: &str, spec: &RuntimeSpec) -> Result<()> {
-        if spec.protocol.is_some() {
-            return invalid_option(
-                "runtime.protocol",
-                "onnxruntime does not use a wire protocol",
-            );
+    fn validate_declaration(&self, model: &ModelDef) -> Result<()> {
+        let options = parse_options(&model.options)?;
+        validate_onnx_source(&model.source, options.sha256.as_deref())?;
+        ImageTensorFactory
+            .validate(&options.pre_processor)
+            .map_err(remap_onnx_option_error)?;
+        match options.post_processor.kind.as_str() {
+            "vision.yolo_e2e@1" => {
+                YoloPostProcessorFactory::end_to_end().validate(&options.post_processor)
+            }
+            "vision.yolo_raw@1" => {
+                YoloPostProcessorFactory::raw().validate(&options.post_processor)
+            }
+            "vision.xywh_normalized@1" => {
+                YoloPostProcessorFactory::xywh_normalized().validate(&options.post_processor)
+            }
+            _ => Err(VqlError::new(
+                ErrorCode::Internal,
+                "ONNX Runtime selected an unknown PostProcessor",
+            )),
         }
-        if source.starts_with("endpoint://") {
-            return invalid_option(
-                "runtime.kind",
-                "onnxruntime requires a local or cached ONNX artifact",
-            );
-        }
-        if !spec.options.is_empty() {
-            return invalid_option(
-                "runtime",
-                "onnxruntime does not accept binding options in v0.1",
-            );
-        }
-        let _: OrtOptions = deserialize_runtime_options(&spec.options)?;
-        if !source.starts_with("mock://") && !is_onnx_source(source) {
-            return invalid_option(
-                "source",
-                "onnxruntime requires an ONNX artifact with a .onnx suffix",
-            );
-        }
-        Ok(())
+        .map_err(remap_onnx_option_error)
     }
 
-    fn build(
+    async fn resolve(
         &self,
         model: &ModelDef,
+        cache_dir: &Path,
+        cancel: CancellationToken,
+    ) -> Result<RuntimeResolution> {
+        let options = parse_options(&model.options)?;
+        let source = model.source.clone();
+        let cache_dir = cache_dir.to_path_buf();
+        let expected_sha256 = options.sha256.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            resolve_onnx_source(&source, &cache_dir, expected_sha256.as_deref(), &cancel)
+        })
+        .await
+        .map_err(|error| {
+            VqlError::new(ErrorCode::Execution, "ONNX model resolve task failed").with_source(error)
+        })??;
+        Ok(RuntimeResolution {
+            resolved_source: resolved.resolved_source,
+            artifact_hash: resolved.artifact_hash,
+            execution: ResolvedExecutionSpec::Embedded {
+                runtime: RuntimeSpec {
+                    kind: self.kind().to_owned(),
+                    protocol: None,
+                    options: BTreeMap::new(),
+                },
+                pre_processor: options.pre_processor,
+                post_processor: options.post_processor,
+            },
+            volatile: false,
+        })
+    }
+
+    fn build_embedded(
+        &self,
+        model: &ResolvedModelDef,
+        _runtime: &RuntimeSpec,
         input: &TensorContract,
         output: &TensorContract,
     ) -> Result<Arc<dyn RuntimeSession>> {
@@ -78,18 +123,79 @@ impl RuntimeFactory for OrtRuntimeFactory {
     }
 }
 
-fn is_onnx_source(source: &str) -> bool {
-    if let Some(spec) = source.strip_prefix("hf://") {
-        let path = spec.split('/').collect::<Vec<_>>();
-        return path.len() == 2
-            || path.get(2..).is_some_and(|components| {
-                components.join("/").to_ascii_lowercase().ends_with(".onnx")
-            });
+struct ResolvedOrtOptions {
+    sha256: Option<String>,
+    pre_processor: ProcessorSpec,
+    post_processor: ProcessorSpec,
+}
+
+fn parse_options(options: &BTreeMap<String, serde_json::Value>) -> Result<ResolvedOrtOptions> {
+    let options: OrtOptions = deserialize_model_options("ONNX_RUNTIME", options)?;
+    let mut input = options.input;
+    rename_option(&mut input, "name", "input_name")?;
+    let mut output = options.output;
+    rename_option(&mut output, "name", "output_name")?;
+    let format = output
+        .remove("format")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase())
+                .ok_or_else(|| {
+                    VqlError::new(
+                        ErrorCode::InvalidOption,
+                        "invalid Model option 'WITH.output.format': must be a non-empty string",
+                    )
+                })
+        })
+        .transpose()?
+        .unwrap_or_else(|| "yolo_e2e".to_owned());
+    let post_processor_kind = match format.as_str() {
+        "yolo_e2e" => "vision.yolo_e2e@1",
+        "yolo_raw" => "vision.yolo_raw@1",
+        "xywh_normalized" => "vision.xywh_normalized@1",
+        _ => {
+            return invalid_option(
+                "WITH.output.format",
+                "must be 'yolo_e2e', 'yolo_raw', or 'xywh_normalized'",
+            );
+        }
+    };
+    Ok(ResolvedOrtOptions {
+        sha256: options.sha256,
+        pre_processor: ProcessorSpec {
+            kind: "vision.image_tensor@1".to_owned(),
+            options: input,
+        },
+        post_processor: ProcessorSpec {
+            kind: post_processor_kind.to_owned(),
+            options: output,
+        },
+    })
+}
+
+fn rename_option(
+    options: &mut BTreeMap<String, serde_json::Value>,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    if let Some(value) = options.remove(from)
+        && options.insert(to.to_owned(), value).is_some()
+    {
+        return invalid_option(format!("WITH.{from}"), format!("conflicts with '{to}'"));
     }
-    Path::new(source.strip_prefix("file://").unwrap_or(source))
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
+    Ok(())
+}
+
+fn remap_onnx_option_error(mut error: VqlError) -> VqlError {
+    if error.code == ErrorCode::InvalidOption {
+        error.message = error
+            .message
+            .replace("pre_processor.options", "WITH.input")
+            .replace("post_processor.options", "WITH.output");
+    }
+    error
 }
 
 pub(super) struct OrtRuntime {
@@ -213,7 +319,7 @@ fn validate_outlet(role: &str, outlets: &[Outlet], contract: &TensorContract) ->
 #[async_trait]
 impl RuntimeSession for OrtRuntime {
     fn kind(&self) -> &str {
-        "onnxruntime"
+        "onnx-runtime"
     }
 
     fn input_contract(&self) -> &TensorContract {
@@ -349,5 +455,23 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Execution);
         assert!(error.message.contains("images"));
         assert!(error.message.contains("640"));
+    }
+
+    #[test]
+    fn declaration_validates_runtime_scoped_processor_options_locally() {
+        let model = ModelDef {
+            name: "detector".to_owned(),
+            model_type: ModelType::ObjectDetection,
+            source: "mock://person".to_owned(),
+            runtime_kind: "onnx-runtime".to_owned(),
+            options: BTreeMap::from([("input".to_owned(), serde_json::json!({"width": 0}))]),
+            declaration_fingerprint: "declaration".to_owned(),
+            resolved: None,
+        };
+
+        let error = OrtRuntimeFactory.validate_declaration(&model).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidOption);
+        assert!(error.message.contains("WITH.input.width"));
     }
 }

@@ -22,7 +22,9 @@ use super::postprocess::{
 };
 use super::registry::PipelineRegistry;
 use super::scheduler::ModelScheduler;
-use crate::catalog::{CatalogStore, ModelDef, ModelType, TableProviderKind};
+use crate::catalog::{
+    CatalogStore, ModelType, ResolvedExecutionSpec, ResolvedModelDef, TableProviderKind,
+};
 use crate::media::{DecodedFrame, MediaRuntime};
 use crate::types::parse_locator;
 use crate::{ErrorCode, Result, VqlError};
@@ -97,7 +99,7 @@ impl ModelRuntime {
         self.schedulers.lock().map_or(0, |cache| cache.len())
     }
 
-    async fn scheduler(&self, model: &ModelDef) -> Result<Arc<ModelScheduler>> {
+    async fn scheduler(&self, model: &ResolvedModelDef) -> Result<Arc<ModelScheduler>> {
         let live_fingerprints = self.live_model_fingerprints()?;
         let cacheable = live_fingerprints.contains(&model.semantic_fingerprint);
         let key = model.semantic_fingerprint.clone();
@@ -113,21 +115,26 @@ impl ModelRuntime {
 
         let (backend, batching_owner): (Arc<dyn ModelBackend>, BatchingOwner) =
             if model.source.starts_with("mock://") {
+                let ResolvedExecutionSpec::Embedded { post_processor, .. } = &model.execution
+                else {
+                    return Err(VqlError::new(
+                        ErrorCode::Internal,
+                        "mock Models require an embedded Runtime",
+                    ));
+                };
                 (
-                    Arc::new(MockBackend::new(mock_primary_label(&model.post_processor)?)),
+                    Arc::new(MockBackend::new(mock_primary_label(post_processor)?)),
                     BatchingOwner::VisionQl,
                 )
             } else {
                 let registry = Arc::clone(&self.registry);
                 let model = model.clone();
-                let pipeline = tokio::task::spawn_blocking(move || registry.compile(&model))
+                tokio::task::spawn_blocking(move || registry.compile_backend(&model))
                     .await
                     .map_err(|error| {
-                        VqlError::new(ErrorCode::Execution, "model pipeline build task failed")
+                        VqlError::new(ErrorCode::Execution, "model Runtime build task failed")
                             .with_source(error)
-                    })??;
-                let batching_owner = pipeline.batching_owner();
-                (Arc::new(pipeline), batching_owner)
+                    })??
             };
         let scheduler = Arc::new(ModelScheduler::new(backend, batching_owner));
         if cacheable {
@@ -147,7 +154,13 @@ impl ModelRuntime {
             .catalog
             .snapshot()?
             .models()
-            .map(|(_, model)| model.definition.semantic_fingerprint.clone())
+            .filter_map(|(_, model)| {
+                model
+                    .definition
+                    .resolved
+                    .as_ref()
+                    .map(|resolved| resolved.semantic_fingerprint.clone())
+            })
             .collect())
     }
 
@@ -211,7 +224,7 @@ impl ModelRuntime {
 
     pub(crate) async fn infer(
         &self,
-        model: &ModelDef,
+        model: &ResolvedModelDef,
         invocation: &BoundInferenceParams,
         images: &StructArray,
         fail_on_error: bool,

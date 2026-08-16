@@ -28,15 +28,13 @@ if __name__ == "__main__":
     ).collect()
     session.sql(
         f"CREATE MODEL yolo26n TYPE OBJECT_DETECTION "
-        f"FROM 'file://{model}' "
+        f"FROM 'file://{model}' USING ONNX_RUNTIME "
         "WITH ("
-        "runtime.kind='onnxruntime', "
-        "pre_processor.kind='vision.image_tensor@1', "
-        "pre_processor.options={input_name='images', width=640, height=640}, "
-        "post_processor.kind='vision.yolo_e2e@1', "
-        "post_processor.options={output_name='output0', labels='coco80'}"
+        "input={name='images', width=640, height=640}, "
+        "output={name='output0', format='yolo_e2e', labels='coco80'}"
         ")"
     ).collect()
+    session.sql("RESOLVE MODEL yolo26n").collect()
     result = session.sql(
         "SELECT uri, CARDINALITY("
         "IMAGE_DETECTION('yolo26n', image, "

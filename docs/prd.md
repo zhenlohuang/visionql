@@ -105,7 +105,7 @@ VisionQL uses one unifying model: **visual data is represented as relations made
 | **Multimodal type system** | Extends standard SQL with `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)` (enabled for embedding search in v0.3), and nested `STRUCT` / `ARRAY` types |
 | **Table** | A bounded dataset. An image directory is one row per image. A video directory is expanded at its declared sample rate into one row per frame. |
 | **Stream** | An unbounded frame relation such as `(ts TIMESTAMP, frame IMAGE, ...)`, with event-time and watermark semantics |
-| **Model** | A typed inference capability. `TYPE` fixes its built-in SQL function and canonical Arrow result; the definition selects an artifact or endpoint, Runtime, PreProcessor, and PostProcessor. A query names the Model through the built-in function's constant `model` argument, and planning copies the resolved definition into an immutable Query Manifest. |
+| **Model** | A typed inference capability. `TYPE` fixes its built-in SQL function and canonical Arrow result; `FROM` and `USING` select a location and Runtime. Embedded Runtimes derive internal processors from their `WITH` schema; service Runtimes own the full model-facing pipeline. A query names the Model through the built-in function's constant `model` argument, and planning copies the resolved definition into an immutable Query Manifest. |
 | **Function** | User-defined computation: a SQL expression function or a batched Python function. Function DDL reuses DataFusion's grammar and registry. A SQL function may wrap a typed inference call as an alias or preset. |
 | **Window** | A streaming aggregation boundary. `TUMBLE` is a time-bucketing scalar function used in `GROUP BY`; in batch mode it behaves as an ordinary time-bucketed aggregate. |
 | **Sink** | A destination such as Console, Kafka, Parquet, or Lance |
@@ -133,15 +133,16 @@ WITH (fps = 5);
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM './models/yolo26n.onnx'
+USING ONNX_RUNTIME
 WITH (
-  runtime.kind = 'onnxruntime',
-  pre_processor.kind = 'vision.image_tensor@1',
-  pre_processor.options = {
-    input_name = 'images', width = 640, height = 640, resize = 'letterbox'
+  input = {
+    name = 'images', width = 640, height = 640, resize = 'letterbox'
   },
-  post_processor.kind = 'vision.yolo_e2e@1',
-  post_processor.options = {output_name = 'output0', labels = 'coco80'}
+  output = {name = 'output0', format = 'yolo_e2e', labels = 'coco80'}
 );
+
+-- Download/cache/validate explicitly; this may be slow.
+RESOLVE MODEL yolo26n;
 
 -- 3. Count people in each frame and aggregate by minute.
 SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
@@ -198,7 +199,7 @@ WITH (
 
 #### 3.3.2 Registering Models
 
-A **MODEL is one typed inference capability**. Its `TYPE` fixes the callable SQL interface and canonical result; its source and `WITH` options describe how an artifact or endpoint implements that interface.
+A **MODEL is one typed inference capability**. Its `TYPE` fixes the callable SQL interface and canonical result; `FROM` records its raw artifact or service location; `USING` selects a Runtime; and `WITH` contains only options understood by that Runtime.
 
 | Model `TYPE` | Built-in SQL function | Canonical result | Availability |
 |---|---|---|---|
@@ -217,43 +218,38 @@ These are capability types rather than broad framework labels such as CV or LLM.
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
 FROM 'file:///models/yolo26n.onnx'
+USING ONNX_RUNTIME
 WITH (
-  runtime.kind = 'onnxruntime',
-
-  pre_processor.kind = 'vision.image_tensor@1',
-  pre_processor.options = {
-    input_name = 'images',
+  input = {
+    name = 'images',
     width = 640,
     height = 640,
     resize = 'letterbox',
     color_space = 'rgb',
     layout = 'nchw'
   },
-
-  post_processor.kind = 'vision.yolo_e2e@1',
-  post_processor.options = {
-    output_name = 'output0',
+  output = {
+    name = 'output0',
+    format = 'yolo_e2e',
     box_format = 'xyxy',
     labels = 'coco80'
   }
 );
+
+RESOLVE MODEL yolo26n;
 ```
 
-Model options are deliberately namespaced:
+`CREATE MODEL` performs local declaration validation and writes the unresolved definition to the Catalog. It never downloads an artifact or contacts a service. `RESOLVE MODEL <name>` is the explicit slow boundary: it downloads and atomically caches remote artifacts, verifies hashes, resolves local files, or validates service metadata, then writes the resolved execution contract back to the Catalog. Planning a query against an unresolved Model fails with an instruction to run `RESOLVE MODEL`.
 
-| Namespace | Responsibility |
-|---|---|
-| `runtime.*` | Select the implementation with `runtime.kind` and, for a service, its wire contract with `runtime.protocol`; binding fields such as a served model and immutable version live here too |
-| `pre_processor.*` | Select a versioned PreProcessor and provide all implementation-specific values in one `pre_processor.options = {...}` object |
-| `post_processor.*` | Select a versioned PostProcessor and provide all implementation-specific values in one `post_processor.options = {...}` object |
+`SHOW MODELS` exposes each Model's `UNRESOLVED` or `RESOLVED` status together with its type, Runtime, and current internal revision.
 
-`runtime.kind` is an implementation name such as `onnxruntime`, `triton`, `transformers`, `vllm`, `sglang`, or `llama_cpp`. `runtime.protocol` is orthogonal: examples include `kserve_v2_http`, `kserve_v2_grpc`, and `openai`. Thus `runtime.kind = 'sglang'` with `runtime.protocol = 'openai'` still selects the SGLang integration; `openai` is never a Runtime kind. Every type, Runtime, protocol, and processor combination is version-gated and validated before a usable Model is stored.
+Runtime names are explicit, including `ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER`. The `WITH` schema is bound to the selected Runtime instead of a global Model option namespace. For `ONNX_RUNTIME`, `input` and `output` describe the VisionQL-owned tensor preprocessing and postprocessing contract. For `TRITON_INFERENCE_SERVER`, `WITH (model=..., version=...)` binds the served model; the service owns preprocessing and postprocessing, while VisionQL handles only transport encoding and conversion of the canonical service response into the public Arrow type. A service exposing only model-specific raw tensors is rejected.
 
-The `WITH` clause contains result-affecting implementation data, not deployment policy. Device placement, replicas, queue capacity, batch size, maximum wait, concurrency, timeout, and credentials belong to internal RuntimeConfig or the secret provider. Flat processor fields such as `pre_processor.width` are invalid. Unknown namespaces and unknown processor options fail rather than being silently retained.
+The `WITH` clause contains result-affecting binding data, not deployment policy. Device placement, replicas, queue capacity, batch size, maximum wait, concurrency, timeout, and credentials belong to internal RuntimeConfig or the secret provider. Unknown Runtime options fail rather than being silently retained.
 
 `FROM` identifies an artifact bundle or endpoint. ONNX graphs, explicitly classified `.pt`/`.pth` artifacts, Safetensors bundles, and GGUF bundles are inputs to compatible Runtimes; a file suffix is not a generic execution strategy. Remote bundles are pinned and content-addressed where possible. VisionQL neither infers a task, label map, tensor contract, or processor from filenames and shapes nor requires a public Profile, Adapter, or `visionql-manifest.json`.
 
-The normal open-source integration path is intentionally short: pin the source revision or digest, select a compatible Runtime, select compatible PreProcessor and PostProcessor kinds, declare only their typed options, and pass one real-model conformance fixture. Common tensor contracts should require only Model DDL; a new reusable tensor family adds one narrow processor implementation. Arbitrary repository code runs only in an isolated `transformers` worker or behind Triton, vLLM, SGLang, or llama.cpp—not inside `vql-kernel`.
+The normal embedded open-source integration path is intentionally short: pin the source revision or digest, select a compatible Runtime, declare its typed input/output options, resolve it, and pass one real-model conformance fixture. Common tensor contracts should require only Model DDL; a new reusable tensor family adds one narrow internal processor implementation. Service Runtimes expose the canonical typed capability rather than their internal tensor layout. Arbitrary repository code runs only in an isolated `TRANSFORMERS` worker or behind a service—not inside `vql-kernel`.
 
 #### 3.3.3 Calling Models and Registering User Functions
 
@@ -344,7 +340,7 @@ Every extension must map to a mature extension point in the columnar query engin
 
 1. **Extensions reduce to two standard mechanisms.**
    - Type-owned inference markers such as `IMAGE_DETECTION` are extracted into explicit `Inference` nodes. Ordinary DataFusion functions cover array operations (`CARDINALITY`) and vector predicates (`L2_DISTANCE`); SQL expression functions expand during planning.
-   - VQL DDL updates the Catalog or runtime. `CREATE STREAM/MODEL/FUNCTION/SINK` does not enter the relational plan. A video table expands frames inside its scan operator at the fps declared by the table.
+   - VQL DDL updates the Catalog or runtime. `CREATE STREAM/MODEL/FUNCTION/SINK` and `RESOLVE MODEL` do not enter the relational plan. A video table expands frames inside its scan operator at the fps declared by the table.
 2. **No lambdas or higher-order functions.** `IMAGE_DETECTION` owns label and confidence filtering, so native `CARDINALITY` can count its result without another VisionQL-specific function.
 3. **`UNNEST` is the only row-expansion mechanism.** `FROM t, UNNEST(expr) AS x` maps to the engine's native unnest node without requiring general lateral joins.
 4. **`TUMBLE` keeps the same shape in both modes.** Batch lowers it to ordinary time bucketing and aggregation. Streaming adds window state and watermark handling to the same logical plan. `WINDOW` remains reserved for ANSI analytic functions whose output cardinality does not change.
@@ -478,7 +474,7 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 - `IMAGE`, `VIDEO`, `BOX2D`, nested types, and `UNNEST`; `VECTOR` waits for v0.3.
 - Image and video directory tables. Video is expanded by the table's declared fps.
-- One `OBJECT_DETECTION` Model type called through `IMAGE_DETECTION('<model>', image, ...)`; local ONNX Runtime and remote Triton KServe V2 HTTP execution share the same typed pipeline. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
+- One `OBJECT_DETECTION` Model type called through `IMAGE_DETECTION('<model>', image, ...)`; local `ONNX_RUNTIME` uses VisionQL-owned processors, while remote `TRITON_INFERENCE_SERVER` owns its complete pre/post-processing pipeline behind the same canonical typed result. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
 - One RTSP source with event time, watermarks, reconnect handling, and best-effort delivery; `TUMBLE` uses a bounded allowlist of `COUNT/SUM/AVG/MIN/MAX` over persistable scalar types.
 - Console Sink for foreground debugging and Kafka Sink for continuous output. Parquet and Lance arrive together in v0.3.
 - Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. Batch and streaming queries run in the foreground and stay attached to the client. The chainable DataFrame API arrives in v0.2.
@@ -544,7 +540,8 @@ The first users will be two or three design partners working with the team on on
 |---|---|---|
 | `CREATE STREAM ... FROM 'rtsp://...'` | DDL | Register a video stream |
 | `CREATE TABLE ... USING IMAGES/VIDEOS` | DDL | Register a directory as a table |
-| `CREATE MODEL ... TYPE ... FROM ... WITH (...)` | DDL | Register a typed inference capability with namespaced Runtime and processor options |
+| `CREATE MODEL ... TYPE ... FROM ... USING ... WITH (...)` | DDL | Store a fast, unresolved typed Model declaration with Runtime-scoped options |
+| `RESOLVE MODEL <name>` | DDL | Perform the potentially slow artifact download/cache or service validation step |
 | `IMAGE_DETECTION('<model>', image [, named options])` | Typed inference | Call an `OBJECT_DETECTION` Model; planning resolves the first positional argument and extracts an `Inference` node |
 | `CREATE FUNCTION ... RETURN <expression> / LANGUAGE PYTHON AS '<entry>'` | DDL | Register a DataFusion-backed SQL expression or batched Python function |
 | `CREATE SINK` | DDL | Declare a result destination |
@@ -561,6 +558,7 @@ The first users will be two or three design partners working with the team on on
 
 | Date | Change |
 |---|---|
+| 2026-08-16 | Split fast `CREATE MODEL` declaration from slow `RESOLVE MODEL`, moved Runtime selection to `USING`, scoped `WITH` to the selected Runtime, and made service Runtimes own pre/post-processing |
 | 2026-08-15 | Merged embedded batch and streaming into v0.1 and renumbered later releases |
 | 2026-08-10 | Defined type-owned inference calls, namespaced Runtime and processor options, and DataFusion-backed SQL/Python Functions |
 | 2026-08-07 | Initial product design |
