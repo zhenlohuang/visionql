@@ -29,6 +29,7 @@ use crate::catalog::{EventTimePolicy, RtspTransport};
 #[cfg(feature = "ffmpeg-native")]
 use crate::media::DecodedFrame;
 use crate::media::{FrameBufferLease, MediaRuntime};
+use crate::resources::{QueryBudget, QueryReservation};
 use crate::types::image_field;
 #[cfg(feature = "ffmpeg-native")]
 use crate::types::{ImageRef, ImageRefBuilder};
@@ -93,15 +94,30 @@ impl TableProvider for RtspTableProvider {
 }
 
 struct UnboundRtspExec {
-    projection: Option<Vec<usize>>,
+    projection_names: Vec<String>,
     properties: Arc<PlanProperties>,
 }
 
 impl UnboundRtspExec {
     fn new(schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
         let output = projected_schema(&schema, projection.as_deref());
+        let projection_names = projection
+            .as_deref()
+            .map(|indices| {
+                indices
+                    .iter()
+                    .map(|index| schema.field(*index).name().clone())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect()
+            });
         Self {
-            projection,
+            projection_names,
             properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(output),
                 Partitioning::UnknownPartitioning(1),
@@ -118,7 +134,7 @@ impl Debug for UnboundRtspExec {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RtspSourceExec")
-            .field("projection", &self.projection)
+            .field("projection", &self.projection_names)
             .finish()
     }
 }
@@ -131,8 +147,8 @@ impl DisplayAs for UnboundRtspExec {
     ) -> std::fmt::Result {
         write!(
             formatter,
-            "RtspSourceExec: projection={:?}",
-            self.projection
+            "RtspSourceExec: projection={:?}, image_payload=frame_buffer, execution=epoch",
+            self.projection_names
         )
     }
 }
@@ -174,7 +190,7 @@ impl ExecutionPlan for UnboundRtspExec {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SourceProgress {
     pub(crate) generation: u64,
     pub(crate) decoded_frames: u64,
@@ -182,6 +198,56 @@ pub(crate) struct SourceProgress {
     pub(crate) reconnects: u64,
     pub(crate) event_time_fallbacks: u64,
     pub(crate) dropped_frames: u64,
+    pub(crate) sampled_first_event_time_ms: Option<i64>,
+    pub(crate) sampled_last_event_time_ms: Option<i64>,
+    pub(crate) input_bytes: u64,
+    pub(crate) gap_duration_ms: u64,
+    pub(crate) dropped_ranges: Vec<crate::DroppedFrameRange>,
+}
+
+const MAX_DROPPED_RANGES: usize = 128;
+
+impl SourceProgress {
+    fn record_drop(
+        &mut self,
+        reason: crate::FrameDropReason,
+        count: u64,
+        first_event_time_ms: Option<i64>,
+        last_event_time_ms: Option<i64>,
+    ) {
+        if let Some(previous) = self.dropped_ranges.last_mut()
+            && previous.reason == reason
+        {
+            previous.count = previous.count.saturating_add(count);
+            previous.first_event_time_ms = previous.first_event_time_ms.or(first_event_time_ms);
+            previous.last_event_time_ms = last_event_time_ms.or(previous.last_event_time_ms);
+            return;
+        }
+        if self.dropped_ranges.len() >= MAX_DROPPED_RANGES
+            && let Some(previous) = self
+                .dropped_ranges
+                .iter_mut()
+                .find(|range| range.reason == reason)
+        {
+            previous.count = previous.count.saturating_add(count);
+            previous.first_event_time_ms = match (previous.first_event_time_ms, first_event_time_ms)
+            {
+                (Some(previous), Some(current)) => Some(previous.min(current)),
+                (previous, current) => previous.or(current),
+            };
+            previous.last_event_time_ms = match (previous.last_event_time_ms, last_event_time_ms) {
+                (Some(previous), Some(current)) => Some(previous.max(current)),
+                (previous, current) => previous.or(current),
+            };
+            return;
+        }
+        self.dropped_ranges.push(crate::DroppedFrameRange {
+            reason,
+            count,
+            first_event_time_ms,
+            last_event_time_ms,
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -191,6 +257,7 @@ pub(crate) struct StreamEpoch {
     pub(crate) source_progress: SourceProgress,
     pub(crate) watermark_ms: Option<i64>,
     pub(crate) frame_lease: Option<FrameBufferLease>,
+    pub(crate) admitted_at: std::time::Instant,
 }
 
 pub(crate) struct RtspEpochReceiver {
@@ -222,6 +289,7 @@ pub(crate) fn start_rtsp_source(
     media: Arc<MediaRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
+    budget: QueryBudget,
 ) -> Result<RtspEpochReceiver> {
     if !media.rtsp_available() {
         return Err(VqlError::new(
@@ -234,7 +302,16 @@ pub(crate) fn start_rtsp_source(
     let receiver_cancel = worker_cancel.clone();
     std::thread::Builder::new()
         .name(format!("vql-rtsp-{}", definition.name))
-        .spawn(move || run_source_worker(definition, media, fail_on_error, sender, worker_cancel))
+        .spawn(move || {
+            run_source_worker(
+                definition,
+                media,
+                fail_on_error,
+                sender,
+                worker_cancel,
+                budget,
+            )
+        })
         .map_err(|error| {
             VqlError::new(ErrorCode::Execution, "failed to start RTSP source worker")
                 .with_source(error)
@@ -251,6 +328,7 @@ struct SampledFrame {
     event_time_ms: i64,
     frame_id: u64,
     frame: DecodedFrame,
+    _reservation: QueryReservation,
 }
 
 #[cfg(feature = "ffmpeg-native")]
@@ -263,11 +341,12 @@ struct EpochBuilder {
     progress: SourceProgress,
     max_seen_event_time_ms: Option<i64>,
     watermark_ms: Option<i64>,
+    budget: QueryBudget,
 }
 
 #[cfg(feature = "ffmpeg-native")]
 impl EpochBuilder {
-    fn new(definition: StreamDef, media: Arc<MediaRuntime>) -> Self {
+    fn new(definition: StreamDef, media: Arc<MediaRuntime>, budget: QueryBudget) -> Self {
         Self {
             definition,
             media,
@@ -277,6 +356,7 @@ impl EpochBuilder {
             progress: SourceProgress::default(),
             max_seen_event_time_ms: None,
             watermark_ms: None,
+            budget,
         }
     }
 
@@ -297,12 +377,62 @@ impl EpochBuilder {
     }
 
     fn push(&mut self, event_time_ms: i64, frame_id: u64, frame: DecodedFrame) {
+        self.progress.sampled_frames = self.progress.sampled_frames.saturating_add(1);
+        self.progress
+            .sampled_first_event_time_ms
+            .get_or_insert(event_time_ms);
+        self.progress.sampled_last_event_time_ms = Some(event_time_ms);
+        let reservation = loop {
+            match self
+                .budget
+                .reserve(crate::QueryResource::FrameBuffer, frame.rgb.len())
+            {
+                Ok(reservation) => break reservation,
+                Err(_) if !self.frames.is_empty() => {
+                    let dropped = self.frames.remove(0);
+                    self.progress.dropped_frames = self.progress.dropped_frames.saturating_add(1);
+                    self.progress.record_drop(
+                        crate::FrameDropReason::ResourceBudget,
+                        1,
+                        Some(dropped.event_time_ms),
+                        Some(dropped.event_time_ms),
+                    );
+                    tracing::warn!(
+                        stream = %self.definition.name,
+                        reason = "resource_budget",
+                        count = 1,
+                        first_event_time_ms = dropped.event_time_ms,
+                        last_event_time_ms = dropped.event_time_ms,
+                        "dropping oldest sampled RTSP frame before epoch admission"
+                    );
+                }
+                Err(error) => {
+                    self.progress.dropped_frames = self.progress.dropped_frames.saturating_add(1);
+                    self.progress.record_drop(
+                        crate::FrameDropReason::ResourceBudget,
+                        1,
+                        Some(event_time_ms),
+                        Some(event_time_ms),
+                    );
+                    tracing::warn!(
+                        stream = %self.definition.name,
+                        reason = "resource_budget",
+                        count = 1,
+                        first_event_time_ms = event_time_ms,
+                        last_event_time_ms = event_time_ms,
+                        error = %error,
+                        "dropping sampled RTSP frame that cannot fit the query budget"
+                    );
+                    return;
+                }
+            }
+        };
         self.frames.push(SampledFrame {
             event_time_ms,
             frame_id,
             frame,
+            _reservation: reservation,
         });
-        self.progress.sampled_frames = self.progress.sampled_frames.saturating_add(1);
     }
 
     fn should_close(&self, event_time_ms: i64) -> bool {
@@ -331,11 +461,13 @@ impl EpochBuilder {
                     )
                 })
                 .collect::<Vec<_>>();
-            let decoded = frames
-                .into_iter()
-                .map(|sample| sample.frame)
-                .collect::<Vec<_>>();
-            let (buffer_id, lease) = self.media.register_frame_buffer(decoded)?;
+            let mut decoded = Vec::with_capacity(frames.len());
+            let mut reservations = Vec::with_capacity(frames.len());
+            for sample in frames {
+                decoded.push(sample.frame);
+                reservations.push(sample._reservation);
+            }
+            let (buffer_id, lease) = self.media.register_frame_buffer(decoded, reservations)?;
             (
                 build_batch(&self.definition.endpoint, buffer_id, &metadata)?,
                 Some(lease),
@@ -344,9 +476,10 @@ impl EpochBuilder {
         let epoch = StreamEpoch {
             epoch_id: self.epoch_id,
             batches: vec![batch],
-            source_progress: self.progress,
+            source_progress: self.progress.clone(),
             watermark_ms: self.watermark_ms,
             frame_lease,
+            admitted_at: std::time::Instant::now(),
         };
         self.epoch_id = self.epoch_id.saturating_add(1);
         self.epoch_start_ms = None;
@@ -361,6 +494,12 @@ impl EpochBuilder {
         self.epoch_start_ms = None;
         self.progress.dropped_frames = self.progress.dropped_frames.saturating_add(count);
         if count > 0 {
+            self.progress.record_drop(
+                crate::FrameDropReason::SourceOverrun,
+                count,
+                first_event_time_ms,
+                last_event_time_ms,
+            );
             tracing::warn!(
                 stream = %self.definition.name,
                 reason = "source_overrun",
@@ -453,18 +592,24 @@ fn run_source_worker(
     fail_on_error: Arc<AtomicBool>,
     sender: mpsc::Sender<Result<StreamEpoch>>,
     cancellation: CancellationToken,
+    budget: QueryBudget,
 ) {
     #[cfg(feature = "ffmpeg-native")]
     {
-        if let Err(error) =
-            run_native_source(definition, media, fail_on_error, &sender, &cancellation)
-        {
+        if let Err(error) = run_native_source(
+            definition,
+            media,
+            fail_on_error,
+            &sender,
+            &cancellation,
+            budget,
+        ) {
             send_error(&sender, error);
         }
     }
     #[cfg(not(feature = "ffmpeg-native"))]
     {
-        let _ = (definition, media, fail_on_error, cancellation);
+        let _ = (definition, media, fail_on_error, cancellation, budget);
         send_error(
             &sender,
             VqlError::new(
@@ -482,6 +627,7 @@ fn run_native_source(
     fail_on_error: Arc<AtomicBool>,
     sender: &mpsc::Sender<Result<StreamEpoch>>,
     cancellation: &CancellationToken,
+    budget: QueryBudget,
 ) -> Result<()> {
     use ffmpeg::format::Pixel;
     use ffmpeg::media::Type;
@@ -491,7 +637,7 @@ fn run_native_source(
 
     ffmpeg::init().map_err(ffmpeg_error)?;
     let ingest_clock = IngestClock::new();
-    let mut builder = EpochBuilder::new(definition.clone(), media);
+    let mut builder = EpochBuilder::new(definition.clone(), media, budget);
     let mut sampler = EventSampler::new(definition.fps);
     let mut frame_id = 0_u64;
     let mut backoff_seconds = 1_u64;
@@ -518,6 +664,10 @@ fn run_native_source(
                     "RTSP connection failed; retrying"
                 );
                 builder.progress.reconnects = builder.progress.reconnects.saturating_add(1);
+                builder.progress.gap_duration_ms = builder
+                    .progress
+                    .gap_duration_ms
+                    .saturating_add(backoff_seconds.saturating_mul(1_000));
                 if !sleep_with_cancel(backoff_seconds, cancellation) {
                     break;
                 }
@@ -549,6 +699,10 @@ fn run_native_source(
             if stream.index() != stream_index {
                 continue;
             }
+            builder.progress.input_bytes = builder
+                .progress
+                .input_bytes
+                .saturating_add(packet.size() as u64);
             if let Err(error) = decoder.send_packet(&packet) {
                 if fail_on_error.load(Ordering::Relaxed) {
                     return Err(ffmpeg_error(error));
@@ -585,6 +739,14 @@ fn run_native_source(
                             }
                             Err(error) => {
                                 builder.media.record_decode_error();
+                                builder.progress.dropped_frames =
+                                    builder.progress.dropped_frames.saturating_add(1);
+                                builder.progress.record_drop(
+                                    crate::FrameDropReason::DecodeError,
+                                    1,
+                                    Some(event_time_ms),
+                                    Some(event_time_ms),
+                                );
                                 tracing::warn!(
                                     stream = %definition.name,
                                     error = %error,
@@ -618,6 +780,10 @@ fn run_native_source(
             return Ok(());
         }
         builder.progress.reconnects = builder.progress.reconnects.saturating_add(1);
+        builder.progress.gap_duration_ms = builder
+            .progress
+            .gap_duration_ms
+            .saturating_add(backoff_seconds.saturating_mul(1_000));
         tracing::warn!(
             stream = %definition.name,
             decode_error = disconnected,
@@ -851,6 +1017,13 @@ mod tests {
     #[cfg(feature = "ffmpeg-native")]
     use arrow::array::{Array, StructArray, UInt32Array, UInt64Array};
 
+    fn query_budget(limit: usize) -> QueryBudget {
+        QueryBudget::new(
+            limit,
+            Arc::new(crate::resources::ResourceMetrics::default()),
+        )
+    }
+
     #[test]
     fn sampling_uses_event_time_not_frame_ordinal() {
         let mut sampler = EventSampler::new(5.0);
@@ -872,7 +1045,7 @@ mod tests {
             transport: RtspTransport::Tcp,
         };
         let media = Arc::new(MediaRuntime::new());
-        let mut builder = EpochBuilder::new(definition, media);
+        let mut builder = EpochBuilder::new(definition, media, query_budget(1024));
         builder.observe_event_time(10_000);
         assert_eq!(builder.watermark_ms, Some(8_000));
         builder.observe_event_time(9_000);
@@ -892,7 +1065,7 @@ mod tests {
             transport: RtspTransport::Tcp,
         };
         let media = Arc::new(MediaRuntime::new());
-        let mut builder = EpochBuilder::new(definition, media);
+        let mut builder = EpochBuilder::new(definition, media, query_budget(1024));
         builder.observe_event_time(10_000);
         builder.push(
             10_000,
@@ -910,6 +1083,67 @@ mod tests {
         assert!(builder.frames.is_empty());
         assert_eq!(builder.progress.dropped_frames, 1);
         assert_eq!(builder.watermark_ms, Some(8_000));
+    }
+
+    #[test]
+    fn resource_pressure_drops_the_oldest_sampled_frame() {
+        let definition = StreamDef {
+            name: "cam".to_owned(),
+            endpoint: "rtsp://camera/live".to_owned(),
+            fps: 5.0,
+            event_time: EventTimePolicy::CaptureTime,
+            watermark_delay_ms: 2_000,
+            transport: RtspTransport::Tcp,
+        };
+        let media = Arc::new(MediaRuntime::new());
+        let mut builder = EpochBuilder::new(definition, media, query_budget(3));
+        for (timestamp, value) in [(10_000, 1), (10_100, 2)] {
+            builder.push(
+                timestamp,
+                value,
+                DecodedFrame {
+                    pts_ms: timestamp,
+                    width: 1,
+                    height: 1,
+                    rgb: vec![value as u8; 3],
+                },
+            );
+        }
+        assert_eq!(builder.frames.len(), 1);
+        assert_eq!(builder.frames[0].frame_id, 2);
+        assert_eq!(builder.progress.dropped_frames, 1);
+        assert_eq!(
+            builder.progress.dropped_ranges,
+            [crate::DroppedFrameRange {
+                reason: crate::FrameDropReason::ResourceBudget,
+                count: 1,
+                first_event_time_ms: Some(10_000),
+                last_event_time_ms: Some(10_000),
+            }]
+        );
+    }
+
+    #[test]
+    fn structured_drop_ranges_have_a_fixed_upper_bound() {
+        let mut progress = SourceProgress::default();
+        for index in 0..(MAX_DROPPED_RANGES + 10) {
+            let reason = if index % 2 == 0 {
+                crate::FrameDropReason::ResourceBudget
+            } else {
+                crate::FrameDropReason::DecodeError
+            };
+            progress.record_drop(reason, 1, Some(index as i64), Some(index as i64));
+        }
+
+        assert_eq!(progress.dropped_ranges.len(), MAX_DROPPED_RANGES);
+        assert_eq!(
+            progress
+                .dropped_ranges
+                .iter()
+                .map(|range| range.count)
+                .sum::<u64>(),
+            (MAX_DROPPED_RANGES + 10) as u64
+        );
     }
 
     #[test]
@@ -944,6 +1178,7 @@ mod tests {
             Arc::clone(&media),
             Arc::new(AtomicBool::new(false)),
             cancellation.clone(),
+            query_budget(16 * 1024 * 1024),
         )
         .unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();

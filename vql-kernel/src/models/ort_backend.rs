@@ -338,13 +338,15 @@ impl RuntimeSession for OrtRuntime {
         &self,
         batch: RuntimeRequestBatch,
         cancel: CancellationToken,
+        budget: crate::resources::QueryBudget,
     ) -> Result<RuntimeResponseBatch> {
         self.input_contract
             .validate_batch("ONNX input", &batch.input)?;
         let session = Arc::clone(&self.session);
         let output_contract = self.output_contract.clone();
-        let task =
-            tokio::task::spawn_blocking(move || run_session(session, batch, output_contract));
+        let task = tokio::task::spawn_blocking(move || {
+            run_session(session, batch, output_contract, budget)
+        });
         tokio::select! {
             _ = cancel.cancelled() => Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled")),
             result = task => result.map_err(|error| {
@@ -358,6 +360,7 @@ fn run_session(
     session: Arc<Mutex<Session>>,
     batch: RuntimeRequestBatch,
     output_contract: TensorContract,
+    budget: crate::resources::QueryBudget,
 ) -> Result<RuntimeResponseBatch> {
     let input_name = batch.input.name().to_owned();
     let shape = batch
@@ -388,6 +391,7 @@ fn run_session(
             VqlError::new(ErrorCode::Execution, "ONNX inference failed").with_source(error)
         })?;
     let mut response = BTreeMap::new();
+    let mut reservations = Vec::new();
     for output_name in batch.output_names {
         let output = outputs.get(&output_name).ok_or_else(|| {
             VqlError::new(
@@ -398,12 +402,19 @@ fn run_session(
         let (shape, values) = output.try_extract_tensor::<f32>().map_err(|error| {
             VqlError::new(ErrorCode::Execution, "ONNX output must be float32").with_source(error)
         })?;
+        reservations.push(budget.reserve(
+            crate::QueryResource::ModelTensor,
+            values.len().saturating_mul(std::mem::size_of::<f32>()),
+        )?);
         let tensor =
             TensorBatch::from_f32(output_name.clone(), shape.to_vec(), values.to_vec(), None)?;
         output_contract.validate_batch("ONNX output", &tensor)?;
         response.insert(output_name, tensor);
     }
-    Ok(RuntimeResponseBatch { outputs: response })
+    Ok(RuntimeResponseBatch {
+        outputs: response,
+        _reservations: reservations,
+    })
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ use crate::catalog::FunctionDef;
 use crate::functions::materialize_encoded_images;
 use crate::media::MediaRuntime;
 use crate::python::{PyUdfHandle, PythonUdfHostRef};
+use crate::resources::{QueryBudget, QueryReservation};
 use crate::{ErrorCode, Result, VqlError};
 
 #[derive(Debug)]
@@ -25,6 +26,7 @@ struct PythonFunction {
     fail_on_error: Arc<AtomicBool>,
     catalog: Arc<CatalogStore>,
     media: Arc<MediaRuntime>,
+    budget: Option<QueryBudget>,
 }
 
 impl PartialEq for PythonFunction {
@@ -60,6 +62,7 @@ impl ScalarUDFImpl for PythonFunction {
     ) -> datafusion::common::Result<ColumnarValue> {
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
         let fail_on_error = self.fail_on_error.load(Ordering::Relaxed);
+        let mut materialization_reservations = Vec::<QueryReservation>::new();
         let arrays = arrays
             .into_iter()
             .map(|array| {
@@ -68,15 +71,18 @@ impl ScalarUDFImpl for PythonFunction {
                         .as_any()
                         .downcast_ref::<arrow::array::StructArray>()
                         .expect("IMAGE storage is a StructArray");
-                    materialize_encoded_images(
+                    let materialized = materialize_encoded_images(
                         Arc::clone(&self.catalog),
                         Arc::clone(&self.media),
                         images,
                         fail_on_error,
+                        self.budget.clone(),
                     )
                     .map_err(|error| {
                         datafusion::common::DataFusionError::Execution(error.to_string())
-                    })
+                    })?;
+                    materialization_reservations.extend(materialized.reservations);
+                    Ok(materialized.array)
                 } else {
                     Ok(array)
                 }
@@ -133,6 +139,7 @@ pub(crate) fn python_function_udf(
     fail_on_error: Arc<AtomicBool>,
     catalog: Arc<CatalogStore>,
     media: Arc<MediaRuntime>,
+    budget: Option<QueryBudget>,
 ) -> Result<ScalarUDF> {
     let crate::catalog::FunctionImplementation::Python { entry } = &function.implementation else {
         return Err(VqlError::new(
@@ -178,6 +185,7 @@ pub(crate) fn python_function_udf(
         fail_on_error,
         catalog,
         media,
+        budget,
     }))
 }
 

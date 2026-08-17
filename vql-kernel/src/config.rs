@@ -3,12 +3,15 @@ use std::ffi::OsString;
 use std::fmt::{Debug, Formatter};
 use std::path::{Path, PathBuf};
 
+const DEFAULT_QUERY_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct EngineConfig {
     vql_home: PathBuf,
     catalog_path: PathBuf,
     model_cache_dir: PathBuf,
     history_path: PathBuf,
+    query_memory_limit_bytes: usize,
     secret_provider: Option<SecretProviderRef>,
 }
 
@@ -38,6 +41,7 @@ impl EngineConfig {
             catalog_path: vql_home.join("catalog/vql.db"),
             model_cache_dir: vql_home.join("cache/models"),
             history_path: vql_home.join("history"),
+            query_memory_limit_bytes: DEFAULT_QUERY_MEMORY_LIMIT_BYTES,
             secret_provider: None,
             vql_home,
         }
@@ -74,6 +78,16 @@ impl EngineConfig {
         self
     }
 
+    /// Set the total host-memory budget assigned independently to every query.
+    pub fn with_query_memory_limit_bytes(mut self, limit: usize) -> Self {
+        self.query_memory_limit_bytes = limit;
+        self
+    }
+
+    pub fn query_memory_limit_bytes(&self) -> usize {
+        self.query_memory_limit_bytes
+    }
+
     /// Install the host-owned resolver used by credential references.
     pub fn with_secret_provider(mut self, provider: SecretProviderRef) -> Self {
         self.secret_provider = Some(provider);
@@ -85,6 +99,12 @@ impl EngineConfig {
     }
 
     pub(crate) fn prepare(&self) -> Result<()> {
+        if self.query_memory_limit_bytes == 0 {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                "query memory limit must be greater than zero",
+            ));
+        }
         let parent = self.catalog_path.parent().ok_or_else(|| {
             VqlError::new(
                 ErrorCode::InvalidLocation,
@@ -112,6 +132,7 @@ impl Debug for EngineConfig {
             .field("catalog_path", &self.catalog_path)
             .field("model_cache_dir", &self.model_cache_dir)
             .field("history_path", &self.history_path)
+            .field("query_memory_limit_bytes", &self.query_memory_limit_bytes)
             .field(
                 "secret_provider",
                 &self.secret_provider.as_ref().map(|_| "[SecretProvider]"),
@@ -171,6 +192,16 @@ mod tests {
 
         assert_eq!(catalog_path, temp.path().join(".vql/catalog/vql.db"));
         assert!(catalog_path.is_file());
+    }
+
+    #[test]
+    fn query_memory_limit_must_be_non_zero() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = Engine::new(
+            EngineConfig::new(temp.path().join("catalog.db")).with_query_memory_limit_bytes(0),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidOption);
     }
 
     #[test]

@@ -14,6 +14,14 @@ struct Cli {
     #[arg(long, global = true, env = "VQL_CATALOG")]
     catalog: Option<PathBuf>,
 
+    /// Print query metrics after execution.
+    #[arg(long, global = true, env = "VQL_METRICS")]
+    metrics: bool,
+
+    /// Override the per-query host-memory budget in bytes.
+    #[arg(long, global = true, env = "VQL_QUERY_MEMORY_LIMIT_BYTES")]
+    query_memory_limit_bytes: Option<usize>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -39,15 +47,20 @@ fn run() -> Result<()> {
     let filter = EnvFilter::try_from_env("VQL_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     let cli = Cli::parse();
-    let config = cli
+    let mut config = cli
         .catalog
         .map(|path| EngineConfig::default().with_catalog_path(path))
         .unwrap_or_default();
+    if let Some(limit) = cli.query_memory_limit_bytes {
+        config = config.with_query_memory_limit_bytes(limit);
+    }
     let engine = Engine::new(config)?;
     let session = engine.session().build()?;
     match cli.command {
-        Command::Shell => commands::shell::run(session, engine.config().history_path()),
-        Command::Run { script } => commands::run_file(&session, &script),
+        Command::Shell => {
+            commands::shell::run(session, engine.config().history_path(), cli.metrics)
+        }
+        Command::Run { script } => commands::run_file(&session, &script, cli.metrics),
         Command::Explain { query } => {
             let path = PathBuf::from(&query);
             let sql = if path.is_file() {
@@ -55,7 +68,7 @@ fn run() -> Result<()> {
             } else {
                 query
             };
-            commands::explain(&session, sql.trim().trim_end_matches(';'))
+            commands::explain(&session, sql.trim().trim_end_matches(';'), cli.metrics)
         }
     }
 }

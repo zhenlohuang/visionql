@@ -63,6 +63,10 @@ pub(crate) enum VqlStatement {
         name: String,
     },
     Show(ShowKind),
+    ShowCreate {
+        kind: ShowKind,
+        name: String,
+    },
     Describe {
         name: String,
     },

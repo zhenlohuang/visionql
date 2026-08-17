@@ -139,6 +139,17 @@ impl PreProcessor for ImageTensorPreProcessor {
         &self.output_contract
     }
 
+    fn output_bytes(&self, batch_size: usize) -> Result<usize> {
+        batch_size
+            .checked_mul(3)
+            .and_then(|value| value.checked_mul(self.options.width as usize))
+            .and_then(|value| value.checked_mul(self.options.height as usize))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                VqlError::new(ErrorCode::ResourceExhausted, "input tensor size overflow")
+            })
+    }
+
     fn process(&self, images: &[DynamicImage]) -> Result<PreprocessedBatch> {
         let batch_size = images.len();
         let width = self.options.width as usize;
@@ -250,6 +261,10 @@ mod tests {
 
         assert_eq!(batch.input.shape(), vec![2, 3, 2, 4]);
         assert_eq!(batch.input.as_f32("input").unwrap().len(), 48);
+        assert_eq!(
+            processor.output_bytes(2).unwrap(),
+            48 * std::mem::size_of::<f32>()
+        );
         assert_eq!(batch.context.transforms.len(), 2);
         assert_eq!(batch.context.transforms[1].pad_x, 1.0);
     }

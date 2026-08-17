@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionContext;
+use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion::execution::session_state::SessionStateBuilder;
 
 use crate::PythonUdfHostRef;
@@ -17,6 +18,8 @@ use crate::functions::{
 use crate::media::MediaRuntime;
 use crate::models::image_detection;
 use crate::planner::inference::VqlQueryPlanner;
+use crate::resources::QueryBudget;
+use crate::session::QueryMetrics;
 use crate::{ErrorCode, Result, VqlError};
 use std::sync::atomic::AtomicBool;
 
@@ -26,10 +29,18 @@ pub(crate) fn context_for_snapshot(
     media: Arc<MediaRuntime>,
     fail_on_error: Arc<AtomicBool>,
     python_udf_host: Option<PythonUdfHostRef>,
+    budget: &QueryBudget,
+    metrics: Arc<QueryMetrics>,
 ) -> Result<SessionContext> {
+    let runtime_env = Arc::new(
+        RuntimeEnvBuilder::new()
+            .with_memory_pool(budget.memory_pool())
+            .build()?,
+    );
     let state = SessionStateBuilder::new()
         .with_default_features()
         .with_query_planner(Arc::new(VqlQueryPlanner))
+        .with_runtime_env(runtime_env as Arc<RuntimeEnv>)
         .build();
     let context = SessionContext::new_with_state(state);
     register_functions(
@@ -39,8 +50,9 @@ pub(crate) fn context_for_snapshot(
         Arc::clone(&media),
         Arc::clone(&fail_on_error),
         python_udf_host,
+        Some(budget.clone()),
     )?;
-    register_tables(&context, snapshot, media)?;
+    register_tables(&context, snapshot, media, metrics)?;
     register_streams(&context, snapshot)?;
     Ok(context)
 }
@@ -74,6 +86,7 @@ pub(crate) fn context_for_function_ddl(
         media,
         fail_on_error,
         python_udf_host,
+        None,
     )?;
     Ok(context)
 }
@@ -85,6 +98,7 @@ fn register_functions(
     media: Arc<MediaRuntime>,
     fail_on_error: Arc<AtomicBool>,
     python_udf_host: Option<PythonUdfHostRef>,
+    budget: Option<QueryBudget>,
 ) -> Result<()> {
     context.register_udf(box_center_udf());
     context.register_udf(polygon_udf("polygon"));
@@ -101,6 +115,7 @@ fn register_functions(
                     Arc::clone(&fail_on_error),
                     Arc::clone(&catalog),
                     Arc::clone(&media),
+                    budget.clone(),
                 )?);
             }
             crate::catalog::FunctionImplementation::SqlMacro { .. } => {}
@@ -113,6 +128,7 @@ fn register_tables(
     context: &SessionContext,
     snapshot: &DefinitionSnapshot,
     media: Arc<MediaRuntime>,
+    metrics: Arc<QueryMetrics>,
 ) -> Result<()> {
     for (name, table) in snapshot.tables() {
         match table.definition.provider {
@@ -121,7 +137,8 @@ fn register_tables(
                     &table.definition.location,
                     table.revision,
                     table.definition.recursive,
-                )?;
+                )?
+                .with_query_metrics(Arc::clone(&metrics));
                 if provider.schema().as_ref() != table.schema.as_ref() {
                     return Err(VqlError::new(
                         ErrorCode::Catalog,
@@ -138,7 +155,8 @@ fn register_tables(
                     table.definition.fps,
                     table.definition.start_time_ms,
                     Arc::clone(&media),
-                )?;
+                )?
+                .with_query_metrics(Arc::clone(&metrics));
                 if provider.schema().as_ref() != table.schema.as_ref() {
                     return Err(VqlError::new(
                         ErrorCode::Catalog,

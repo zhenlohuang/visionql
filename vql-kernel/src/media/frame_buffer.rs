@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use super::DecodedFrame;
+#[cfg(feature = "ffmpeg-native")]
+use crate::resources::QueryReservation;
 use crate::{ErrorCode, Result, VqlError};
 
 #[derive(Debug)]
@@ -26,7 +28,14 @@ impl FrameBufferRegistry {
     pub(crate) fn register(
         self: &Arc<Self>,
         frames: Vec<DecodedFrame>,
+        reservations: Vec<QueryReservation>,
     ) -> Result<(u64, FrameBufferLease)> {
+        if frames.len() != reservations.len() {
+            return Err(VqlError::new(
+                ErrorCode::Internal,
+                "frame buffer reservations do not match decoded frames",
+            ));
+        }
         let buffer_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.buffers
             .lock()
@@ -37,6 +46,7 @@ impl FrameBufferRegistry {
             FrameBufferLease {
                 buffer_id,
                 registry: Arc::downgrade(self),
+                _reservations: reservations,
             },
         ))
     }
@@ -59,6 +69,27 @@ impl FrameBufferRegistry {
         })
     }
 
+    pub(crate) fn frame_bytes(&self, buffer_id: u64, slot: u32) -> Result<usize> {
+        let buffers = self.buffers.lock().map_err(|_| {
+            VqlError::new(ErrorCode::Internal, "frame buffer registry was poisoned")
+        })?;
+        let buffer = buffers.get(&buffer_id).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::Execution,
+                format!("frame buffer {buffer_id} is no longer available"),
+            )
+        })?;
+        buffer
+            .get(slot as usize)
+            .map(|frame| frame.rgb.len())
+            .ok_or_else(|| {
+                VqlError::new(
+                    ErrorCode::Internal,
+                    format!("frame buffer {buffer_id} has no slot {slot}"),
+                )
+            })
+    }
+
     #[cfg(all(test, feature = "ffmpeg-native"))]
     pub(crate) fn contains(&self, buffer_id: u64) -> bool {
         self.buffers
@@ -71,6 +102,8 @@ impl FrameBufferRegistry {
 pub(crate) struct FrameBufferLease {
     buffer_id: u64,
     registry: Weak<FrameBufferRegistry>,
+    #[cfg(feature = "ffmpeg-native")]
+    _reservations: Vec<QueryReservation>,
 }
 
 impl Drop for FrameBufferLease {
@@ -90,13 +123,22 @@ mod tests {
     #[test]
     fn lease_controls_buffer_lifetime() {
         let registry = FrameBufferRegistry::new();
+        let metrics = Arc::new(crate::resources::ResourceMetrics::default());
+        let budget = crate::resources::QueryBudget::new(1024, metrics);
         let (buffer_id, lease) = registry
-            .register(vec![DecodedFrame {
-                pts_ms: 0,
-                width: 1,
-                height: 1,
-                rgb: vec![1, 2, 3],
-            }])
+            .register(
+                vec![DecodedFrame {
+                    pts_ms: 0,
+                    width: 1,
+                    height: 1,
+                    rgb: vec![1, 2, 3],
+                }],
+                vec![
+                    budget
+                        .reserve(crate::QueryResource::FrameBuffer, 3)
+                        .unwrap(),
+                ],
+            )
             .unwrap();
         assert_eq!(registry.resolve(buffer_id, 0).unwrap().rgb, [1, 2, 3]);
         assert!(registry.contains(buffer_id));

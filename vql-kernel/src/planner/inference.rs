@@ -34,6 +34,8 @@ use crate::models::{
     BoundInferenceParams, ModelRuntime, bind_inference_params, semantic_fingerprint,
 };
 use crate::planner::sink::SinkExtensionPlanner;
+use crate::resources::QueryBudget;
+use crate::session::QueryMetrics;
 
 #[derive(Clone)]
 struct InferenceNode {
@@ -48,6 +50,8 @@ struct InferenceNode {
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
+    budget: QueryBudget,
+    metrics: Arc<QueryMetrics>,
 }
 
 impl InferenceNode {
@@ -63,6 +67,8 @@ impl InferenceNode {
         runtime: Arc<ModelRuntime>,
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
+        budget: QueryBudget,
+        metrics: Arc<QueryMetrics>,
     ) -> DataFusionResult<Self> {
         let result = DFSchema::from_unqualified_fields(
             Fields::from(vec![Arc::new(Field::new(
@@ -85,6 +91,8 @@ impl InferenceNode {
             runtime,
             fail_on_error,
             cancellation,
+            budget,
+            metrics,
         })
     }
 
@@ -106,6 +114,29 @@ fn execution_summary(model: &ResolvedModelDef) -> (&RuntimeSpec, &str, &str) {
             post_processor,
         } => (runtime, &pre_processor.kind, &post_processor.kind),
         ResolvedExecutionSpec::Service { runtime } => (runtime, "service", "service"),
+    }
+}
+
+fn model_identity(model: &ResolvedModelDef) -> String {
+    model
+        .artifact_hash
+        .as_ref()
+        .map(|hash| format!("artifact:{hash}"))
+        .unwrap_or_else(|| format!("semantic:{}", model.semantic_fingerprint))
+}
+
+fn batching_owner(model: &ResolvedModelDef) -> &'static str {
+    match model.execution {
+        ResolvedExecutionSpec::Embedded { .. } => "visionql",
+        ResolvedExecutionSpec::Service { .. } => "service",
+    }
+}
+
+fn decode_summary(model: &ResolvedModelDef) -> &'static str {
+    if model.source.starts_with("mock://") {
+        "skipped(mock)"
+    } else {
+        "required"
     }
 }
 
@@ -168,15 +199,23 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
         let (runtime, pre_processor, post_processor) = execution_summary(&self.model);
         write!(
             formatter,
-            "InferenceNode: operation={}, model={}, runtime={}, protocol={}, pre_processor={}, post_processor={}, output={}, mutable_endpoint={}",
+            "InferenceNode: operation={}, model={}, identity={}, runtime={}, protocol={}, pre_processor={}, post_processor={}, batching_owner={}, volatile={}, dedup={}, decode={}, output={}",
             self.operation,
             self.model.name,
+            model_identity(&self.model),
             runtime.kind,
             runtime.protocol.as_deref().unwrap_or("embedded"),
             pre_processor,
             post_processor,
+            batching_owner(&self.model),
+            self.model.volatile,
+            if self.model.volatile {
+                "disabled"
+            } else {
+                "enabled"
+            },
+            decode_summary(&self.model),
             self.output_name,
-            self.model.volatile
         )
     }
 
@@ -201,6 +240,8 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
             Arc::clone(&self.runtime),
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
+            self.budget.clone(),
+            Arc::clone(&self.metrics),
         )
     }
 
@@ -220,12 +261,50 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
     }
 }
 
+pub(crate) fn explain_annotations(plan: &LogicalPlan, image_payload: &str) -> Vec<String> {
+    let mut annotations = Vec::new();
+    collect_explain_annotations(plan, image_payload, &mut annotations);
+    annotations
+}
+
+fn collect_explain_annotations(
+    plan: &LogicalPlan,
+    image_payload: &str,
+    annotations: &mut Vec<String>,
+) {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(node) = extension.node.as_any().downcast_ref::<InferenceNode>()
+    {
+        let (runtime, pre_processor, post_processor) = execution_summary(&node.model);
+        annotations.push(format!(
+            "Inference model={} identity={} runtime={} protocol={} pipeline={} -> {} -> {} batching_owner={} volatile={} dedup={} decode={} image_payload={}",
+            node.model.name,
+            model_identity(&node.model),
+            runtime.kind,
+            runtime.protocol.as_deref().unwrap_or("embedded"),
+            pre_processor,
+            runtime.kind,
+            post_processor,
+            batching_owner(&node.model),
+            node.model.volatile,
+            if node.model.volatile { "disabled" } else { "enabled" },
+            decode_summary(&node.model),
+            image_payload,
+        ));
+    }
+    for input in plan.inputs() {
+        collect_explain_annotations(input, image_payload, annotations);
+    }
+}
+
 pub(crate) fn extract_inference(
     plan: LogicalPlan,
     snapshot: &DefinitionSnapshot,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
+    budget: QueryBudget,
+    metrics: Arc<QueryMetrics>,
 ) -> crate::Result<LogicalPlan> {
     let mut volatile_id = 0_u64;
     plan.transform_up(|plan| {
@@ -235,6 +314,8 @@ pub(crate) fn extract_inference(
             Arc::clone(&runtime),
             Arc::clone(&fail_on_error),
             cancellation.clone(),
+            budget.clone(),
+            Arc::clone(&metrics),
             &mut volatile_id,
         )
     })
@@ -242,12 +323,15 @@ pub(crate) fn extract_inference(
     .map_err(Into::into)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_plan_node(
     plan: LogicalPlan,
     snapshot: &DefinitionSnapshot,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
+    budget: QueryBudget,
+    metrics: Arc<QueryMetrics>,
     volatile_id: &mut u64,
 ) -> DataFusionResult<Transformed<LogicalPlan>> {
     let mut inputs = plan
@@ -332,6 +416,8 @@ fn rewrite_plan_node(
                         Arc::clone(&runtime),
                         Arc::clone(&fail_on_error),
                         cancellation.clone(),
+                        budget.clone(),
+                        Arc::clone(&metrics),
                     )?),
                 }));
             }
@@ -544,6 +630,8 @@ impl ExtensionPlanner for InferenceExtensionPlanner {
             Arc::clone(&node.runtime),
             Arc::clone(&node.fail_on_error),
             node.cancellation.clone(),
+            node.budget.clone(),
+            Arc::clone(&node.metrics),
         ))))
     }
 }
@@ -559,6 +647,8 @@ struct InferenceExec {
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
+    budget: QueryBudget,
+    metrics: Arc<QueryMetrics>,
     properties: Arc<PlanProperties>,
 }
 
@@ -575,6 +665,8 @@ impl InferenceExec {
         runtime: Arc<ModelRuntime>,
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
+        budget: QueryBudget,
+        metrics: Arc<QueryMetrics>,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
@@ -593,6 +685,8 @@ impl InferenceExec {
             runtime,
             fail_on_error,
             cancellation,
+            budget,
+            metrics,
             properties,
         }
     }
@@ -618,8 +712,20 @@ impl DisplayAs for InferenceExec {
         let (runtime, _, _) = execution_summary(&self.model);
         write!(
             formatter,
-            "InferenceExec: operation={}, model={}, runtime={}, output={}",
-            self.operation, self.model.name, runtime.kind, self.output_name
+            "InferenceExec: operation={}, model={}, identity={}, runtime={}, batching_owner={}, volatile={}, dedup={}, decode={}, output={}",
+            self.operation,
+            self.model.name,
+            model_identity(&self.model),
+            runtime.kind,
+            batching_owner(&self.model),
+            self.model.volatile,
+            if self.model.volatile {
+                "disabled"
+            } else {
+                "enabled"
+            },
+            decode_summary(&self.model),
+            self.output_name
         )
     }
 }
@@ -657,6 +763,8 @@ impl ExecutionPlan for InferenceExec {
             Arc::clone(&self.runtime),
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
+            self.budget.clone(),
+            Arc::clone(&self.metrics),
         )))
     }
 
@@ -675,6 +783,8 @@ impl ExecutionPlan for InferenceExec {
         let runtime = Arc::clone(&self.runtime);
         let fail_on_error = Arc::clone(&self.fail_on_error);
         let cancellation = self.cancellation.clone();
+        let budget = self.budget.clone();
+        let metrics = Arc::clone(&self.metrics);
         let stream = async_stream::try_stream! {
             while let Some(batch) = input.next().await {
                 if cancellation.is_cancelled() {
@@ -698,9 +808,11 @@ impl ExecutionPlan for InferenceExec {
                         images,
                         fail_on_error.load(Ordering::Relaxed),
                         cancellation.clone(),
+                        &budget,
+                        Arc::clone(&metrics),
                     )
                     .await
-                    .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
                 let mut columns = batch.columns().to_vec();
                 columns.push(output);
                 yield RecordBatch::try_new(Arc::clone(&schema), columns)?;

@@ -15,7 +15,7 @@ mod triton_backend;
 pub(crate) use definition::semantic_fingerprint;
 pub(crate) use params::{BoundInferenceParams, bind_inference_params};
 pub(crate) use registry::PipelineRegistry;
-pub(crate) use runtime::{ModelCounters, ModelRuntime, image_detection};
+pub(crate) use runtime::{ModelRuntime, image_detection};
 
 use std::sync::Arc;
 

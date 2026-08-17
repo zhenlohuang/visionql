@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::KafkaSinkConfig;
+use crate::resources::{QueryBudget, QueryReservation};
 use crate::secrets::KafkaOAuthToken;
 use crate::types::is_image_field;
 use crate::{ErrorCode, KafkaAuthentication, Result, SecretProviderRef, VqlError};
@@ -31,6 +32,7 @@ pub(crate) struct KafkaSink {
     secret_provider: Option<SecretProviderRef>,
     state: Mutex<KafkaSinkState>,
     delivery_slots: Arc<Semaphore>,
+    budget: QueryBudget,
 }
 
 #[derive(Default)]
@@ -73,6 +75,7 @@ impl KafkaSink {
         name: String,
         config: KafkaSinkConfig,
         secret_provider: Option<SecretProviderRef>,
+        budget: QueryBudget,
     ) -> Self {
         let delivery_slots = Arc::new(Semaphore::new(config.buffer_capacity));
         Self {
@@ -81,6 +84,7 @@ impl KafkaSink {
             secret_provider,
             state: Mutex::new(KafkaSinkState::default()),
             delivery_slots,
+            budget,
         }
     }
 
@@ -121,11 +125,15 @@ impl KafkaSink {
                 }
             };
             let payload = json_message(&batch, row)?;
+            let reservation = self
+                .budget
+                .reserve(crate::QueryResource::SinkBuffer, payload.len())?;
             deliveries.push(deliver(
                 Arc::clone(&producer),
                 self.config.topic.clone(),
                 payload,
                 permit,
+                reservation,
             ));
         }
         while !deliveries.is_empty() {
@@ -276,6 +284,7 @@ async fn deliver(
     topic: String,
     payload: Vec<u8>,
     _permit: OwnedSemaphorePermit,
+    _reservation: QueryReservation,
 ) -> Result<()> {
     producer
         .send(
@@ -531,6 +540,13 @@ mod tests {
         BinaryArray, BooleanArray, Float64Array, Int64Array, TimestampMillisecondArray,
     };
 
+    fn query_budget() -> QueryBudget {
+        QueryBudget::new(
+            1024 * 1024,
+            Arc::new(crate::resources::ResourceMetrics::default()),
+        )
+    }
+
     fn kafka_config(buffer_capacity: usize) -> KafkaSinkConfig {
         KafkaSinkConfig {
             bootstrap_servers: "127.0.0.1:9092".to_owned(),
@@ -680,7 +696,7 @@ mod tests {
 
     #[test]
     fn delivery_capacity_is_shared_by_all_writers() {
-        let sink = KafkaSink::new("events".to_owned(), kafka_config(2), None);
+        let sink = KafkaSink::new("events".to_owned(), kafka_config(2), None, query_budget());
         let first = Arc::clone(&sink.delivery_slots)
             .try_acquire_owned()
             .unwrap();
@@ -728,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn producer_lifecycle_waits_for_the_last_query_execution() {
-        let sink = KafkaSink::new("events".to_owned(), kafka_config(2), None);
+        let sink = KafkaSink::new("events".to_owned(), kafka_config(2), None, query_budget());
         let cancellation = CancellationToken::new();
         sink.begin_execution().await;
         sink.begin_execution().await;

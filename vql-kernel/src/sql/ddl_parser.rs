@@ -720,8 +720,19 @@ fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
 }
 
 fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
+    if token_is(tokens.get(1), "CREATE") {
+        if tokens.len() != 4 {
+            return invalid("expected SHOW CREATE <object kind> <name>");
+        }
+        return Ok(VqlStatement::ShowCreate {
+            kind: singular_kind(tokens.get(2))?,
+            name: identifier(tokens.get(3), "object name")?,
+        });
+    }
     if tokens.len() != 2 {
-        return invalid("expected SHOW TABLES, STREAMS, MODELS, FUNCTIONS, or SINKS");
+        return invalid(
+            "expected SHOW TABLES, STREAMS, MODELS, FUNCTIONS, SINKS, or SHOW CREATE <kind> <name>",
+        );
     }
     let kind = match word(tokens.get(1)).as_deref() {
         Some("TABLES") => ShowKind::Tables,
@@ -1003,6 +1014,19 @@ mod tests {
                 name: "detector".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn parses_show_create() {
+        assert_eq!(
+            parse_statement("SHOW CREATE MODEL detector").unwrap(),
+            VqlStatement::ShowCreate {
+                kind: ShowKind::Models,
+                name: "detector".to_owned(),
+            }
+        );
+        assert!(parse_statement("SHOW CREATE MODEL").is_err());
+        assert!(parse_statement("SHOW CREATE VIEW example").is_err());
     }
 
     #[test]

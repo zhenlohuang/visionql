@@ -115,6 +115,7 @@ FROM sample_images;
 `USING` selects the Runtime, and `WITH` is interpreted only by that Runtime. `CREATE MODEL` is a fast local declaration: it does not download an artifact or contact a service. `RESOLVE MODEL` performs the potentially slow download, cache installation, checksum verification, or service metadata validation. Queries reject a Model that has not been resolved.
 
 Use `SHOW MODELS` to inspect each declaration's `UNRESOLVED` or `RESOLVED` status.
+`SHOW CREATE TABLE|STREAM|MODEL|FUNCTION|SINK <name>` returns sanitized canonical DDL that can be parsed and executed again; credential references are redacted.
 
 ### Model sources
 
@@ -181,7 +182,7 @@ maturin develop --locked
 cd ..
 ```
 
-The synchronous API returns a `QueryHandle`; `collect()` materializes a PyArrow table.
+The synchronous API returns a `QueryHandle`; `collect()` materializes a PyArrow table and `metrics()` returns the query-local row, media, inference, latency, drop, and current/peak resource metrics.
 
 ```python
 import visionql
@@ -196,6 +197,7 @@ result = session.sql("""
 
 table = result.collect()
 print(table)
+print(result.metrics())
 ```
 
 Python-hosted UDFs receive and return Arrow arrays in batches. They require the Python host and are not available in the standalone CLI.
@@ -203,12 +205,12 @@ Python-hosted UDFs receive and return Arrow arrays in batches. They require the 
 ## CLI
 
 ```text
-vql [--catalog PATH] shell
-vql [--catalog PATH] run <script.sql>
-vql [--catalog PATH] explain <query-or-file>
+vql [--catalog PATH] [--query-memory-limit-bytes BYTES] [--metrics] shell
+vql [--catalog PATH] [--query-memory-limit-bytes BYTES] [--metrics] run <script.sql>
+vql [--catalog PATH] [--query-memory-limit-bytes BYTES] [--metrics] explain <query-or-file>
 ```
 
-During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG` to a `tracing` filter such as `info` or `vql_kernel=debug` when diagnosing execution.
+`--metrics` writes one structured JSON metrics object per query. VisionQL-aware `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Sink placement without opening sources or probing models and services. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG` to a `tracing` filter such as `info` or `vql_kernel=debug` when diagnosing execution.
 
 ## Runtime state
 
@@ -219,6 +221,7 @@ VisionQL keeps local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The
 | Catalog | `$VQL_HOME/catalog/vql.db`; override with `VQL_CATALOG` or `--catalog PATH` |
 | Shell history | `$VQL_HOME/history` |
 | Model cache | `$VQL_HOME/cache/models/`; local `file://` models stay at their source path |
+| Per-query memory | 512 MiB shared by DataFusion, media, model, window, and Sink reservations; override with `VQL_QUERY_MEMORY_LIMIT_BYTES`, `--query-memory-limit-bytes`, or Python `connect(query_memory_limit_bytes=...)` |
 | `HF_TOKEN` | Authenticates private `hf://` downloads |
 | `VQL_LOG` | Configures Rust tracing; default is off |
 

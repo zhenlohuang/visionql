@@ -7,4 +7,4 @@ pub(crate) use decoder::{
     DecodedFrame, FrameInfo, SampleSpec, TimeRange, VideoDecoder, VideoMetadata, sample_timestamps,
 };
 pub(crate) use frame_buffer::{FrameBufferLease, FrameBufferRegistry};
-pub(crate) use runtime::{MediaCounters, MediaRuntime};
+pub(crate) use runtime::MediaRuntime;

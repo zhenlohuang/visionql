@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ use super::registry::{
     RuntimeFactory, RuntimeResolution, deserialize_model_options, invalid_option,
 };
 use crate::catalog::{ModelDef, ModelType, ResolvedExecutionSpec, ResolvedModelDef, RuntimeSpec};
+use crate::resources::{QueryBudget, QueryReservation};
 use crate::{ErrorCode, Result, VqlError};
 
 const SUPPORTED_TYPES: &[ModelType] = &[ModelType::ObjectDetection];
@@ -259,11 +260,16 @@ impl TritonServiceBackend {
         Ok(())
     }
 
-    async fn infer_inner(&self, images: Vec<DynamicImage>) -> Result<arrow::array::ArrayRef> {
+    async fn infer_inner(
+        &self,
+        images: Vec<DynamicImage>,
+        budget: &QueryBudget,
+    ) -> Result<arrow::array::ArrayRef> {
         self.validate_metadata().await?;
+        let mut payload_reservations = Vec::new();
         let data = images
             .into_iter()
-            .map(encode_image)
+            .map(|image| encode_image(image, budget, &mut payload_reservations))
             .collect::<Result<Vec<_>>>()?;
         let request = InferRequest {
             inputs: vec![InferInput {
@@ -278,10 +284,24 @@ impl TritonServiceBackend {
                 name: CONTRACT_OUTPUT,
             }],
         };
-        let response = self
+        let mut payload = BudgetedCursor::new(budget, crate::QueryResource::TritonPayload)?;
+        if let Err(error) = serde_json::to_writer(&mut payload, &request) {
+            if let Some(error) = payload.take_reservation_error() {
+                return Err(error);
+            }
+            return Err(VqlError::new(
+                ErrorCode::Execution,
+                "failed to serialize Triton inference request",
+            )
+            .with_source(error));
+        }
+        let (payload, payload_reservation) = payload.into_parts();
+        payload_reservations.push(payload_reservation);
+        let mut response = self
             .client
             .post(&self.infer_url)
-            .json(&request)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload)
             .send()
             .await
             .map_err(|error| {
@@ -298,10 +318,18 @@ impl TritonServiceBackend {
                     "Triton Inference Server inference returned an error status",
                 )
                 .with_source(error)
-            })?
-            .json::<InferResponse>()
-            .await
-            .map_err(|error| {
+            })?;
+        let mut response_bytes = Vec::new();
+        let mut response_reservation = budget.reserve(crate::QueryResource::TritonPayload, 0)?;
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            VqlError::new(ErrorCode::Execution, "Triton KServe V2 response is invalid")
+                .with_source(error)
+        })? {
+            response_reservation.try_grow(chunk.len())?;
+            response_bytes.extend_from_slice(&chunk);
+        }
+        let response =
+            serde_json::from_slice::<InferResponse>(&response_bytes).map_err(|error| {
                 VqlError::new(ErrorCode::Execution, "Triton KServe V2 response is invalid")
                     .with_source(error)
             })?;
@@ -330,21 +358,37 @@ impl TritonServiceBackend {
     }
 }
 
-fn encode_image(image: DynamicImage) -> Result<String> {
-    let mut bytes = Cursor::new(Vec::new());
-    image
-        .write_to(&mut bytes, ImageFormat::Png)
-        .map_err(|error| {
+fn encode_image(
+    image: DynamicImage,
+    budget: &QueryBudget,
+    reservations: &mut Vec<QueryReservation>,
+) -> Result<String> {
+    let mut bytes = BudgetedCursor::new(budget, crate::QueryResource::TritonPayload)?;
+    if let Err(error) = image.write_to(&mut bytes, ImageFormat::Png) {
+        if let Some(error) = bytes.take_reservation_error() {
+            return Err(error);
+        }
+        return Err(VqlError::new(
+            ErrorCode::Execution,
+            "failed to encode IMAGE for Triton Inference Server",
+        )
+        .with_source(error));
+    }
+    let (bytes, compressed_reservation) = bytes.into_parts();
+    reservations.push(compressed_reservation);
+    let encoded_length = base64::encoded_len(bytes.len(), true)
+        .and_then(|length| length.checked_add(4))
+        .ok_or_else(|| {
             VqlError::new(
-                ErrorCode::Execution,
-                "failed to encode IMAGE for Triton Inference Server",
+                ErrorCode::ResourceExhausted,
+                "Triton IMAGE payload exceeds platform limits",
             )
-            .with_source(error)
         })?;
-    Ok(format!(
-        "b64:{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
-    ))
+    reservations.push(budget.reserve(crate::QueryResource::TritonPayload, encoded_length)?);
+    let mut encoded = String::with_capacity(encoded_length);
+    encoded.push_str("b64:");
+    base64::engine::general_purpose::STANDARD.encode_string(bytes, &mut encoded);
+    Ok(encoded)
 }
 
 fn parse_detection_row(value: String) -> Result<Vec<(String, f32, [f32; 4])>> {
@@ -387,11 +431,63 @@ impl ModelBackend for TritonServiceBackend {
         &self,
         images: Vec<DynamicImage>,
         cancel: CancellationToken,
+        budget: &QueryBudget,
     ) -> Result<arrow::array::ArrayRef> {
         tokio::select! {
             _ = cancel.cancelled() => Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled")),
-            result = self.infer_inner(images) => result,
+            result = self.infer_inner(images, budget) => result,
         }
+    }
+}
+
+struct BudgetedCursor {
+    inner: Cursor<Vec<u8>>,
+    reservation: QueryReservation,
+    reservation_error: Option<VqlError>,
+}
+
+impl BudgetedCursor {
+    fn new(budget: &QueryBudget, resource: crate::QueryResource) -> Result<Self> {
+        Ok(Self {
+            inner: Cursor::new(Vec::new()),
+            reservation: budget.reserve(resource, 0)?,
+            reservation_error: None,
+        })
+    }
+
+    fn into_parts(self) -> (Vec<u8>, QueryReservation) {
+        (self.inner.into_inner(), self.reservation)
+    }
+
+    fn take_reservation_error(&mut self) -> Option<VqlError> {
+        self.reservation_error.take()
+    }
+}
+
+impl Write for BudgetedCursor {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let end = usize::try_from(self.inner.position())
+            .ok()
+            .and_then(|position| position.checked_add(bytes.len()))
+            .ok_or_else(|| std::io::Error::other("buffer size exceeds platform limits"))?;
+        if end > self.reservation.size()
+            && let Err(error) = self.reservation.try_resize(end)
+        {
+            let message = error.to_string();
+            self.reservation_error = Some(error);
+            return Err(std::io::Error::other(message));
+        }
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for BudgetedCursor {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(position)
     }
 }
 
@@ -478,6 +574,27 @@ mod tests {
         r#"{"inputs":[{"name":"image","datatype":"BYTES","shape":[-1]}],"outputs":[{"name":"detections","datatype":"BYTES","shape":[-1]}]}"#
     }
 
+    fn query_budget() -> QueryBudget {
+        QueryBudget::new(
+            16 * 1024 * 1024,
+            Arc::new(crate::resources::ResourceMetrics::default()),
+        )
+    }
+
+    #[test]
+    fn triton_payload_limit_fails_before_buffer_growth() {
+        let metrics = Arc::new(crate::resources::ResourceMetrics::default());
+        let budget = QueryBudget::new(1, Arc::clone(&metrics));
+        let mut reservations = Vec::new();
+
+        let error =
+            encode_image(DynamicImage::new_rgb8(2, 2), &budget, &mut reservations).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ResourceExhausted);
+        assert!(reservations.is_empty());
+        assert_eq!(metrics.total_usage().current_bytes, 0);
+    }
+
     #[tokio::test]
     async fn triton_service_uses_the_canonical_object_detection_contract() {
         let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
@@ -507,8 +624,13 @@ mod tests {
         });
         let backend =
             TritonServiceBackend::new(&format!("http://{address}"), "detector", Some("1")).unwrap();
+        let budget = query_budget();
         let output = backend
-            .infer(vec![DynamicImage::new_rgb8(2, 2)], CancellationToken::new())
+            .infer(
+                vec![DynamicImage::new_rgb8(2, 2)],
+                CancellationToken::new(),
+                &budget,
+            )
             .await
             .unwrap();
         assert_eq!(

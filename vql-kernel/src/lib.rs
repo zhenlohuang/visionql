@@ -8,6 +8,7 @@ mod media;
 mod models;
 mod planner;
 mod python;
+mod resources;
 mod secrets;
 mod session;
 mod sql;
@@ -20,9 +21,11 @@ pub use config::EngineConfig;
 pub use engine::Engine;
 pub use error::{ErrorCode, Result, VqlError};
 pub use python::{PyUdfHandle, PythonUdfHost, PythonUdfHostRef};
+pub use resources::{QueryResource, ResourceUsage};
 pub use secrets::{KafkaAuthentication, KafkaTlsConfig, SecretProvider, SecretProviderRef};
 pub use session::{
-    DdlResult, QueryHandle, QueryInterruptAction, QueryMetrics, Session, SessionBuilder, Statement,
+    DdlResult, DroppedFrameRange, FrameDropReason, QueryHandle, QueryInterruptAction, QueryMetrics,
+    Session, SessionBuilder, Statement,
 };
 pub use sql::{ends_with_statement_terminator, split_statements};
 pub use types::{

@@ -5,11 +5,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::postprocess::mock_detection_output;
 use crate::Result;
+use crate::resources::QueryBudget;
 
 #[async_trait]
 pub(crate) trait ModelBackend: Send + Sync + std::fmt::Debug {
-    async fn infer(&self, images: Vec<DynamicImage>, cancel: CancellationToken)
-    -> Result<ArrayRef>;
+    async fn infer(
+        &self,
+        images: Vec<DynamicImage>,
+        cancel: CancellationToken,
+        budget: &QueryBudget,
+    ) -> Result<ArrayRef>;
 }
 
 #[derive(Debug)]
@@ -31,6 +36,7 @@ impl ModelBackend for MockBackend {
         &self,
         images: Vec<DynamicImage>,
         _cancel: CancellationToken,
+        _budget: &QueryBudget,
     ) -> Result<ArrayRef> {
         Ok(mock_detection_output(&self.label, images.len()))
     }

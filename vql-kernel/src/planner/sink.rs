@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{SinkDef, SinkKind};
 use crate::connectors::kafka::{KafkaSink, validate_kafka_schema};
+use crate::resources::QueryBudget;
 use crate::{ErrorCode, Result, SecretProviderRef, VqlError};
 
 #[derive(Clone)]
@@ -43,6 +44,7 @@ impl SinkTarget {
         schema: &SchemaRef,
         cancellation: CancellationToken,
         secret_provider: Option<SecretProviderRef>,
+        budget: QueryBudget,
     ) -> Result<Self> {
         let writer = match (definition.kind, definition.kafka.clone()) {
             (SinkKind::Console, None) => SinkWriter::Console,
@@ -52,6 +54,7 @@ impl SinkTarget {
                     definition.name.clone(),
                     config,
                     secret_provider,
+                    budget,
                 )))
             }
             _ => {

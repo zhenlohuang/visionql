@@ -19,13 +19,16 @@ use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::rtsp::{rtsp_schema, start_rtsp_source};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
 use crate::functions::{VqlFunctionFactory, materialize_batch_images};
-use crate::media::{MediaCounters, MediaRuntime};
-use crate::models::{ModelCounters, semantic_fingerprint};
+use crate::media::MediaRuntime;
+use crate::models::semantic_fingerprint;
 use crate::planner::{
     SinkTarget, bind_stream_epoch, bind_tumble_output, context_for_function_ddl,
     context_for_snapshot, normalize_function_ddl, plan_statement, wrap_sink,
 };
-use crate::sql::{CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement, parse_statement};
+use crate::resources::{QueryBudget, QueryReservation, ResourceMetrics};
+use crate::sql::{
+    CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement, parse_statement, render_create,
+};
 use crate::types::{image_field, is_image_storage};
 use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
 
@@ -167,6 +170,30 @@ pub struct DdlResult {
     batches: Vec<RecordBatch>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDropReason {
+    SourceOverrun,
+    ResourceBudget,
+    DecodeError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedFrameRange {
+    pub reason: FrameDropReason,
+    pub count: u64,
+    pub first_event_time_ms: Option<i64>,
+    pub last_event_time_ms: Option<i64>,
+}
+
+const MAX_PERCENTILE_SAMPLES: usize = 2_048;
+const MAX_BATCH_HISTOGRAM_BUCKET: usize = 64;
+
+#[derive(Debug, Default)]
+struct PercentileSamples {
+    values: Vec<u64>,
+    next: usize,
+}
+
 impl DdlResult {
     pub fn batches(&self) -> &[RecordBatch] {
         &self.batches
@@ -184,14 +211,37 @@ pub struct QueryMetrics {
     inference_p50_micros: AtomicU64,
     inference_p95_micros: AtomicU64,
     batch_histogram: Mutex<Vec<u64>>,
+    inference_latencies_micros: Mutex<PercentileSamples>,
+    model_queue_p50_micros: AtomicU64,
+    model_queue_p95_micros: AtomicU64,
+    model_queue_samples_micros: Mutex<PercentileSamples>,
+    model_service_p50_micros: AtomicU64,
+    model_service_p95_micros: AtomicU64,
+    model_service_samples_micros: Mutex<PercentileSamples>,
     source_generation: AtomicU64,
     source_reconnects: AtomicU64,
     event_time_fallbacks: AtomicU64,
     source_dropped_frames: AtomicU64,
+    sampled_frames: AtomicU64,
+    first_sampled_event_time_ms: AtomicI64,
+    last_sampled_event_time_ms: AtomicI64,
+    has_sampled_event_range: AtomicBool,
+    source_input_bytes: AtomicU64,
+    observation_micros: AtomicU64,
+    source_gap_duration_ms: AtomicU64,
+    dropped_frame_ranges: Mutex<Vec<DroppedFrameRange>>,
     watermark_ms: AtomicI64,
     has_watermark: AtomicBool,
     late_rows: AtomicU64,
     window_state_bytes: AtomicU64,
+    sink_retries: AtomicU64,
+    epoch_p50_micros: AtomicU64,
+    epoch_p95_micros: AtomicU64,
+    epoch_samples_micros: Mutex<PercentileSamples>,
+    e2e_p50_micros: AtomicU64,
+    e2e_p95_micros: AtomicU64,
+    e2e_samples_micros: Mutex<PercentileSamples>,
+    pub(crate) resources: Arc<ResourceMetrics>,
 }
 
 impl QueryMetrics {
@@ -231,6 +281,22 @@ impl QueryMetrics {
             .unwrap_or_default()
     }
 
+    pub fn model_queue_p50_ms(&self) -> f64 {
+        self.model_queue_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
+    pub fn model_queue_p95_ms(&self) -> f64 {
+        self.model_queue_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
+    pub fn model_service_p50_ms(&self) -> f64 {
+        self.model_service_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
+    pub fn model_service_p95_ms(&self) -> f64 {
+        self.model_service_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
     pub fn source_generation(&self) -> u64 {
         self.source_generation.load(Ordering::Relaxed)
     }
@@ -247,6 +313,47 @@ impl QueryMetrics {
         self.source_dropped_frames.load(Ordering::Relaxed)
     }
 
+    pub fn sampled_fps(&self) -> f64 {
+        if !self.has_sampled_event_range.load(Ordering::Relaxed) {
+            return 0.0;
+        }
+        let duration_ms = self
+            .last_sampled_event_time_ms
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.first_sampled_event_time_ms.load(Ordering::Relaxed));
+        if duration_ms <= 0 {
+            return 0.0;
+        }
+        self.sampled_frames().saturating_sub(1) as f64 * 1_000.0 / duration_ms as f64
+    }
+
+    pub fn sampled_frames(&self) -> u64 {
+        self.sampled_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn source_input_bytes(&self) -> u64 {
+        self.source_input_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn input_bitrate_bps(&self) -> f64 {
+        let elapsed = self.observation_micros.load(Ordering::Relaxed);
+        if elapsed == 0 {
+            return 0.0;
+        }
+        self.source_input_bytes() as f64 * 8_000_000.0 / elapsed as f64
+    }
+
+    pub fn source_gap_duration_ms(&self) -> u64 {
+        self.source_gap_duration_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn dropped_frame_ranges(&self) -> Vec<DroppedFrameRange> {
+        self.dropped_frame_ranges
+            .lock()
+            .map(|ranges| ranges.clone())
+            .unwrap_or_default()
+    }
+
     pub fn watermark_ms(&self) -> Option<i64> {
         self.has_watermark
             .load(Ordering::Relaxed)
@@ -260,6 +367,130 @@ impl QueryMetrics {
     pub fn window_state_bytes(&self) -> u64 {
         self.window_state_bytes.load(Ordering::Relaxed)
     }
+
+    pub fn sink_retries(&self) -> u64 {
+        self.sink_retries.load(Ordering::Relaxed)
+    }
+
+    pub fn epoch_p50_ms(&self) -> f64 {
+        self.epoch_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
+    pub fn epoch_p95_ms(&self) -> f64 {
+        self.epoch_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
+    pub fn end_to_end_p50_ms(&self) -> f64 {
+        self.e2e_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
+    pub fn end_to_end_p95_ms(&self) -> f64 {
+        self.e2e_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
+    }
+
+    pub fn resource_usage(&self, resource: crate::QueryResource) -> crate::ResourceUsage {
+        self.resources.usage(resource)
+    }
+
+    pub fn total_resource_usage(&self) -> crate::ResourceUsage {
+        self.resources.total_usage()
+    }
+
+    pub(crate) fn add_input_rows(&self, rows: usize) {
+        self.input_rows.fetch_add(rows as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn add_decode_frame(&self) {
+        self.decode_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn add_error_rows(&self, rows: usize) {
+        self.error_rows.fetch_add(rows as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_inference(
+        &self,
+        rows: usize,
+        latency_micros: u64,
+        queue_wait_micros: u64,
+        service_micros: u64,
+    ) {
+        self.inference_rows
+            .fetch_add(rows as u64, Ordering::Relaxed);
+        self.inference_batches.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut histogram) = self.batch_histogram.lock() {
+            if histogram.is_empty() {
+                histogram.resize(MAX_BATCH_HISTOGRAM_BUCKET + 1, 0);
+            }
+            let bucket = rows.min(MAX_BATCH_HISTOGRAM_BUCKET);
+            histogram[bucket] = histogram[bucket].saturating_add(1);
+        }
+        record_percentiles(
+            &self.inference_latencies_micros,
+            &self.inference_p50_micros,
+            &self.inference_p95_micros,
+            latency_micros,
+        );
+        record_percentiles(
+            &self.model_queue_samples_micros,
+            &self.model_queue_p50_micros,
+            &self.model_queue_p95_micros,
+            queue_wait_micros,
+        );
+        record_percentiles(
+            &self.model_service_samples_micros,
+            &self.model_service_p50_micros,
+            &self.model_service_p95_micros,
+            service_micros,
+        );
+    }
+
+    pub(crate) fn update_source_progress(
+        &self,
+        progress: &crate::connectors::rtsp::SourceProgress,
+        observation_micros: u64,
+    ) {
+        self.sampled_frames
+            .store(progress.sampled_frames, Ordering::Relaxed);
+        if let (Some(first), Some(last)) = (
+            progress.sampled_first_event_time_ms,
+            progress.sampled_last_event_time_ms,
+        ) {
+            self.first_sampled_event_time_ms
+                .store(first, Ordering::Relaxed);
+            self.last_sampled_event_time_ms
+                .store(last, Ordering::Relaxed);
+            self.has_sampled_event_range.store(true, Ordering::Relaxed);
+        }
+        self.source_input_bytes
+            .store(progress.input_bytes, Ordering::Relaxed);
+        self.observation_micros
+            .fetch_max(observation_micros, Ordering::Relaxed);
+        self.source_gap_duration_ms
+            .store(progress.gap_duration_ms, Ordering::Relaxed);
+        if let Ok(mut ranges) = self.dropped_frame_ranges.lock() {
+            *ranges = progress.dropped_ranges.clone();
+        }
+    }
+
+    pub(crate) fn record_epoch(&self, epoch_micros: u64, end_to_end_micros: u64) {
+        record_percentiles(
+            &self.epoch_samples_micros,
+            &self.epoch_p50_micros,
+            &self.epoch_p95_micros,
+            epoch_micros,
+        );
+        self.record_end_to_end(end_to_end_micros);
+    }
+
+    pub(crate) fn record_end_to_end(&self, end_to_end_micros: u64) {
+        record_percentiles(
+            &self.e2e_samples_micros,
+            &self.e2e_p50_micros,
+            &self.e2e_p95_micros,
+            end_to_end_micros,
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -271,14 +502,13 @@ pub struct QueryHandle {
     active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     output_schema: SchemaRef,
     metrics: Arc<QueryMetrics>,
+    budget: QueryBudget,
+    output_reservation: Arc<Mutex<Option<QueryReservation>>>,
+    execution_started_at: Arc<Mutex<Option<std::time::Instant>>>,
     collected: Arc<Mutex<Option<Vec<RecordBatch>>>>,
     media: Arc<MediaRuntime>,
-    media_start: MediaCounters,
-    models: Arc<crate::models::ModelRuntime>,
     catalog: Arc<crate::catalog::CatalogStore>,
     fail_on_error: Arc<AtomicBool>,
-    model_start: ModelCounters,
-    model_sample_start: usize,
     streaming: Option<StreamingQuery>,
     sink_target: Option<SinkTarget>,
 }
@@ -298,9 +528,10 @@ struct QueryResources {
     runtime: Arc<tokio::runtime::Runtime>,
     active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     media: Arc<MediaRuntime>,
-    models: Arc<crate::models::ModelRuntime>,
     catalog: Arc<crate::catalog::CatalogStore>,
     fail_on_error: Arc<AtomicBool>,
+    metrics: Arc<QueryMetrics>,
+    budget: QueryBudget,
 }
 
 struct ActiveQueryGuard(Arc<Mutex<Option<ActiveQueryControl>>>);
@@ -360,9 +591,6 @@ impl QueryHandle {
         streaming: Option<StreamingQuery>,
     ) -> Self {
         let output_schema = restamp_schema(dataframe.schema().inner());
-        let media_start = resources.media.counters();
-        let model_start = resources.models.counters();
-        let model_sample_start = resources.models.sample_count();
         Self {
             dataframe,
             runtime: resources.runtime,
@@ -370,15 +598,14 @@ impl QueryHandle {
             graceful_stop: CancellationToken::new(),
             active_query: resources.active_query,
             output_schema,
-            metrics: Arc::new(QueryMetrics::default()),
+            metrics: resources.metrics,
+            budget: resources.budget,
+            output_reservation: Arc::new(Mutex::new(None)),
+            execution_started_at: Arc::new(Mutex::new(None)),
             collected: Arc::new(Mutex::new(None)),
             media: resources.media,
-            media_start,
-            models: resources.models,
             catalog: resources.catalog,
             fail_on_error: resources.fail_on_error,
-            model_start,
-            model_sample_start,
             streaming,
             sink_target: None,
         }
@@ -389,6 +616,10 @@ impl QueryHandle {
     }
 
     pub fn stream(&self) -> Result<SendableRecordBatchStream> {
+        self.stream_with_output_budget(true)
+    }
+
+    fn stream_with_output_budget(&self, reserve_output: bool) -> Result<SendableRecordBatchStream> {
         if let Some(batches) = self.cached_batches()? {
             let stream = futures::stream::iter(batches.into_iter().map(Ok));
             return Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -396,12 +627,13 @@ impl QueryHandle {
                 stream,
             )));
         }
+        let execution_started_at = self.start_execution()?;
         self.set_active()?;
         let active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
         let input = if self.streaming.is_some() {
-            self.stream_rtsp()?
+            self.stream_rtsp(execution_started_at, reserve_output)?
         } else {
-            self.stream_bounded()?
+            self.stream_bounded(reserve_output)?
         };
         let input = if let Some(target) = self.sink_target.clone() {
             close_sink_stream(
@@ -420,7 +652,7 @@ impl QueryHandle {
         ))
     }
 
-    fn stream_bounded(&self) -> Result<SendableRecordBatchStream> {
+    fn stream_bounded(&self, reserve_output: bool) -> Result<SendableRecordBatchStream> {
         let input = self
             .runtime
             .block_on(self.dataframe.clone().execute_stream())?;
@@ -428,6 +660,7 @@ impl QueryHandle {
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
         let metrics = Arc::clone(&self.metrics);
+        let budget = self.budget.clone();
         let stream = async_stream::try_stream! {
             let mut input = input;
             loop {
@@ -442,6 +675,13 @@ impl QueryHandle {
                 }
                 let Some(batch) = next else { break; };
                 let batch = batch?;
+                let _output_reservation = if reserve_output {
+                    Some(budget
+                        .reserve(crate::QueryResource::Arrow, batch.get_array_memory_size())
+                        .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?)
+                } else {
+                    None
+                };
                 metrics.output_rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                 yield RecordBatch::try_new(
                     Arc::clone(&output_schema),
@@ -455,7 +695,11 @@ impl QueryHandle {
         )))
     }
 
-    fn stream_rtsp(&self) -> Result<SendableRecordBatchStream> {
+    fn stream_rtsp(
+        &self,
+        query_started_at: std::time::Instant,
+        reserve_output: bool,
+    ) -> Result<SendableRecordBatchStream> {
         let streaming = self
             .streaming
             .clone()
@@ -471,6 +715,7 @@ impl QueryHandle {
             Arc::clone(&self.media),
             Arc::clone(&self.fail_on_error),
             self.graceful_stop.clone(),
+            self.budget.clone(),
         )?;
         let stream_name = streaming.name;
         let mut skip_remaining = streaming.skip;
@@ -490,14 +735,13 @@ impl QueryHandle {
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
         let metrics = Arc::clone(&self.metrics);
+        let budget = self.budget.clone();
         let window_state_metric_guard = tumble_state
             .as_ref()
             .map(|_| WindowStateMetricGuard(Arc::clone(&metrics)));
         let catalog = Arc::clone(&self.catalog);
         let media = Arc::clone(&self.media);
         let fail_on_error = Arc::clone(&self.fail_on_error);
-        let models = Arc::clone(&self.models);
-        let model_start = self.model_start;
         let stream = async_stream::try_stream! {
             let _window_state_metric_guard = window_state_metric_guard;
             'epochs: loop {
@@ -514,8 +758,9 @@ impl QueryHandle {
                     ))?;
                 }
                 let Some(epoch) = next else { break; };
+                let epoch_started = std::time::Instant::now();
                 let input_rows = epoch.batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-                metrics.input_rows.fetch_add(input_rows as u64, Ordering::Relaxed);
+                metrics.add_input_rows(input_rows);
                 metrics.source_generation.store(
                     epoch.source_progress.generation,
                     Ordering::Relaxed,
@@ -535,6 +780,10 @@ impl QueryHandle {
                 metrics.source_dropped_frames.store(
                     epoch.source_progress.dropped_frames,
                     Ordering::Relaxed,
+                );
+                metrics.update_source_progress(
+                    &epoch.source_progress,
+                    query_started_at.elapsed().as_micros() as u64,
                 );
                 let dataframe = bind_stream_epoch(
                     template.clone(),
@@ -578,7 +827,7 @@ impl QueryHandle {
                     None => None,
                 } {
                     let batch = batch?;
-                    let Some(batch) = prepare_stream_output(
+                    let Some(materialized) = prepare_stream_output(
                         batch,
                         &mut skip_remaining,
                         &mut fetch_remaining,
@@ -589,6 +838,7 @@ impl QueryHandle {
                                 Arc::clone(&media),
                                 batch,
                                 fail_on_error.load(Ordering::Relaxed),
+                                budget.clone(),
                             )
                         },
                     )
@@ -596,6 +846,15 @@ impl QueryHandle {
                     else {
                         continue;
                     };
+                    let batch = materialized.batch;
+                    let _output_reservation = if reserve_output {
+                        Some(budget
+                            .reserve(crate::QueryResource::Arrow, batch.get_array_memory_size())
+                            .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?)
+                    } else {
+                        None
+                    };
+                    drop(materialized.reservations);
                     metrics.output_rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                     yield RecordBatch::try_new(
                         Arc::clone(&output_schema),
@@ -606,6 +865,10 @@ impl QueryHandle {
                             metrics.watermark_ms.store(watermark_ms, Ordering::Relaxed);
                             metrics.has_watermark.store(true, Ordering::Relaxed);
                         }
+                        metrics.record_epoch(
+                            epoch_started.elapsed().as_micros() as u64,
+                            epoch.admitted_at.elapsed().as_micros() as u64,
+                        );
                         break 'epochs;
                     }
                 }
@@ -619,24 +882,9 @@ impl QueryHandle {
                     sampled_frames = epoch.source_progress.sampled_frames,
                     "completed RTSP epoch"
                 );
-                let model_end = models.counters();
-                metrics.inference_rows.store(
-                    model_end
-                        .inference_rows
-                        .saturating_sub(model_start.inference_rows),
-                    Ordering::Relaxed,
-                );
-                metrics.inference_batches.store(
-                    model_end
-                        .inference_batches
-                        .saturating_sub(model_start.inference_batches),
-                    Ordering::Relaxed,
-                );
-                metrics.error_rows.store(
-                    model_end
-                        .inference_errors
-                        .saturating_sub(model_start.inference_errors),
-                    Ordering::Relaxed,
+                metrics.record_epoch(
+                    epoch_started.elapsed().as_micros() as u64,
+                    epoch.admitted_at.elapsed().as_micros() as u64,
                 );
                 drop(epoch.frame_lease);
             }
@@ -651,80 +899,45 @@ impl QueryHandle {
         if let Some(batches) = self.cached_batches()? {
             return Ok(batches);
         }
-        let stream = self.stream()?;
-        let result = self
-            .runtime
-            .block_on(async { stream.collect::<Vec<_>>().await });
+        let mut stream = self.stream_with_output_budget(false)?;
+        let mut output_reservation = self.budget.reserve(crate::QueryResource::Arrow, 0)?;
+        let result = self.runtime.block_on(async {
+            let mut batches = Vec::new();
+            while let Some(batch) = stream.next().await {
+                match batch {
+                    Ok(batch) => {
+                        output_reservation.try_grow(batch.get_array_memory_size())?;
+                        batches.push(batch);
+                    }
+                    Err(_error) if self.cancellation.is_cancelled() => {
+                        return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(batches)
+        });
         if let Ok(mut active) = self.active_query.lock() {
             *active = None;
         }
-        let mut batches = Vec::with_capacity(result.len());
-        for batch in result {
-            match batch {
-                Ok(batch) => batches.push(batch),
-                Err(_error) if self.cancellation.is_cancelled() => {
-                    return Err(VqlError::new(ErrorCode::QueryCancelled, "query cancelled"));
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
+        let batches = result?;
         let mut collected = self
             .collected
             .lock()
             .map_err(|_| VqlError::new(ErrorCode::Internal, "query result cache was poisoned"))?;
         *collected = Some(batches.clone());
-        let media_end = self.media.counters();
-        if self.streaming.is_none() {
-            self.metrics.decode_frames.store(
-                media_end
-                    .decoded_frames
-                    .saturating_sub(self.media_start.decoded_frames),
-                Ordering::Relaxed,
-            );
-        }
-        let model_end = self.models.counters();
-        self.metrics.inference_rows.store(
-            model_end
-                .inference_rows
-                .saturating_sub(self.model_start.inference_rows),
-            Ordering::Relaxed,
-        );
-        self.metrics.inference_batches.store(
-            model_end
-                .inference_batches
-                .saturating_sub(self.model_start.inference_batches),
-            Ordering::Relaxed,
-        );
-        self.metrics.error_rows.store(
-            media_end
-                .decode_errors
-                .saturating_sub(self.media_start.decode_errors)
-                .saturating_add(
-                    model_end
-                        .inference_errors
-                        .saturating_sub(self.model_start.inference_errors),
-                ),
-            Ordering::Relaxed,
-        );
-        if self.streaming.is_none() {
+        *self.output_reservation.lock().map_err(|_| {
+            VqlError::new(ErrorCode::Internal, "query result reservation was poisoned")
+        })? = Some(output_reservation);
+        if self.streaming.is_none() && self.metrics.input_rows() == 0 {
             self.metrics.input_rows.store(
                 self.metrics.output_rows.load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
         }
-        let samples = self.models.samples_since(self.model_sample_start);
-        let mut latencies = samples.iter().map(|sample| sample.0).collect::<Vec<_>>();
-        latencies.sort_unstable();
-        if !latencies.is_empty() {
+        if self.streaming.is_none() {
             self.metrics
-                .inference_p50_micros
-                .store(percentile(&latencies, 0.50), Ordering::Relaxed);
-            self.metrics
-                .inference_p95_micros
-                .store(percentile(&latencies, 0.95), Ordering::Relaxed);
-        }
-        if let Ok(mut histogram) = self.metrics.batch_histogram.lock() {
-            *histogram = samples.into_iter().map(|sample| sample.1).collect();
+                .record_end_to_end(self.execution_elapsed_micros()?);
         }
         Ok(batches)
     }
@@ -757,7 +970,7 @@ impl QueryHandle {
         mut callback: impl FnMut(&RecordBatch) -> Result<()>,
     ) -> Result<()> {
         let mut stream = self.stream()?;
-        self.runtime.block_on(async {
+        let result = self.runtime.block_on(async {
             while let Some(batch) = stream.next().await {
                 match batch {
                     Ok(batch) => callback(&batch)?,
@@ -768,7 +981,23 @@ impl QueryHandle {
                 }
             }
             Ok(())
-        })
+        });
+        if result.is_ok() && self.streaming.is_none() {
+            self.metrics
+                .record_end_to_end(self.execution_elapsed_micros()?);
+        }
+        result
+    }
+
+    fn start_execution(&self) -> Result<std::time::Instant> {
+        let mut started_at = self.execution_started_at.lock().map_err(|_| {
+            VqlError::new(ErrorCode::Internal, "query execution timer was poisoned")
+        })?;
+        Ok(*started_at.get_or_insert_with(std::time::Instant::now))
+    }
+
+    fn execution_elapsed_micros(&self) -> Result<u64> {
+        Ok(self.start_execution()?.elapsed().as_micros() as u64)
     }
 
     fn set_active(&self) -> Result<()> {
@@ -848,9 +1077,9 @@ async fn prepare_stream_output<F>(
     fetch_remaining: &mut Option<usize>,
     sink: Option<&SinkTarget>,
     materialize: F,
-) -> datafusion::error::Result<Option<RecordBatch>>
+) -> datafusion::error::Result<Option<crate::functions::MaterializedBatch>>
 where
-    F: FnOnce(RecordBatch) -> Result<RecordBatch>,
+    F: FnOnce(RecordBatch) -> Result<crate::functions::MaterializedBatch>,
 {
     if *skip_remaining >= batch.num_rows() {
         *skip_remaining -= batch.num_rows();
@@ -868,17 +1097,17 @@ where
     if batch.num_rows() == 0 {
         return Ok(None);
     }
-    let batch = materialize(batch)
+    let materialized = materialize(batch)
         .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
     if let Some(sink) = sink {
-        sink.write(&batch)
+        sink.write(&materialized.batch)
             .await
             .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
     }
     if let Some(remaining) = fetch_remaining.as_mut() {
-        *remaining = remaining.saturating_sub(batch.num_rows());
+        *remaining = remaining.saturating_sub(materialized.batch.num_rows());
     }
-    Ok(Some(batch))
+    Ok(Some(materialized))
 }
 
 impl Session {
@@ -894,6 +1123,9 @@ impl Session {
             }
             VqlStatement::Drop { kind, name } => self.drop_object(kind, &name).map(Statement::Ddl),
             VqlStatement::Show(kind) => self.show_objects(kind).map(Statement::Ddl),
+            VqlStatement::ShowCreate { kind, name } => {
+                self.show_create(kind, &name).map(Statement::Ddl)
+            }
             VqlStatement::Describe { name } => self.describe(&name).map(Statement::Ddl),
             VqlStatement::Query { sql }
                 if sql.trim_start().to_ascii_uppercase().starts_with("INSERT") =>
@@ -901,7 +1133,7 @@ impl Session {
                 self.insert_into_sink(&sql).map(Statement::Query)
             }
             VqlStatement::Query { sql } => self.query(&sql).map(Statement::Query),
-            VqlStatement::Explain { sql } => self.query(&sql).map(Statement::Explain),
+            VqlStatement::Explain { sql } => self.explain(&sql).map(Statement::Explain),
             VqlStatement::Set { sql } => self.set(&sql).map(Statement::Ddl),
         }
     }
@@ -948,12 +1180,19 @@ impl Session {
                 ));
             }
         }
+        let metrics = Arc::new(QueryMetrics::default());
+        let budget = QueryBudget::new(
+            self.engine.inner.config.query_memory_limit_bytes(),
+            Arc::clone(&metrics.resources),
+        );
         let context = context_for_snapshot(
             &snapshot,
             Arc::clone(&self.engine.inner.catalog),
             Arc::clone(&self.engine.inner.media),
             Arc::clone(&self.fail_on_error),
             self.python_udf_host.clone(),
+            &budget,
+            Arc::clone(&metrics),
         )?;
         let cancellation = CancellationToken::new();
         let planned = self.engine.inner.runtime.block_on(plan_statement(
@@ -963,6 +1202,8 @@ impl Session {
             Arc::clone(&self.engine.inner.models),
             Arc::clone(&self.fail_on_error),
             cancellation.clone(),
+            budget.clone(),
+            Arc::clone(&metrics),
         ))?;
         let streaming = planned.stream_name.as_ref().map(|name| {
             let definition = snapshot
@@ -986,12 +1227,92 @@ impl Session {
                 runtime: Arc::clone(&self.engine.inner.runtime),
                 active_query: Arc::clone(&self.active_query),
                 media: Arc::clone(&self.engine.inner.media),
-                models: Arc::clone(&self.engine.inner.models),
                 catalog: Arc::clone(&self.engine.inner.catalog),
                 fail_on_error: Arc::clone(&self.fail_on_error),
+                metrics,
+                budget,
             },
             streaming,
         ))
+    }
+
+    fn explain(&self, sql: &str) -> Result<QueryHandle> {
+        let sql = sql.trim();
+        let (keyword, target) = sql
+            .split_at_checked("EXPLAIN".len())
+            .ok_or_else(|| VqlError::new(ErrorCode::InvalidSql, "expected EXPLAIN <query>"))?;
+        if !keyword.eq_ignore_ascii_case("EXPLAIN") {
+            return Err(VqlError::new(
+                ErrorCode::InvalidSql,
+                "expected EXPLAIN <query>",
+            ));
+        }
+        let target = target.trim_start();
+        if target
+            .split_whitespace()
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case("ANALYZE"))
+        {
+            return Err(VqlError::new(
+                ErrorCode::InvalidSql,
+                "EXPLAIN ANALYZE is not supported because VisionQL EXPLAIN is side-effect free; use EXPLAIN without ANALYZE",
+            ));
+        }
+        if !target.to_ascii_uppercase().starts_with("INSERT") {
+            return self.query(sql);
+        }
+
+        let mut parts = target.splitn(4, char::is_whitespace);
+        let _insert = parts.next();
+        if !parts
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case("INTO"))
+        {
+            return Err(VqlError::new(
+                ErrorCode::InvalidSql,
+                "expected EXPLAIN INSERT INTO <sink> <query>",
+            ));
+        }
+        let sink_name = parts.next().ok_or_else(|| {
+            VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a sink name")
+        })?;
+        let query = parts.next().ok_or_else(|| {
+            VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a SELECT query")
+        })?;
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let sink = snapshot.sink(sink_name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("sink '{sink_name}' does not exist"),
+            )
+        })?;
+        let kind = match sink.definition.kind {
+            crate::catalog::SinkKind::Console => "console",
+            crate::catalog::SinkKind::Kafka => "kafka",
+        };
+        let mut handle = self.query(&format!("EXPLAIN {query}"))?;
+        let (state, plan) = handle.dataframe.into_parts();
+        let datafusion::logical_expr::LogicalPlan::Explain(mut explain) = plan else {
+            return Err(VqlError::new(
+                ErrorCode::Internal,
+                "EXPLAIN did not produce an Explain logical plan",
+            ));
+        };
+        explain.stringified_plans.insert(
+            0,
+            datafusion::logical_expr::StringifiedPlan::new(
+                datafusion::logical_expr::PlanType::FinalLogicalPlan,
+                format!(
+                    "VisionQLSink name={} type={} topology_append=Sink",
+                    sink.definition.name, kind
+                ),
+            ),
+        );
+        handle.dataframe = DataFrame::new(
+            state,
+            datafusion::logical_expr::LogicalPlan::Explain(explain),
+        );
+        Ok(handle)
     }
 
     fn create_table(&self, create: CreateTable) -> Result<DdlResult> {
@@ -1229,6 +1550,7 @@ impl Session {
             &handle.output_schema,
             handle.cancellation.clone(),
             self.engine.inner.config.secret_provider().cloned(),
+            handle.budget.clone(),
         )?;
         if let Some(streaming) = handle.streaming.as_mut() {
             streaming.sink = Some(target.clone());
@@ -1301,6 +1623,53 @@ impl Session {
             ShowKind::Tables | ShowKind::Streams | ShowKind::Models => unreachable!(),
         };
         named_objects_result(rows)
+    }
+
+    fn show_create(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let (object_type, create_sql) = match kind {
+            ShowKind::Tables => (
+                "TABLE",
+                snapshot
+                    .table(name)
+                    .map(|object| render_create(&object.definition)),
+            ),
+            ShowKind::Streams => (
+                "STREAM",
+                snapshot
+                    .stream(name)
+                    .map(|object| render_create(&object.definition)),
+            ),
+            ShowKind::Models => (
+                "MODEL",
+                snapshot
+                    .model(name)
+                    .map(|object| render_create(&object.definition)),
+            ),
+            ShowKind::Functions => (
+                "FUNCTION",
+                snapshot
+                    .function(name)
+                    .map(|object| render_create(&object.definition)),
+            ),
+            ShowKind::Sinks => (
+                "SINK",
+                snapshot
+                    .sink(name)
+                    .map(|object| render_create(&object.definition)),
+            ),
+        };
+        let create_sql = create_sql.ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!(
+                    "{} '{}' does not exist",
+                    object_type.to_ascii_lowercase(),
+                    name
+                ),
+            )
+        })??;
+        show_create_result(name, object_type, create_sql)
     }
 
     fn set(&self, sql: &str) -> Result<DdlResult> {
@@ -1652,6 +2021,29 @@ fn named_objects_result(rows: Vec<(String, String, i64)>) -> Result<DdlResult> {
     })
 }
 
+fn show_create_result(name: &str, object_type: &str, create_sql: String) -> Result<DdlResult> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("object_name", DataType::Utf8, false),
+        Field::new("object_type", DataType::Utf8, false),
+        Field::new("create_sql", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![name])) as ArrayRef,
+            Arc::new(StringArray::from(vec![object_type])),
+            Arc::new(StringArray::from(vec![create_sql.as_str()])),
+        ],
+    )
+    .map_err(|error| {
+        VqlError::new(ErrorCode::Execution, "failed to build SHOW CREATE result").with_source(error)
+    })?;
+    Ok(DdlResult {
+        message: format!("{object_type} '{name}'"),
+        batches: vec![batch],
+    })
+}
+
 fn restamp_schema(schema: &SchemaRef) -> SchemaRef {
     Arc::new(Schema::new_with_metadata(
         schema
@@ -1672,6 +2064,27 @@ fn restamp_schema(schema: &SchemaRef) -> SchemaRef {
 fn percentile(values: &[u64], percentile: f64) -> u64 {
     let index = ((values.len() - 1) as f64 * percentile).ceil() as usize;
     values[index]
+}
+
+fn record_percentiles(
+    samples: &Mutex<PercentileSamples>,
+    p50: &AtomicU64,
+    p95: &AtomicU64,
+    sample: u64,
+) {
+    if let Ok(mut samples) = samples.lock() {
+        if samples.values.len() < MAX_PERCENTILE_SAMPLES {
+            samples.values.push(sample);
+        } else {
+            let next = samples.next;
+            samples.values[next] = sample;
+            samples.next = (next + 1) % MAX_PERCENTILE_SAMPLES;
+        }
+        let mut sorted = samples.values.clone();
+        sorted.sort_unstable();
+        p50.store(percentile(&sorted, 0.50), Ordering::Relaxed);
+        p95.store(percentile(&sorted, 0.95), Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -1734,6 +2147,33 @@ mod tests {
     }
 
     #[test]
+    fn continuous_metric_samples_are_bounded_and_histogrammed() {
+        let metrics = QueryMetrics::default();
+        for sample in 0..(MAX_PERCENTILE_SAMPLES + 100) {
+            metrics.record_inference(3, sample as u64, sample as u64, sample as u64);
+            metrics.record_epoch(sample as u64, sample as u64);
+        }
+
+        assert_eq!(
+            metrics
+                .inference_latencies_micros
+                .lock()
+                .unwrap()
+                .values
+                .len(),
+            MAX_PERCENTILE_SAMPLES
+        );
+        assert_eq!(
+            metrics.epoch_samples_micros.lock().unwrap().values.len(),
+            MAX_PERCENTILE_SAMPLES
+        );
+        assert_eq!(
+            metrics.batch_histogram()[3],
+            (MAX_PERCENTILE_SAMPLES + 100) as u64
+        );
+    }
+
+    #[test]
     fn active_bounded_query_interrupts_immediately() {
         let cancellation = CancellationToken::new();
         let control = ActiveQueryControl {
@@ -1792,6 +2232,324 @@ mod tests {
                 .unwrap();
             assert_eq!(batches[0].num_rows(), 1);
         }
+    }
+
+    fn show_create_sql(session: &Session, statement: &str) -> String {
+        let batches = session.sql(statement).unwrap().collect().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        batches[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_owned()
+    }
+
+    fn explain_text(session: &Session, sql: &str) -> String {
+        session
+            .sql(sql)
+            .unwrap()
+            .collect()
+            .unwrap()
+            .iter()
+            .flat_map(|batch| {
+                let plans = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                (0..plans.len())
+                    .map(|row| plans.value(row).to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn show_create_round_trips_all_catalog_objects_and_redacts_secrets() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}';
+                 CREATE STREAM entrance FROM 'rtsp://camera.example/live' WITH (
+                   fps=7.5, event_time='ingest_time',
+                   watermark=INTERVAL '1500' MILLISECOND, transport='udp');
+                 CREATE MODEL detector TYPE OBJECT_DETECTION
+                   FROM 'mock://person' USING ONNX_RUNTIME;
+                 CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1;
+                 CREATE FUNCTION py_double(value BIGINT) RETURNS BIGINT
+                   LANGUAGE PYTHON AS 'ops:double';
+                 CREATE SINK terminal TYPE CONSOLE;
+                 CREATE SINK events TYPE KAFKA WITH (
+                   bootstrap_servers='broker:9092', topic='events', format='json',
+                   credential_ref='secret://kafka/producer',
+                   delivery_timeout_ms=45000, buffer_capacity=256);",
+                photos.display()
+            ))
+            .unwrap();
+
+        let unresolved_model = show_create_sql(&session, "SHOW CREATE MODEL detector");
+        session.sql("RESOLVE MODEL detector").unwrap();
+        let resolved_model = show_create_sql(&session, "SHOW CREATE MODEL detector");
+        assert_eq!(resolved_model, unresolved_model);
+
+        let statements = [
+            show_create_sql(&session, "SHOW CREATE TABLE photos"),
+            show_create_sql(&session, "SHOW CREATE STREAM entrance"),
+            resolved_model,
+            show_create_sql(&session, "SHOW CREATE FUNCTION plus_one"),
+            show_create_sql(&session, "SHOW CREATE FUNCTION py_double"),
+            show_create_sql(&session, "SHOW CREATE SINK terminal"),
+            show_create_sql(&session, "SHOW CREATE SINK events"),
+        ];
+        let kafka = statements.last().unwrap();
+        assert!(!kafka.contains("secret://kafka/producer"));
+        assert!(kafka.contains("[REDACTED_SECRET_REF]"));
+
+        let copy = Engine::new(EngineConfig::new(temp.path().join("copy.db"))).unwrap();
+        let copy_session = copy.session().build().unwrap();
+        for statement in &statements {
+            parse_statement(statement).unwrap();
+            copy_session.sql(statement).unwrap();
+        }
+        assert!(
+            copy.inner
+                .catalog
+                .snapshot()
+                .unwrap()
+                .model("detector")
+                .unwrap()
+                .definition
+                .resolved
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn show_create_reports_the_requested_object_kind() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        let error = session.sql("SHOW CREATE FUNCTION missing").unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        assert_eq!(error.message, "function 'missing' does not exist");
+    }
+
+    #[test]
+    fn query_budget_failure_releases_every_reservation() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(
+            EngineConfig::new(temp.path().join("catalog.db")).with_query_memory_limit_bytes(128),
+        )
+        .unwrap();
+        let session = engine.session().build().unwrap();
+        let sql = format!("SELECT '{}' AS value", "x".repeat(1024));
+        let statement = session.sql(&sql).unwrap();
+        let metrics = statement.metrics().unwrap();
+
+        let error = statement.collect().unwrap_err();
+        assert_eq!(error.code, ErrorCode::ResourceExhausted);
+        assert_eq!(metrics.total_resource_usage().current_bytes, 0);
+    }
+
+    #[test]
+    fn query_execution_timer_starts_when_results_are_requested() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        let statement = session.sql("SELECT 1").unwrap();
+        let Statement::Query(query) = &statement else {
+            panic!("SELECT must produce a query");
+        };
+        assert!(query.execution_started_at.lock().unwrap().is_none());
+
+        let planned_at = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        statement.collect().unwrap();
+
+        let started_at = query.execution_started_at.lock().unwrap().unwrap();
+        assert!(started_at.duration_since(planned_at) >= std::time::Duration::from_millis(15));
+    }
+
+    #[test]
+    fn collect_enforces_budget_across_multiple_output_batches() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        let seed = photos.join("0000.png");
+        RgbImage::from_pixel(1, 1, Rgb([10, 20, 30]))
+            .save(&seed)
+            .unwrap();
+        for index in 1..=1024 {
+            std::fs::hard_link(&seed, photos.join(format!("{index:04}.png"))).unwrap();
+        }
+
+        let ddl = format!(
+            "CREATE TABLE photos USING IMAGES LOCATION '{}'",
+            photos.display()
+        );
+        let sizing_engine = Engine::new(EngineConfig::new(temp.path().join("sizing.db"))).unwrap();
+        let sizing_session = sizing_engine.session().build().unwrap();
+        sizing_session.sql(&ddl).unwrap();
+        let batches = sizing_session
+            .sql("SELECT uri FROM photos")
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(batches.len(), 2);
+        let total = batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .sum::<usize>();
+        let largest = batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .max()
+            .unwrap();
+        assert!(largest < total);
+
+        let limited_engine = Engine::new(
+            EngineConfig::new(temp.path().join("limited.db"))
+                .with_query_memory_limit_bytes(total - 1),
+        )
+        .unwrap();
+        let limited_session = limited_engine.session().build().unwrap();
+        limited_session.sql(&ddl).unwrap();
+        let statement = limited_session.sql("SELECT uri FROM photos").unwrap();
+        let metrics = statement.metrics().unwrap();
+
+        let error = statement.collect().unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ResourceExhausted);
+        assert_eq!(metrics.total_resource_usage().current_bytes, 0);
+    }
+
+    #[test]
+    fn dropping_query_handle_releases_cached_arrow_results() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        let statement = session.sql("SELECT 'cached result' AS value").unwrap();
+        let metrics = statement.metrics().unwrap();
+
+        statement.collect().unwrap();
+        assert!(
+            metrics
+                .resource_usage(crate::QueryResource::Arrow)
+                .current_bytes
+                > 0
+        );
+        drop(statement);
+
+        assert_eq!(metrics.total_resource_usage().current_bytes, 0);
+        assert!(
+            metrics
+                .resource_usage(crate::QueryResource::Arrow)
+                .peak_bytes
+                > 0
+        );
+    }
+
+    #[test]
+    fn bounded_source_metrics_count_rows_before_filtering() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        for (name, width) in [("small.png", 8), ("large.png", 16)] {
+            RgbImage::from_pixel(width, 4, Rgb([1, 2, 3]))
+                .save(photos.join(name))
+                .unwrap();
+        }
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
+                photos.display()
+            ))
+            .unwrap();
+
+        let statement = session
+            .sql("SELECT uri FROM photos WHERE width > 100")
+            .unwrap();
+        let batches = statement.collect().unwrap();
+
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+        assert_eq!(statement.metrics().unwrap().input_rows(), 2);
+        assert_eq!(statement.metrics().unwrap().output_rows(), 0);
+    }
+
+    #[test]
+    fn concurrent_sessions_keep_query_metrics_isolated() {
+        let temp = tempdir().unwrap();
+        let one = temp.path().join("one");
+        let three = temp.path().join("three");
+        std::fs::create_dir(&one).unwrap();
+        std::fs::create_dir(&three).unwrap();
+        RgbImage::from_pixel(1, 1, Rgb([1, 2, 3]))
+            .save(one.join("one.png"))
+            .unwrap();
+        for index in 0..3 {
+            RgbImage::from_pixel(1, 1, Rgb([1, 2, 3]))
+                .save(three.join(format!("{index}.png")))
+                .unwrap();
+        }
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let setup = engine.session().build().unwrap();
+        setup
+            .run_script(&format!(
+                "CREATE TABLE one USING IMAGES LOCATION '{}';
+                 CREATE TABLE three USING IMAGES LOCATION '{}'",
+                one.display(),
+                three.display()
+            ))
+            .unwrap();
+        let left = engine
+            .session()
+            .build()
+            .unwrap()
+            .sql("SELECT uri FROM one")
+            .unwrap();
+        let right = engine
+            .session()
+            .build()
+            .unwrap()
+            .sql("SELECT uri FROM three")
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            let left_task = scope.spawn(|| left.collect().unwrap());
+            let right_task = scope.spawn(|| right.collect().unwrap());
+            assert_eq!(
+                left_task
+                    .join()
+                    .unwrap()
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                1
+            );
+            assert_eq!(
+                right_task
+                    .join()
+                    .unwrap()
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                3
+            );
+        });
+        assert_eq!(left.metrics().unwrap().input_rows(), 1);
+        assert_eq!(left.metrics().unwrap().output_rows(), 1);
+        assert_eq!(right.metrics().unwrap().input_rows(), 3);
+        assert_eq!(right.metrics().unwrap().output_rows(), 3);
     }
 
     #[test]
@@ -1884,6 +2642,16 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(statuses.value(0), "RESOLVED");
+        let explain = explain_text(
+            &session,
+            "EXPLAIN SELECT IMAGE_DETECTION('detector', image) FROM photos",
+        );
+        assert!(explain.contains("VisionQLPlan mode=bounded"));
+        assert!(explain.contains("Inference model=detector"));
+        assert!(explain.contains("batching_owner=visionql"));
+        assert!(explain.contains("dedup=enabled"));
+        assert!(explain.contains("decode=skipped(mock)"));
+        assert!(explain.contains("image_payload=locator_or_encoded"));
     }
 
     #[test]
@@ -2303,7 +3071,26 @@ mod tests {
             .to_string();
         assert!(physical.contains("InferenceExec"));
         statement.collect().unwrap();
-        assert_eq!(statement.metrics().unwrap().inference_rows(), 1);
+        let metrics = statement.metrics().unwrap();
+        assert_eq!(metrics.inference_rows(), 1);
+        assert!(
+            metrics
+                .resource_usage(crate::QueryResource::Media)
+                .peak_bytes
+                > 0
+        );
+        assert!(
+            metrics
+                .resource_usage(crate::QueryResource::ModelQueue)
+                .peak_bytes
+                > 0
+        );
+        assert_eq!(
+            metrics
+                .resource_usage(crate::QueryResource::Media)
+                .current_bytes,
+            0
+        );
 
         let deduplicated = session
             .sql(
@@ -2417,6 +3204,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::QueryCancelled);
         assert!(started.elapsed() < Duration::from_millis(400));
         server.join().unwrap();
+        assert_eq!(query.metrics().total_resource_usage().current_bytes, 0);
     }
 
     #[test]
@@ -2425,6 +3213,10 @@ mod tests {
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         session.sql("CREATE SINK terminal TYPE console").unwrap();
+        let bounded = explain_text(&session, "EXPLAIN SELECT 1 AS value ORDER BY value");
+        assert!(!bounded.contains("Unsupported node"));
+        let explain = explain_text(&session, "EXPLAIN INSERT INTO terminal SELECT 42 AS answer");
+        assert!(explain.contains("VisionQLSink name=terminal type=console"));
         let insert = session
             .sql("INSERT INTO terminal SELECT 42 AS answer")
             .unwrap();
@@ -2516,14 +3308,20 @@ mod tests {
                 &mut skip,
                 &mut fetch,
                 Some(&sink),
-                Ok,
+                |batch| {
+                    Ok(crate::functions::MaterializedBatch {
+                        batch,
+                        reservations: Vec::new(),
+                    })
+                },
             ))
             .unwrap()
             .unwrap();
 
-        assert_eq!(output.num_rows(), 1);
+        assert_eq!(output.batch.num_rows(), 1);
         assert_eq!(
             output
+                .batch
                 .column(0)
                 .as_any()
                 .downcast_ref::<Int64Array>()
@@ -2583,6 +3381,8 @@ mod tests {
                  credential_ref='secret://kafka/producer')",
             )
             .unwrap();
+        let explain = explain_text(&session, "EXPLAIN INSERT INTO events SELECT 1 AS event_id");
+        assert!(explain.contains("VisionQLSink name=events type=kafka"));
         let insert = session
             .sql("INSERT INTO events SELECT 1 AS event_id")
             .unwrap();
@@ -2632,6 +3432,14 @@ mod tests {
         assert_eq!(
             provider.0.lock().unwrap().as_slice(),
             ["secret://kafka/producer"]
+        );
+        assert_eq!(
+            insert
+                .metrics()
+                .unwrap()
+                .total_resource_usage()
+                .current_bytes,
+            0
         );
     }
 
@@ -2861,13 +3669,69 @@ mod tests {
             .sql("SELECT ts, frame_id, source FROM entrance WHERE frame_id >= 0")
             .unwrap();
         assert!(statement.is_unbounded());
-        assert!(
-            session
-                .sql("EXPLAIN SELECT frame_id FROM entrance")
-                .unwrap()
-                .collect()
-                .is_ok()
+        let explain = explain_text(&session, "EXPLAIN SELECT frame_id FROM entrance");
+        assert!(explain.contains("VisionQLPlan mode=continuous"));
+        assert!(explain.contains("Source RTSP name=entrance fps=5"));
+        assert!(explain.contains("RTSPSource -> EpochCoordinator"));
+        assert!(explain.contains("Watermark"));
+        assert!(explain.contains("projection=[\"frame_id\"]"));
+        let bounded = explain_text(&session, "EXPLAIN SELECT frame_id FROM entrance LIMIT 2");
+        assert!(bounded.contains("VisionQLPlan mode=bounded"));
+        let tumble = explain_text(
+            &session,
+            "EXPLAIN SELECT TUMBLE(ts, INTERVAL '1' SECOND), COUNT(*) FROM entrance GROUP BY 1",
         );
+        assert!(tumble.contains("TumblePlan"));
+        let unsupported = explain_text(
+            &session,
+            "EXPLAIN SELECT frame_id FROM entrance ORDER BY frame_id",
+        );
+        assert!(unsupported.contains("Unsupported node=Sort"));
+        assert!(unsupported.contains("move ordering to a bounded result"));
+        for (sql, node, fragment) in [
+            (
+                "SELECT 'ORDER BY' AS note, frame_id FROM entrance ORDER BY frame_id",
+                "Sort",
+                "ORDER BY frame_id",
+            ),
+            (
+                "SELECT DISTINCT frame_id FROM entrance",
+                "Distinct",
+                "DISTINCT frame_id FROM entrance",
+            ),
+            (
+                "SELECT frame_id, ROW_NUMBER() OVER (ORDER BY frame_id) FROM entrance",
+                "Window",
+                "OVER (ORDER BY frame_id) FROM entrance",
+            ),
+            (
+                "SELECT frame_id FROM entrance UNION ALL SELECT frame_id FROM entrance",
+                "Union",
+                "UNION ALL SELECT frame_id FROM entrance",
+            ),
+            (
+                "SELECT a.frame_id FROM entrance a JOIN entrance b ON a.frame_id = b.frame_id",
+                "Join",
+                "JOIN entrance b ON a.frame_id = b.frame_id",
+            ),
+        ] {
+            let error = session.sql(sql).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidSql);
+            assert!(
+                error
+                    .message
+                    .contains(&format!("first unsupported node: {node}")),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains(fragment), "{}", error.message);
+            assert!(error.message.contains("SQL bytes"), "{}", error.message);
+        }
+        let error = session
+            .sql("EXPLAIN ANALYZE SELECT frame_id FROM entrance")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+        assert!(error.message.contains("side-effect free"));
         let error = session.sql("SELECT COUNT(*) FROM entrance").unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidSql);
         assert!(error.message.contains("require TUMBLE"));
@@ -2999,7 +3863,23 @@ mod tests {
         let metrics = statement.metrics().unwrap();
         assert!(metrics.decode_frames() > 0);
         assert!(metrics.source_generation() > 0);
+        assert!(metrics.sampled_fps() > 0.0);
+        assert!(metrics.source_input_bytes() > 0);
+        assert!(metrics.epoch_p50_ms() >= 0.0);
+        assert!(metrics.end_to_end_p50_ms() >= metrics.epoch_p50_ms());
         assert!(metrics.watermark_ms().is_some());
+        assert_eq!(
+            metrics
+                .resource_usage(crate::QueryResource::FrameBuffer)
+                .current_bytes,
+            0
+        );
+        assert!(
+            metrics
+                .resource_usage(crate::QueryResource::FrameBuffer)
+                .peak_bytes
+                > 0
+        );
     }
 
     #[cfg(feature = "ffmpeg-native")]

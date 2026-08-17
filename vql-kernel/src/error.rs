@@ -13,6 +13,7 @@ pub enum ErrorCode {
     AlreadyExists,
     NotFound,
     QueryCancelled,
+    ResourceExhausted,
     PythonHostRequired,
     Execution,
     Internal,
@@ -29,6 +30,7 @@ impl ErrorCode {
             Self::AlreadyExists => "ALREADY_EXISTS",
             Self::NotFound => "NOT_FOUND",
             Self::QueryCancelled => "QUERY_CANCELLED",
+            Self::ResourceExhausted => "RESOURCE_EXHAUSTED",
             Self::PythonHostRequired => "PYTHON_HOST_REQUIRED",
             Self::Execution => "EXECUTION_ERROR",
             Self::Internal => "INTERNAL_ERROR",
@@ -117,7 +119,25 @@ impl From<serde_json::Error> for VqlError {
 impl From<datafusion::error::DataFusionError> for VqlError {
     fn from(source: datafusion::error::DataFusionError) -> Self {
         let message = source.to_string();
-        Self::new(ErrorCode::Execution, message).with_source(source)
+        let code = datafusion_error_code(&source).unwrap_or(ErrorCode::Execution);
+        Self::new(code, message).with_source(source)
+    }
+}
+
+fn datafusion_error_code(error: &datafusion::error::DataFusionError) -> Option<ErrorCode> {
+    use datafusion::error::DataFusionError;
+
+    match error {
+        DataFusionError::ResourcesExhausted(_) => Some(ErrorCode::ResourceExhausted),
+        DataFusionError::Context(_, source) | DataFusionError::Diagnostic(_, source) => {
+            datafusion_error_code(source)
+        }
+        DataFusionError::External(source) => {
+            source.downcast_ref::<VqlError>().map(|error| error.code)
+        }
+        DataFusionError::Shared(source) => datafusion_error_code(source),
+        DataFusionError::Collection(errors) => errors.iter().find_map(datafusion_error_code),
+        _ => None,
     }
 }
 

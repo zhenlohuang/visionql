@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use arrow::array::{Array, ArrayRef, BinaryArray, StructArray};
 use arrow::datatypes::DataType;
@@ -21,20 +19,14 @@ use super::postprocess::{
     filter_and_scatter_detections, mock_detection_output, mock_primary_label,
 };
 use super::registry::PipelineRegistry;
-use super::scheduler::ModelScheduler;
+use super::scheduler::{InferenceReservations, ModelScheduler};
 use crate::catalog::{
     CatalogStore, ModelType, ResolvedExecutionSpec, ResolvedModelDef, TableProviderKind,
 };
 use crate::media::{DecodedFrame, MediaRuntime};
+use crate::resources::QueryBudget;
 use crate::types::parse_locator;
 use crate::{ErrorCode, Result, VqlError};
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ModelCounters {
-    pub(crate) inference_rows: u64,
-    pub(crate) inference_batches: u64,
-    pub(crate) inference_errors: u64,
-}
 
 #[derive(Debug)]
 pub(crate) struct ModelRuntime {
@@ -42,10 +34,6 @@ pub(crate) struct ModelRuntime {
     media: Arc<MediaRuntime>,
     registry: Arc<PipelineRegistry>,
     schedulers: Mutex<HashMap<String, Arc<ModelScheduler>>>,
-    inference_rows: AtomicU64,
-    inference_batches: AtomicU64,
-    inference_errors: AtomicU64,
-    samples: Mutex<Vec<(u64, u64)>>,
 }
 
 impl ModelRuntime {
@@ -59,29 +47,6 @@ impl ModelRuntime {
             media,
             registry,
             schedulers: Mutex::new(HashMap::new()),
-            inference_rows: AtomicU64::new(0),
-            inference_batches: AtomicU64::new(0),
-            inference_errors: AtomicU64::new(0),
-            samples: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn sample_count(&self) -> usize {
-        self.samples.lock().map_or(0, |samples| samples.len())
-    }
-
-    pub(crate) fn samples_since(&self, start: usize) -> Vec<(u64, u64)> {
-        self.samples
-            .lock()
-            .map(|samples| samples.get(start..).unwrap_or_default().to_vec())
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn counters(&self) -> ModelCounters {
-        ModelCounters {
-            inference_rows: self.inference_rows.load(Ordering::Relaxed),
-            inference_batches: self.inference_batches.load(Ordering::Relaxed),
-            inference_errors: self.inference_errors.load(Ordering::Relaxed),
         }
     }
 
@@ -164,17 +129,36 @@ impl ModelRuntime {
             .collect())
     }
 
-    fn decode_image(&self, images: &StructArray, row: usize) -> Result<image::DynamicImage> {
+    fn decode_image(
+        &self,
+        images: &StructArray,
+        row: usize,
+        budget: &QueryBudget,
+    ) -> Result<(image::DynamicImage, crate::resources::QueryReservation)> {
         let encoded = images
             .column(4)
             .as_any()
             .downcast_ref::<BinaryArray>()
             .ok_or_else(|| VqlError::new(ErrorCode::Internal, "IMAGE encoded field is invalid"))?;
         if !encoded.is_null(row) {
-            return image::load_from_memory(encoded.value(row)).map_err(|error| {
+            let bytes = encoded.value(row);
+            let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+                .with_guessed_format()
+                .map_err(|error| {
+                    VqlError::new(ErrorCode::Execution, "model IMAGE format is invalid")
+                        .with_source(error)
+                })?
+                .into_dimensions()
+                .map_err(|error| {
+                    VqlError::new(ErrorCode::Execution, "model IMAGE dimensions are invalid")
+                        .with_source(error)
+                })?;
+            let reservation = reserve_decoded_image(budget, width, height, 4)?;
+            let image = image::load_from_memory(bytes).map_err(|error| {
                 VqlError::new(ErrorCode::Execution, "IMAGE encoded bytes are invalid")
                     .with_source(error)
-            });
+            })?;
+            return Ok((image, reservation));
         }
         let buffer_ids = images
             .column(8)
@@ -191,10 +175,14 @@ impl ModelRuntime {
                 VqlError::new(ErrorCode::Internal, "IMAGE buffer_slot field is invalid")
             })?;
         if !buffer_ids.is_null(row) && !buffer_slots.is_null(row) {
-            return decoded_image(
-                self.media
-                    .resolve_buffered_frame(buffer_ids.value(row), buffer_slots.value(row))?,
-            );
+            let buffer_id = buffer_ids.value(row);
+            let buffer_slot = buffer_slots.value(row);
+            let reservation = budget.reserve(
+                crate::QueryResource::Media,
+                self.media.buffered_frame_bytes(buffer_id, buffer_slot)?,
+            )?;
+            let image = decoded_image(self.media.resolve_buffered_frame(buffer_id, buffer_slot)?)?;
+            return Ok((image, reservation));
         }
         let locators = images
             .column(1)
@@ -211,17 +199,37 @@ impl ModelRuntime {
         let table = self.catalog.table_at_revision(locator.table_revision)?;
         let path = safe_path(&table.location, &locator.relative_path)?;
         match table.provider {
-            TableProviderKind::Images => image::open(path).map_err(|error| {
-                VqlError::new(ErrorCode::Execution, "failed to decode model IMAGE input")
-                    .with_source(error)
-            }),
-            TableProviderKind::Videos => decoded_image(
-                self.media
-                    .decode_frame(&path, locator.pts_ms.unwrap_or_default())?,
-            ),
+            TableProviderKind::Images => {
+                let (width, height) = image::image_dimensions(&path).map_err(|error| {
+                    VqlError::new(ErrorCode::Execution, "failed to inspect model IMAGE input")
+                        .with_source(error)
+                })?;
+                let reservation = reserve_decoded_image(budget, width, height, 4)?;
+                let image = image::open(path).map_err(|error| {
+                    VqlError::new(ErrorCode::Execution, "failed to decode model IMAGE input")
+                        .with_source(error)
+                })?;
+                Ok((image, reservation))
+            }
+            TableProviderKind::Videos => {
+                let metadata = self.media.probe(&path)?;
+                let width = u32::try_from(metadata.width).map_err(|_| {
+                    VqlError::new(ErrorCode::Execution, "video width must be non-negative")
+                })?;
+                let height = u32::try_from(metadata.height).map_err(|_| {
+                    VqlError::new(ErrorCode::Execution, "video height must be non-negative")
+                })?;
+                let reservation = reserve_decoded_image(budget, width, height, 3)?;
+                let image = decoded_image(
+                    self.media
+                        .decode_frame(&path, locator.pts_ms.unwrap_or_default())?,
+                )?;
+                Ok((image, reservation))
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn infer(
         &self,
         model: &ResolvedModelDef,
@@ -229,26 +237,44 @@ impl ModelRuntime {
         images: &StructArray,
         fail_on_error: bool,
         cancel: CancellationToken,
+        budget: &QueryBudget,
+        metrics: Arc<crate::session::QueryMetrics>,
     ) -> Result<ArrayRef> {
         let mut decoded = Vec::new();
         let mut positions = Vec::new();
+        let mut reservations = Vec::new();
+        let buffer_ids = images
+            .column(8)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .ok_or_else(|| {
+                VqlError::new(ErrorCode::Internal, "IMAGE buffer_id field is invalid")
+            })?;
         for row in 0..images.len() {
             if images.is_null(row) {
                 continue;
             }
             let decoded_image = if model.source.starts_with("mock://") {
-                Ok(image::DynamicImage::new_rgb8(1, 1))
+                budget
+                    .reserve(crate::QueryResource::Media, 3)
+                    .map(|reservation| (image::DynamicImage::new_rgb8(1, 1), reservation))
             } else {
-                self.decode_image(images, row)
+                self.decode_image(images, row, budget)
             };
             match decoded_image {
-                Ok(image) => {
+                Ok((image, reservation)) => {
+                    if !model.source.starts_with("mock://") && buffer_ids.is_null(row) {
+                        metrics.add_decode_frame();
+                    }
                     positions.push(row);
                     decoded.push(image);
+                    reservations.push(reservation);
                 }
-                Err(error) if fail_on_error => return Err(error),
+                Err(error) if fail_on_error || error.code == ErrorCode::ResourceExhausted => {
+                    return Err(error);
+                }
                 Err(_) => {
-                    self.inference_errors.fetch_add(1, Ordering::Relaxed);
+                    metrics.add_error_rows(1);
                 }
             }
         }
@@ -261,25 +287,31 @@ impl ModelRuntime {
             );
         }
         let count = decoded.len();
+        let queue_bytes = decoded
+            .capacity()
+            .saturating_mul(std::mem::size_of::<image::DynamicImage>());
+        let queue_reservation = budget.reserve(crate::QueryResource::ModelQueue, queue_bytes)?;
+        reservations.push(queue_reservation);
+        let reservations = InferenceReservations::new(reservations);
         let scheduler = self.scheduler(model).await?;
-        let started = Instant::now();
-        let result = scheduler.infer_with_cancel(decoded, cancel).await;
-        if let Ok(mut samples) = self.samples.lock() {
-            samples.push((started.elapsed().as_micros() as u64, count as u64));
-        }
+        let result = scheduler
+            .infer_with_metrics(
+                decoded,
+                cancel,
+                budget.clone(),
+                Arc::clone(&metrics),
+                reservations,
+            )
+            .await;
         match result {
             Ok(results) => {
                 let output =
                     filter_and_scatter_detections(&results, &positions, images.len(), invocation)?;
-                self.inference_rows
-                    .fetch_add(count as u64, Ordering::Relaxed);
-                self.inference_batches.fetch_add(1, Ordering::Relaxed);
                 Ok(output)
             }
-            Err(error) if fail_on_error => Err(error),
+            Err(error) if fail_on_error || error.code == ErrorCode::ResourceExhausted => Err(error),
             Err(_) => {
-                self.inference_errors
-                    .fetch_add(count as u64, Ordering::Relaxed);
+                metrics.add_error_rows(count);
                 filter_and_scatter_detections(
                     &mock_detection_output("object", 0),
                     &[],
@@ -289,6 +321,24 @@ impl ModelRuntime {
             }
         }
     }
+}
+
+fn reserve_decoded_image(
+    budget: &QueryBudget,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: usize,
+) -> Result<crate::resources::QueryReservation> {
+    let bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|value| value.checked_mul(bytes_per_pixel))
+        .ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::ResourceExhausted,
+                "decoded model IMAGE size exceeds platform limits",
+            )
+        })?;
+    budget.reserve(crate::QueryResource::Media, bytes)
 }
 
 #[derive(Debug)]

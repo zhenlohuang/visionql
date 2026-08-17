@@ -11,6 +11,8 @@ use super::{
     DecodedFrame, FrameBufferRegistry, FrameInfo, SampleSpec, TimeRange, VideoDecoder,
     VideoMetadata, sample_timestamps,
 };
+#[cfg(feature = "ffmpeg-native")]
+use crate::resources::QueryReservation;
 use crate::{ErrorCode, Result, VqlError};
 
 #[derive(Debug)]
@@ -58,12 +60,17 @@ impl MediaRuntime {
     pub(crate) fn register_frame_buffer(
         &self,
         frames: Vec<DecodedFrame>,
+        reservations: Vec<QueryReservation>,
     ) -> Result<(u64, FrameBufferLease)> {
-        self.frame_buffers.register(frames)
+        self.frame_buffers.register(frames, reservations)
     }
 
     pub(crate) fn resolve_buffered_frame(&self, buffer_id: u64, slot: u32) -> Result<DecodedFrame> {
         self.frame_buffers.resolve(buffer_id, slot)
+    }
+
+    pub(crate) fn buffered_frame_bytes(&self, buffer_id: u64, slot: u32) -> Result<usize> {
+        self.frame_buffers.frame_bytes(buffer_id, slot)
     }
 
     pub(crate) fn backend_name(&self) -> &'static str {
@@ -104,6 +111,7 @@ impl MediaRuntime {
         Ok(frame)
     }
 
+    #[cfg(test)]
     pub(crate) fn counters(&self) -> MediaCounters {
         MediaCounters {
             probe_calls: self.probe_calls.load(Ordering::Relaxed),
@@ -118,6 +126,7 @@ impl MediaRuntime {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MediaCounters {
     pub(crate) probe_calls: u64,

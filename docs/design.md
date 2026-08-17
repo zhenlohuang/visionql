@@ -850,7 +850,7 @@ All preprocessing tensors, encoded request payloads, Runtime queues, and post-pr
 
 ### 11.2 Python Results
 
-`sess.sql()` returns a lazy result; `collect()` or `show()` starts execution. Results are converted through Arrow/PyArrow. `show()` renders only an `IMAGE` summary; notebook thumbnails require explicit encoding.
+`sess.sql()` returns a lazy result; `collect()` or `show()` starts execution. Results are converted through Arrow/PyArrow. `QueryHandle.metrics()` exposes the same query-local counters, latency distributions, structured drop ranges, and current/peak resource values as the kernel. `show()` renders only an `IMAGE` summary; notebook thumbnails require explicit encoding.
 
 The chainable DataFrame API is a v0.2 feature. It must lower to the same DataFusion logical-plan contracts and is specified outside this v0.1 implementation design.
 
@@ -862,7 +862,7 @@ The chainable DataFrame API is a v0.2 feature. It must lower to the same DataFus
 | `vql run job.sql` | Run statements in order; an unbounded statement must be last and remains attached; first Ctrl-C requests graceful stop and the second cancels immediately |
 | `vql explain query.sql` | Produce the same plan as SQL `EXPLAIN` |
 
-The executable is `vql`. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
+The executable is `vql`. `--query-memory-limit-bytes` (or `VQL_QUERY_MEMORY_LIMIT_BYTES`) sets the per-query budget, and `--metrics` writes one structured JSON metrics object after each query. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
 
 ---
 
@@ -881,7 +881,7 @@ Each query receives one memory budget. DataFusion `MemoryPool` reservations or e
 | `TUMBLE` state | No spill; fail with guidance to reduce group-key cardinality or shorten the window |
 | Sink buffers | Apply backpressure; fail after timeout according to query policy |
 
-Device memory is tracked separately. Estimate weights, workspace, and maximum batch before loading; use actual consumption to correct metrics after load.
+Device memory is tracked separately when a Runtime can report it. Hosts expose an explicit unavailable state for Runtimes that provide no device allocator telemetry; they must not present an estimated zero as a measured value.
 
 ### 12.2 Performance Measurement
 

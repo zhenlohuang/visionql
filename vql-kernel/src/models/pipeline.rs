@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::backend::ModelBackend;
+use crate::resources::{QueryBudget, QueryReservation};
 use crate::{ErrorCode, Result, VqlError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +279,7 @@ pub(super) struct RuntimeRequestBatch {
 #[derive(Debug)]
 pub(super) struct RuntimeResponseBatch {
     pub(super) outputs: BTreeMap<String, TensorBatch>,
+    pub(super) _reservations: Vec<QueryReservation>,
 }
 
 impl RuntimeResponseBatch {
@@ -316,6 +318,7 @@ pub(super) struct PreprocessedBatch {
 pub(super) trait PreProcessor: Send + Sync + Debug {
     fn kind(&self) -> &str;
     fn runtime_output(&self) -> &TensorContract;
+    fn output_bytes(&self, batch_size: usize) -> Result<usize>;
     fn process(&self, images: &[DynamicImage]) -> Result<PreprocessedBatch>;
 }
 
@@ -335,6 +338,7 @@ pub(super) trait RuntimeSession: Send + Sync + Debug {
         &self,
         batch: RuntimeRequestBatch,
         cancel: CancellationToken,
+        budget: QueryBudget,
     ) -> Result<RuntimeResponseBatch>;
 }
 
@@ -419,14 +423,18 @@ impl ModelBackend for CompiledPipeline {
         &self,
         images: Vec<DynamicImage>,
         cancel: CancellationToken,
+        budget: &QueryBudget,
     ) -> Result<ArrayRef> {
         let expected_rows = images.len();
+        let tensor_bytes = self.pre_processor.output_bytes(expected_rows)?;
+        let _tensor_reservation =
+            budget.reserve(crate::QueryResource::ModelTensor, tensor_bytes)?;
         let preprocessed = self.pre_processor.process(&images)?;
         let request = RuntimeRequestBatch {
             input: preprocessed.input,
             output_names: vec![self.post_processor.runtime_input().name.clone()],
         };
-        let response = self.runtime.infer(request, cancel).await?;
+        let response = self.runtime.infer(request, cancel, budget.clone()).await?;
         let output = self
             .post_processor
             .process(response, &preprocessed.context)?;
