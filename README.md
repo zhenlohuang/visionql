@@ -42,7 +42,7 @@ The [PRD](docs/prd.md) covers target users, representative Physical AI workflows
 
 ### Prerequisites
 
-- [Rustup](https://rustup.rs/); the repository selects its pinned toolchain automatically.
+- [Rust](https://www.rust-lang.org/tools/install), installed via `rustup`; the repository selects its pinned toolchain automatically.
 - Python 3.10 or newer.
 - [FFmpeg 8](https://ffmpeg.org/download.html), including development libraries for the default native video build and `ffmpeg` / `ffprobe` on `PATH` for sample preparation.
 - A C/C++ build toolchain and `make` for the bundled `librdkafka` build. Kafka TLS uses vendored OpenSSL and does not require a system `librdkafka` installation.
