@@ -43,7 +43,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-CI runs these three gates plus `docker compose config --quiet` on Linux and records Rust test coverage in a separate job. It compiles and parses fixture-free integration paths but does not provision real data, models, or external services. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
+CI runs formatting, Clippy, and `docker compose config --quiet` in one Linux job. A second Linux job runs the Rust tests once under `cargo-llvm-cov` and publishes the coverage report. It compiles and parses fixture-free integration paths but does not provision real data, models, or external services. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
 
 ```bash
 python -m pip install pytest
@@ -59,11 +59,11 @@ CI uses `cargo-llvm-cov` to publish a line, function, and region coverage summar
 ```bash
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov --locked
-cargo llvm-cov --workspace --locked --html
-cargo llvm-cov report --summary-only
+cargo llvm-cov --workspace --exclude vql-python --locked --no-cfg-coverage --html
+cargo llvm-cov report --ignore-filename-regex '/vql-python/' --summary-only
 ```
 
-Open `target/llvm-cov/html/index.html` for file-level results. Coverage is informational rather than a merge threshold. It measures the default Rust workspace suite; real-data SQL cases that skip because fixtures are absent, the ignored real-model test, and Python API tests are not represented unless they are run separately.
+Open `target/llvm-cov/html/index.html` for file-level results. Coverage is informational rather than a merge threshold. It measures the default Rust tests except for `vql-python`, which has no Rust tests; real-data SQL cases that skip because fixtures are absent, the ignored real-model test, and Python API tests are not represented unless they are run separately.
 
 ### Integration tests
 

@@ -3166,8 +3166,7 @@ mod tests {
             let _ = stream.read(&mut buffer);
             accepted_tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(500));
-            let body = r#"{"outputs":[{"name":"detections","shape":[1],"datatype":"BYTES","data":["[]"]}]}"#;
-            write_http_response(&mut stream, body);
+            drop(stream);
         });
         let temp = tempdir().unwrap();
         let photos = temp.path().join("photos");
@@ -3463,7 +3462,21 @@ mod tests {
         let temp = tempdir().unwrap();
         let photos = temp.path().join("photos");
         std::fs::create_dir(&photos).unwrap();
-        std::fs::write(photos.join("broken.png"), b"not an image").unwrap();
+        // Keep enough of the PNG header for dimension probing to succeed, then truncate the
+        // payload so this fixture exercises the decode failure asserted below.
+        const TRUNCATED_PNG: &[u8] = &[
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, // signature
+            0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D', b'R', // IHDR length and type
+            0x00, 0x00, 0x00, 0x01, // width
+            0x00, 0x00, 0x00, 0x01, // height
+            0x08, 0x02, 0x00, 0x00, 0x00, // 8-bit RGB, default compression/filter
+            0x90, 0x77, 0x53, 0xde, // IHDR CRC
+            0x00, 0x00, 0x00, 0x00, b'I', b'D', b'A', b'T', // empty IDAT
+            0x35, 0xaf, 0x06, 0x1e, // IDAT CRC
+            0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', // IEND
+            0xae, 0x42, 0x60, 0x82, // IEND CRC
+        ];
+        std::fs::write(photos.join("broken.png"), TRUNCATED_PNG).unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         session
@@ -3511,7 +3524,8 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("failed to decode model IMAGE input")
+                .contains("failed to decode model IMAGE input"),
+            "unexpected strict inference error: {error:?}"
         );
     }
 

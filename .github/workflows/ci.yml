@@ -21,11 +21,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   check:
-    name: Static analysis and unit tests
-    runs-on: ubuntu-latest
+    name: Static analysis
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -53,6 +56,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -63,12 +68,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Run unit tests
-        run: cargo test --workspace --locked
-
   coverage:
-    name: Rust test coverage
-    runs-on: ubuntu-latest
+    name: Rust tests and coverage
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -96,6 +98,8 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
 
       - name: Install LLVM coverage tools
         run: rustup component add llvm-tools-preview
@@ -105,17 +109,29 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Generate coverage report
-        run: cargo llvm-cov --workspace --locked --html
+      - name: Run tests and generate coverage report
+        run: >-
+          cargo llvm-cov
+          --workspace
+          --exclude vql-python
+          --locked
+          --no-cfg-coverage
+          --html
 
       - name: Export LCOV report
-        run: cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
+        run: >-
+          cargo llvm-cov report
+          --ignore-filename-regex '/vql-python/'
+          --lcov
+          --output-path target/llvm-cov/lcov.info
 
       - name: Add coverage summary
         run: |
           echo '### Rust test coverage' >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
-          cargo llvm-cov report --summary-only \
+          cargo llvm-cov report \
+            --ignore-filename-regex '/vql-python/' \
+            --summary-only \
             | awk 'NR == 1 || /^TOTAL/' \
             | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -128,3 +144,4 @@ jobs:
             target/llvm-cov/html
             target/llvm-cov/lcov.info
           if-no-files-found: error
+          retention-days: 7
