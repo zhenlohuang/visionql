@@ -1,6 +1,6 @@
 # VisionQL Roadmap
 
-VisionQL brings one query model to images, recorded video, and live streams. Releases are organized by capability, without fixed dates. See the [PRD](./docs/prd.md), [v0.1 high-level design](./docs/high_level_design.md), and [later-version proposals](./docs/proposals/README.md) for details.
+VisionQL brings one query model to images, recorded video, and live streams. Releases are organized by capability, without fixed dates. See the [PRD](./docs/prd.md), [high-level design](./docs/high_level_design.md), and [later-version proposals](./docs/proposals/README.md) for details.
 
 Status: ✅ Complete · 🚧 In progress · 📋 Planned
 

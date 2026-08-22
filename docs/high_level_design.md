@@ -1,10 +1,10 @@
-# VisionQL v0.1 High-Level Design
+# VisionQL High-Level Design
 
-> This document turns the [VisionQL PRD](./prd.md) v0.1 scope into the system boundaries shared by every component. Detailed contracts live in the [Kernel](./kernel.md), [Catalog](./catalog.md), [CLI](./cli.md), [Python binding](./python_binding.md), and [Testing](./testing.md) designs.
+> This document turns the [VisionQL PRD](./prd.md) into the system boundaries shared by every component. Detailed contracts live in the [Kernel](./kernel.md), [Catalog](./catalog.md), [CLI](./cli.md), [Python binding](./python_binding.md), and [Testing](./testing.md) designs.
 
 ## Scope
 
-VisionQL v0.1 is an embedded visual-query engine for local image and video directories, live RTSP streams, SQL model inference, event-time `TUMBLE` windows, Kafka output, and CLI and Python hosts. The [Roadmap](../ROADMAP.md) is the source of truth for release scope; [proposals](./proposals/README.md) define later capabilities.
+VisionQL is an embedded visual-query engine for local image and video directories, live RTSP streams, SQL model inference, event-time `TUMBLE` windows, Kafka output, and CLI and Python hosts. The [Roadmap](../ROADMAP.md) is the source of truth for release scope; [proposals](./proposals/README.md) define later capabilities.
 
 The architecture has five goals:
 
@@ -14,7 +14,7 @@ The architecture has five goals:
 4. Filtering, asynchronous inference, and row-level failure cannot lose event-time progress, window state, or source progress.
 5. The kernel remains independent of its host process and can be embedded by both CLI and Python.
 
-The v0.1 design excludes durable jobs, restart recovery, cross-query decode sharing, model-result caching, multi-user security, and a network service. It also does not fork DataFusion, build a general SQL engine or video storage format, or force bounded and continuous statements to share physical operators. Syntax assigned to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, identify the target release or state that it is unscheduled, and create no Catalog object.
+This design excludes durable jobs, restart recovery, cross-query decode sharing, model-result caching, multi-user security, and a network service. It also does not fork DataFusion, build a general SQL engine or video storage format, or force bounded and continuous statements to share physical operators. Syntax assigned to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, identify the target release or state that it is unscheduled, and create no Catalog object.
 
 ## Terminology
 
@@ -77,11 +77,11 @@ DataFusion `ExecutionPlan::execute` yields only `RecordBatch`. Watermarks, sourc
 
 ### Typed, optimizer-visible inference
 
-A Model `TYPE` owns its built-in inference function, input domain, semantic arguments, and result schema. Planning resolves the constant Model name and extracts the call into an explicit `Inference` node. Runtime-specific loading, batching, and device behavior remain behind kernel registries.
+A Model `TYPE` owns its built-in inference function, input domain, semantic arguments, and result schema. Planning resolves the constant Model name and extracts the call into an explicit inference extension node. Runtime-specific loading, batching, and device behavior remain behind kernel registries.
 
 ### Immutable definitions during execution
 
-Planning captures one Catalog definition snapshot. Replacing or dropping a Table, Model, or Function affects newly planned statements but does not change a running statement. The snapshot is process-local in v0.1; durable Query Manifests begin with the v0.2 service.
+Planning captures one Catalog definition snapshot. Replacing or dropping a Table, Model, or Function affects newly planned statements but does not change a running statement. The snapshot is process-local; a durable, serializable Query Manifest belongs to the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md).
 
 ### Bounded resources and honest delivery
 
@@ -149,7 +149,7 @@ Boundary rules:
 - `vql-catalog` cannot depend on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
 - CLI and Python depend only on public kernel host interfaces; DataFusion types do not leak into their public APIs.
 - Breaking DataFusion or Arrow changes remain behind the kernel boundary and require focused planning, epoch, schema, and wire-format regression tests.
-- `vql-server` and Workbench are v0.2 components described by proposals, not v0.1 workspace crates.
+- `vql-server` and Workbench are proposal-stage components, not workspace crates.
 
 ## Architecture Decisions
 
@@ -162,7 +162,7 @@ Boundary rules:
 | Explicit inference nodes | Enables type checking, deduplication, batching, cancellation, and metrics. |
 | One immutable definition snapshot per planned statement | Prevents concurrent DDL from changing a running result. |
 | SQLite behind `CatalogBackend` | Preserves zero-service startup without coupling the domain to one backend. |
-| In-memory allowlisted `TUMBLE` state | Gives attached v0.1 bounded state without defining a recovery ABI. |
+| In-memory allowlisted `TUMBLE` state | Gives attached execution bounded state without defining a recovery ABI. |
 | Delivery follows source replayability | Avoids guarantees that live RTSP input cannot satisfy. |
 
 ## Detailed Designs

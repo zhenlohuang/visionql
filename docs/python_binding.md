@@ -1,4 +1,4 @@
-# VisionQL v0.1 Python Binding Design
+# VisionQL Python Binding Design
 
 > This document defines the synchronous `visionql` package and its PyO3 boundary. SQL and execution semantics belong to the [Kernel Design](./kernel.md).
 
@@ -14,7 +14,7 @@
 
 It does not reimplement SQL planning, result schemas, cancellation, metrics, resource accounting, or model execution. DataFusion types do not appear in the public Python API.
 
-The package and import name are `visionql`; the native module is `visionql._visionql`.
+The package and import name are `visionql`; the native module is `visionql._visionql`. The package re-exports `connect`, `Session`, `QueryHandle`, `__version__`, and the pure-Python `visionql.images` helper module.
 
 ## Public API
 
@@ -33,15 +33,17 @@ metrics = handle.metrics()
 handle.cancel()
 ```
 
+`visionql.images.decode_batch(images)` is the one pure-Python helper: it takes an `IMAGE` `StructArray`, reads its `encoded` field, and returns Pillow images (or `None` per null row). It raises when Pillow is absent, which keeps Pillow an optional dependency of the package.
+
 `connect()` loads the same strict `EngineConfig` as the CLI. The optional `catalog` and `session_memory_limit_bytes` arguments override only those settings. It installs a Python UDF host before building the Session.
 
-`Session.sql()` accepts one statement and returns a `QueryHandle`. Query and `EXPLAIN` statements are planned for later collection, while DDL and `SET` take effect before `sql()` returns. `run_script()` executes and collects every statement synchronously in script order. On success it returns one handle with a cached result per statement; on the first failure it raises an error instead of returning a partial list. An unbounded statement keeps `run_script()` attached until it stops, so callers should use `sql()` when they need an independently cancellable continuous handle. The chainable DataFrame API belongs to v0.2 and must lower to the same kernel logical-plan contracts when introduced.
+`Session.sql()` accepts one statement and returns a `QueryHandle`. Query and `EXPLAIN` statements are planned for later collection, while DDL and `SET` take effect before `sql()` returns. `run_script()` executes and collects every statement synchronously in script order. On success it returns one handle with a cached result per statement; on the first failure it raises an error instead of returning a partial list. An unbounded statement keeps `run_script()` attached until it stops, so callers should use `sql()` when they need an independently cancellable continuous handle. A chainable DataFrame API is not part of this binding; when it is introduced it must lower to the same kernel logical-plan contracts.
 
 ## Results and Execution
 
 For an uncollected query or `EXPLAIN` statement, `QueryHandle` is a lazy host handle. `collect()` starts or drains execution and converts Arrow `RecordBatch` values into one `pyarrow.Table`; later calls reuse the cached kernel batches. Handles for DDL, `SET`, or statements returned by `run_script()` already contain materialized results. An empty result retains the kernel statement schema.
 
-`show(n)` collects, slices to at most `n` rows, and returns the PyArrow text representation. `_repr_html_()` returns an escaped preformatted representation. v0.1 does not implicitly fetch original media or render notebook thumbnails; explicit encoding is required before media crosses the process boundary.
+`show(n)` collects, slices to at most `n` rows, and returns the PyArrow text representation; `n` defaults to 20. `_repr_html_()` shows the same 20-row view inside an escaped `<pre>` block. The binding never implicitly fetches original media or renders notebook thumbnails; explicit encoding is required before media crosses the process boundary.
 
 `cancel()` forwards to the kernel cancellation token. `collect()` releases the Python GIL while blocking in the kernel. `run_script()` is a synchronous Python call, and an invoked Python UDF necessarily runs under the GIL. A kernel failure becomes `RuntimeError` while preserving its stable `[VQL:CODE]` representation in the message.
 
@@ -53,16 +55,13 @@ Standard Arrow storage remains readable when PyArrow does not interpret VisionQL
 
 ## Query Metrics
 
-`QueryHandle.metrics()` returns `None` when a statement has no query metrics. Otherwise it returns a dictionary containing the kernel's query-local counters and distributions, including:
+`QueryHandle.metrics()` returns `None` when a statement has no query metrics. Otherwise it returns a dictionary. The [Kernel Design](./kernel.md#metrics) defines which counters and distributions exist and what they mean; the binding only decides how they are shaped in Python:
 
-- input, output, decode, inference, error, sampled, dropped, and late row/frame counters;
-- inference, queue, service, epoch, and end-to-end latency distributions;
-- source reconnect, generation, gap, bitrate, watermark, and dropped-range data;
-- window-state and sink-retry data;
-- current and peak resource values for Arrow, media, frame, tensor, queue, Triton payload, window-state, and sink buffers;
-- an explicit availability field for device-memory telemetry.
+- every scalar counter and distribution becomes one snake_case key with the kernel's own name, value, and unit;
+- `dropped_frame_ranges` becomes a list of dictionaries, with the drop reason as a lowercase string;
+- `resources` is a nested dictionary keyed by `arrow`, `media`, `frame_buffer`, `model_tensor`, `model_queue`, `triton_payload`, `window_state`, `sink_buffer`, and `device_memory`, each carrying `available`, `current_bytes`, and `peak_bytes`.
 
-The binding maps kernel counters, distributions, and resource values without changing their units or lifecycle. It also marks device-memory telemetry unavailable because the current Runtimes do not provide allocator data.
+The mapping adds no derived values and changes no units or lifecycle. `device_memory` reports `available = False` so a caller never reads an untracked zero as a measurement.
 
 ## Python UDF Host
 
@@ -75,7 +74,7 @@ Invocation is vectorized:
 3. Its result returns through the Arrow data interface.
 4. The kernel validates the result against the declared field contract.
 
-The entry point uses the `module:function` form and must resolve to a callable attribute. Resolution and invocation failures become structured execution errors. A Python call already running under the GIL cannot be interrupted; surrounding query execution observes cancellation after the call returns. Isolated workers and cancellation of Python code already running belong to the v0.2 service design.
+The entry point uses the `module:function` form and must resolve to a callable attribute. Resolution and invocation failures become structured execution errors. A Python call already running under the GIL cannot be interrupted; surrounding query execution observes cancellation after the call returns. Isolated worker processes and cancellation of already-running Python code belong to the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md).
 
 ## Verification
 

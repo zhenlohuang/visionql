@@ -1,4 +1,4 @@
-# VisionQL v0.1 CLI Design
+# VisionQL CLI Design
 
 > This document defines the standalone `vql` host. SQL and execution semantics belong to the [Kernel Design](./kernel.md); the shared instance root and Catalog path are defined by the [Catalog Design](./catalog.md#catalog-location).
 
@@ -25,7 +25,7 @@ Engine settings are not CLI flags. `VQL_HOME` selects the instance and its stric
 
 The shell supports multiline statements and executes input only when the buffered text ends with a complete statement terminator. Complete scripts are split by the kernel's SQL-aware splitter so semicolons inside strings, comments, and quoted identifiers do not split statements.
 
-Interactive terminals use Reedline and store at most 1,000 entries at `$VQL_HOME/history`. Non-terminal stdin and `TERM=dumb` use the basic line reader. Both loops share these contracts:
+On start the shell prints a banner naming the package version and the exit keys. Interactive terminals use Reedline and store at most 1,000 entries at `$VQL_HOME/history`. Non-terminal stdin and `TERM=dumb` use the basic line reader. Both loops share these contracts:
 
 - `\q` exits only when it is the trimmed standalone line, without `;`;
 - Ctrl-D exits;
@@ -35,7 +35,7 @@ Interactive terminals use Reedline and store at most 1,000 entries at `$VQL_HOME
 
 At an interactive prompt, Ctrl-C clears pending input. While a query is active, signal handling follows the shared cancellation lifecycle: the first Ctrl-C requests a graceful stop; a second Ctrl-C requests immediate cancellation.
 
-A statement error is printed and the interactive shell continues with the next statement. Terminal input or history failures terminate the host with a structured kernel error.
+A statement error is printed and the interactive shell continues with the next statement. Script-splitting, terminal input, and history failures terminate the host with a structured kernel error.
 
 ## Script Runner
 
@@ -47,7 +47,7 @@ Any read, parse, planning, or execution error terminates the command with a non-
 
 ## Rendering
 
-Bounded and continuous paths share one Arrow `RecordBatch` renderer. Process-local `IMAGE` buffer identifiers never appear in terminal output. Image values are summarized for display; the CLI does not decode thumbnails or introduce an alternative result schema.
+Bounded and continuous paths share one Arrow `RecordBatch` renderer, and an empty result prints `(no rows)`. Process-local `IMAGE` buffer identifiers never appear in terminal output: an `IMAGE` column is replaced by a text summary of the form `<image uri=URI WIDTHxHEIGHT>`, with `?` standing in for missing parts. Every other column keeps its Arrow field and value. The CLI does not decode thumbnails or introduce an alternative result schema.
 
 Error output preserves stable kernel error codes. Shell behavior must not depend on matching human-readable error strings.
 

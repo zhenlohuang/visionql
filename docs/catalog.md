@@ -1,4 +1,4 @@
-# VisionQL v0.1 Catalog Design
+# VisionQL Catalog Design
 
 > This document defines the `vql-catalog` domain, persistence, snapshot, and Unity Catalog-compatible API contracts. The [High-Level Design](./high_level_design.md) defines its place in the system; the [Kernel Design](./kernel.md) defines how planned statements consume snapshots.
 
@@ -22,13 +22,13 @@ The default namespace is `vql.default`:
 - `default` is the default Schema;
 - an unqualified SQL name such as `photos` resolves as `vql.default.photos`.
 
-Every relation provider occupies the Table namespace. Models and Functions have separate namespaces. v0.1 object names are case-insensitive and normalize to lowercase, including names written as quoted SQL identifiers. `RESOLVE MODEL detector` is the explicit transition from a Model declaration to a resolved execution contract.
+Every relation provider occupies the Table namespace. Models and Functions have separate namespaces. Object names are case-insensitive and normalize to lowercase, including names written as quoted SQL identifiers. `RESOLVE MODEL detector` is the explicit transition from a Model declaration to a resolved execution contract.
 
 | Object | Stored definition |
 |---|---|
-| Table | Provider, capabilities, location or sanitized endpoint, options, Arrow schema, internal revision, credential reference |
-| Model | Type, raw `FROM` location, Runtime and Runtime-scoped `WITH` options, plus an optional resolved artifact or endpoint contract |
-| Function | DataFusion signature, normalized SQL expression or Python entry point, volatility, implementation digest |
+| Table | Provider variant with its options, location or sanitized endpoint, optional credential reference, comment/properties/owner metadata, and the Arrow schema; capabilities are derived from the provider rather than stored |
+| Model | Type, raw `FROM` location, Runtime kind, Runtime-scoped `WITH` options, declaration fingerprint, plus an optional resolved specification holding the resolved source, artifact hash, execution mode, semantic fingerprint, and volatility |
+| Function | Parameter names and types, return type, normalized SQL-macro expression or Python `module:function` entry point, and a semantic fingerprint |
 
 Typed inference calls are query syntax, not Function objects. Their constant Model names resolve from the statement's immutable definition snapshot.
 
@@ -42,12 +42,25 @@ Provider metadata determines whether a Table is readable, writable, bounded, and
 | `VIDEOS` | yes | no | yes | yes |
 | `RTSP` | yes | no | no | no |
 | `KAFKA` | no | yes | no | no |
+| `EXTERNAL` | no | no | yes | yes |
+
+`EXTERNAL` exists only for Tables registered through the Unity Catalog API with no `visionql.provider` property. It holds an optional data-source format and storage location, and it declares no readable or writable capability, so it carries metadata without describing a data path.
 
 RTSP and Kafka appear in the Unity Catalog API as `EXTERNAL` Tables with `visionql.provider` and `visionql.{readable,writable,bounded,durable}` properties. They are not Unity Catalog `STREAMING_TABLE` objects because VisionQL does not implement that managed lifecycle.
 
 The SQL surface follows the [Spark data-source table shape](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-create-table-datasource.html):
 
 ```sql
+CREATE TABLE photos
+USING IMAGES
+LOCATION '/data/photos'
+OPTIONS (recursive = true);
+
+CREATE TABLE clips
+USING VIDEOS
+LOCATION '/data/clips'
+OPTIONS (fps = 2, start_time = '2026-01-01T00:00:00Z');
+
 CREATE TABLE camera
 USING RTSP
 OPTIONS (
@@ -71,6 +84,28 @@ OPTIONS (
 );
 ```
 
+Directory providers take their root from `LOCATION` and only tuning options from `OPTIONS`; endpoint providers take everything from `OPTIONS` and reject `LOCATION`. Every option is validated before commit, so a stored definition is always one the providers can execute.
+
+| Provider | Option | Contract |
+|---|---|---|
+| `IMAGES`, `VIDEOS` | `LOCATION` | Required absolute path to an existing, readable local directory, canonicalized at DDL time |
+| `IMAGES`, `VIDEOS` | `recursive` | Optional boolean; defaults to false |
+| `VIDEOS` | `fps` | Optional sampling target; defaults to 1, must be greater than 0 and at most 120 |
+| `VIDEOS` | `start_time` | Optional RFC 3339 timestamp anchoring frame time to real event time; without it the frame timestamp is synthesized from the Unix epoch and the field carries `visionql.synthetic_event_time` |
+| `RTSP` | `url` | Required absolute `rtsp://` URL with a host. Embedded credentials, query strings, and fragments are rejected so they cannot reach storage |
+| `RTSP` | `fps` | Optional sampling target; defaults to 5, must be greater than 0 and at most 120 |
+| `RTSP` | `event_time` | Optional `'capture_time'` (default) or `'ingest_time'` |
+| `RTSP` | `watermark` | Optional non-negative delay written as a number plus `milliseconds`/`seconds`/`minutes` (or `ms`/`s`/`m`); defaults to `2 seconds` |
+| `RTSP` | `transport` | Optional `'tcp'` (default) or `'udp'` |
+| `KAFKA` | `bootstrap_servers` | Required comma-separated `host:port` endpoints, bracketing IPv6 literals; URI schemes and credentials are rejected |
+| `KAFKA` | `topic` | Required existing topic name; 1–249 ASCII letters, digits, `.`, `_`, or `-`, excluding `.` and `..` |
+| `KAFKA` | `format` | Optional, defaults to `json`; every other format is rejected |
+| `KAFKA` | `credential_ref` | Optional opaque reference of at most 1024 characters. Only the reference is stored; resolution belongs to execution |
+| `KAFKA` | `delivery_timeout_ms` | Optional; defaults to 30,000 and accepts 1–3,600,000 |
+| `KAFKA` | `buffer_capacity` | Optional; defaults to 1,024 and accepts 1–100,000 |
+
+How the engine acts on these values — sampling, watermarks, reconnects, delivery, and backpressure — belongs to the [Kernel Design](./kernel.md#table-providers).
+
 Foreground results are a host concern; there is no Console Table provider.
 
 ## Catalog Location
@@ -93,11 +128,11 @@ The Catalog owns only `catalog/vql.db` in this layout. Hosts own `config.toml` l
 
 `CatalogBackend` is the storage port. `CatalogStore` provides default-namespace operations over any `Arc<dyn CatalogBackend>`. The `sqlite` feature implements the port at `$VQL_HOME/catalog/vql.db`. Other backends must preserve the same domain, transaction, snapshot, and wire-translation contracts.
 
-Every definition mutation commits atomically. The backend stores current object heads and append-only internal revisions. `DROP` writes a tombstone and prevents new planning. Table generations referenced by media locators remain identifiable, but a new media read must still reauthorize against current Catalog state.
+Every definition mutation commits atomically. The SQLite backend keeps `catalogs` and `schemas` rows for the namespace, an append-only `revisions` log holding each definition as JSON plus its Arrow IPC schema, and an `objects` table pointing every live `(catalog, schema, kind, name)` at its head revision. Revision rows are never rewritten; `DROP` appends a tombstone revision and removes the object head so new planning cannot resolve the name. Table generations referenced by media locators remain identifiable, but a new media read must still reauthorize against current Catalog state.
 
-Planning captures one `DefinitionSnapshot` containing the current Tables, Models, and Functions. A query-specific DataFusion session is populated from that snapshot, and resolved Model and provider specifications are copied into the planned statement. Later mutations affect new plans only.
+A reader captures one `DefinitionSnapshot` containing the current Tables, Models, and Functions. The snapshot is immutable and detached from the store, so later mutations are invisible to everything already holding one. That is the whole consistency contract the Catalog offers; how a planned statement pins and consumes a snapshot belongs to the [Kernel Design](./kernel.md#immutable-query-definition-snapshot).
 
-Internal revisions support consistent execution and compare-and-swap Model resolution. They are not a public object-versioning API. SQLite initializes the current schema directly; v0.1 defines no legacy import or migration chain.
+Internal revisions support consistent execution and compare-and-swap Model resolution. They are not a public object-versioning API. SQLite initializes the current schema directly and defines no legacy import or migration chain.
 
 Schemas are stored as Arrow IPC. Secrets, tokens, signed URLs, and plaintext credentials are never persisted; definitions contain only opaque secret references. Catalog output and `SHOW CREATE` sanitize endpoint information and secret references.
 

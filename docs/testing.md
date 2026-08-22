@@ -96,7 +96,8 @@ off by default:
 
 - `rtsp` starts the pinned MediaMTX service.
 - `kafka` starts the pinned single-node Apache Kafka service.
-- Add `server` when `vql-server` exists and needs a process boundary test.
+
+Add a new profile only when a component genuinely needs a process boundary; nothing starts by default.
 
 Start the current development dependency with:
 
