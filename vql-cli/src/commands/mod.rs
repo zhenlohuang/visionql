@@ -55,15 +55,6 @@ fn run_statements(session: &Session, statements: Vec<String>, show_metrics: bool
     Ok(())
 }
 
-pub(crate) fn explain(session: &Session, sql: &str, show_metrics: bool) -> Result<()> {
-    let statement = session.sql(&format!("EXPLAIN {sql}"))?;
-    super::render::print_batches(&statement.collect()?)?;
-    if show_metrics {
-        print_metrics(&statement);
-    }
-    Ok(())
-}
-
 pub(crate) fn print_metrics(statement: &Statement) {
     let Some(metrics) = statement.metrics() else {
         return;

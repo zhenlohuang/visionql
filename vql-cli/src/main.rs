@@ -32,8 +32,6 @@ enum Command {
     Shell,
     /// Run every statement in a SQL script in order.
     Run { script: PathBuf },
-    /// Print a DataFusion logical/physical explanation for one query.
-    Explain { query: String },
 }
 
 fn main() {
@@ -61,14 +59,17 @@ fn run() -> Result<()> {
             commands::shell::run(session, engine.config().history_path(), cli.metrics)
         }
         Command::Run { script } => commands::run_file(&session, &script, cli.metrics),
-        Command::Explain { query } => {
-            let path = PathBuf::from(&query);
-            let sql = if path.is_file() {
-                std::fs::read_to_string(path)?
-            } else {
-                query
-            };
-            commands::explain(&session, sql.trim().trim_end_matches(';'), cli.metrics)
-        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn explain_is_not_a_cli_subcommand() {
+        assert!(Cli::try_parse_from(["vql", "explain", "SELECT 1"]).is_err());
     }
 }

@@ -207,10 +207,9 @@ Python-hosted UDFs receive and return Arrow arrays in batches. They require the 
 ```text
 vql [--catalog PATH] [--query-memory-limit-bytes BYTES] [--metrics] shell
 vql [--catalog PATH] [--query-memory-limit-bytes BYTES] [--metrics] run <script.sql>
-vql [--catalog PATH] [--query-memory-limit-bytes BYTES] [--metrics] explain <query-or-file>
 ```
 
-`--metrics` writes one structured JSON metrics object per query. VisionQL-aware `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Sink placement without opening sources or probing models and services. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG` to a `tracing` filter such as `info` or `vql_kernel=debug` when diagnosing execution.
+`--metrics` writes one structured JSON metrics object per query. SQL `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Sink placement without opening sources or probing models and services. Run it through the shell or a SQL script like any other statement. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG` to a `tracing` filter such as `info` or `vql_kernel=debug` when diagnosing execution.
 
 ## Runtime state
 
