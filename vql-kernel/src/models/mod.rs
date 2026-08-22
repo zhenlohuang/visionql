@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Fields};
 
-use crate::catalog::ModelType;
 use crate::types::box2d_field;
 
 pub(crate) fn detection_fields() -> Fields {
@@ -40,10 +39,8 @@ pub(crate) fn detections_type() -> DataType {
     )))
 }
 
-impl ModelType {
-    pub(crate) fn canonical_output_type(self) -> DataType {
-        match self {
-            Self::ObjectDetection => detections_type(),
-        }
+pub(crate) fn canonical_output_type(model_type: crate::catalog::ModelType) -> DataType {
+    match model_type {
+        crate::catalog::ModelType::ObjectDetection => detections_type(),
     }
 }

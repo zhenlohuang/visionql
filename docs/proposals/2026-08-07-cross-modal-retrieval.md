@@ -13,7 +13,7 @@ The v0.3 text-to-image retrieval feature registers separate `IMAGE_EMBEDDING(n)`
 
 ## Motivation and Scope
 
-This proposal covers the complete PRD §3.3.5 workflow: embed data, write it to Lance, and run `ORDER BY <-> LIMIT` Top-K queries. Its scope includes the `VECTOR` type, retrieval syntax, vector Top-K execution, HNSW indexes, the Lance table provider, and Lance Sink. Physical execution for image and text embedding reuses the typed model pipeline in [design.md](../design.md) §10.
+This proposal covers the complete PRD §3.3.5 workflow: embed data, write it to Lance, and run `ORDER BY <-> LIMIT` Top-K queries. Its scope includes the `VECTOR` type, retrieval syntax, vector Top-K execution, HNSW indexes, and a readable/writable Lance Table provider. Physical execution for image and text embedding reuses the typed model pipeline in [design.md](../design.md) §10.
 
 ## Detailed Design
 
@@ -23,9 +23,9 @@ v0.3 normalizes `<->` to `L2_DISTANCE` and then executes a bounded Top-K. Withou
 
 ### Lance Storage
 
-- Lance Sink appends bounded results directly. Streaming queries combine multiple epochs by time or size before committing a new version, avoiding one small commit per epoch. `IMAGE` is stored as an encoded blob with logical-type metadata for embedding and evidence frames.
+- The Lance Table provider appends bounded results directly. Streaming queries combine multiple epochs by time or size before committing a new version, avoiding one small commit per epoch. `IMAGE` is stored as an encoded blob with logical-type metadata for embedding and evidence frames.
 - The Lance table provider supports projection pushdown, predicate pushdown, and statistics. Files written by VisionQL preserve logical-type metadata and restore `IMAGE`, `BOX2D`, and `VECTOR` on read, covering the complete write-then-search workflow.
-- The public Sink contract for registration, validation, cancellation, timeout, and bounded buffering is defined in [design.md](../design.md) §8.4.
+- The public writable-Table contract for registration, validation, cancellation, timeout, and bounded buffering is defined in [design.md](../design.md) §8.4.
 
 ### New Types, Syntax, and Functions
 
@@ -53,7 +53,7 @@ Test Top-K correctness using an explicit comparison between brute-force and ANN 
 
 | Question | Evidence required | Deadline |
 |---|---|---|
-| Lance streaming append and compaction for small batches | A continuous seven-day write test covering version count, point reads, and compaction | Before the v0.3 Lance Sink release |
+| Lance streaming append and compaction for small batches | A continuous seven-day write test covering version count, point reads, and compaction | Before the v0.3 Lance Table release |
 
 ## Changelog
 

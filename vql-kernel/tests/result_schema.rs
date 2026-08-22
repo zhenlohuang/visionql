@@ -19,7 +19,7 @@ fn ddl_results_keep_the_kernel_owned_schema_contract() {
             images.display()
         ),
         format!(
-            "CREATE TABLE clips USING VIDEOS LOCATION '{}' WITH (fps = 1)",
+            "CREATE TABLE clips USING VIDEOS LOCATION '{}' OPTIONS (fps = 1)",
             videos.display()
         ),
         "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME"
@@ -31,7 +31,7 @@ fn ddl_results_keep_the_kernel_owned_schema_contract() {
 
 #[cfg(feature = "ffmpeg-native")]
 #[test]
-fn stream_ddl_result_keeps_the_kernel_owned_schema_contract() {
+fn rtsp_table_ddl_result_keeps_the_kernel_owned_schema_contract() {
     let temp = tempdir().expect("create test directory");
     let engine =
         Engine::new(EngineConfig::from_home(temp.path().join("vql-home"))).expect("create engine");
@@ -39,7 +39,8 @@ fn stream_ddl_result_keeps_the_kernel_owned_schema_contract() {
 
     assert_ddl_result_schema(
         &session,
-        "CREATE STREAM entrance FROM 'rtsp://127.0.0.1:8554/live' WITH (transport = 'tcp')",
+        "CREATE TABLE entrance USING RTSP OPTIONS (\
+         url = 'rtsp://127.0.0.1:8554/live', transport = 'tcp')",
     );
 }
 
@@ -56,7 +57,7 @@ fn sql_behavior_results_keep_names_types_and_nullability() {
     session
         .run_script(&format!(
             "CREATE TABLE photos USING IMAGES LOCATION '{}';
-             CREATE TABLE clips USING VIDEOS LOCATION '{}' WITH (fps = 1);
+             CREATE TABLE clips USING VIDEOS LOCATION '{}' OPTIONS (fps = 1);
              CREATE MODEL detector TYPE OBJECT_DETECTION
                FROM 'mock://person' USING ONNX_RUNTIME;
              RESOLVE MODEL detector;",

@@ -73,7 +73,7 @@ impl InferenceNode {
         let result = DFSchema::from_unqualified_fields(
             Fields::from(vec![Arc::new(Field::new(
                 &output_name,
-                model.model_type.canonical_output_type(),
+                crate::models::canonical_output_type(model.model_type),
                 true,
             ))]),
             HashMap::new(),

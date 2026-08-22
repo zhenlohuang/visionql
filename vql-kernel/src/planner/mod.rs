@@ -96,7 +96,7 @@ fn annotate_explain(
     collect_scans(&explain.plan, &mut scans);
     let streams = scans
         .iter()
-        .filter_map(|name| snapshot.stream(name))
+        .filter_map(|name| rtsp_table(snapshot, name))
         .collect::<Vec<_>>();
     let stream = streams.first();
     let mode = match stream {
@@ -112,14 +112,13 @@ fn annotate_explain(
     let has_tumble = contains_tumble(&explain.plan);
     let mut lines = vec![format!("VisionQLPlan mode={mode}")];
     if let Some(stream) = stream {
-        let definition = &stream.definition;
         lines.push(format!(
             "Source RTSP name={} fps={} event_time={:?} watermark_delay_ms={} transport={:?} projection_pushdown=enabled time_range_pushdown=not_applicable",
-            definition.name,
-            definition.fps,
-            definition.event_time,
-            definition.watermark_delay_ms,
-            definition.transport,
+            stream.name,
+            stream.fps,
+            stream.event_time,
+            stream.watermark_delay_ms,
+            stream.transport,
         ));
         let mut topology = vec!["RTSPSource", "EpochCoordinator"];
         if !inference::explain_annotations(&explain.plan, image_payload).is_empty() {
@@ -234,7 +233,7 @@ fn validate_streamability(
     collect_scans(plan, &mut scans);
     let stream_scans = scans
         .iter()
-        .filter(|name| snapshot.stream(name).is_some())
+        .filter(|name| rtsp_table(snapshot, name).is_some())
         .cloned()
         .collect::<Vec<_>>();
     if stream_scans.is_empty() {
@@ -256,6 +255,17 @@ fn validate_streamability(
     }
     validate_stream_node(plan, sql)?;
     Ok(Some(stream_name))
+}
+
+fn rtsp_table<'a>(
+    snapshot: &'a crate::catalog::DefinitionSnapshot,
+    name: &str,
+) -> Option<&'a crate::catalog::RtspTableConfig> {
+    let table = snapshot.table(name)?;
+    match &table.definition.provider {
+        crate::catalog::TableProvider::Rtsp(definition) => Some(definition),
+        _ => None,
+    }
 }
 
 fn collect_scans(plan: &LogicalPlan, scans: &mut Vec<String>) {

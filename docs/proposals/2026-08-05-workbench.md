@@ -16,7 +16,7 @@ This proposal derives Workbench from [VisionQL PRD](../prd.md) §3.8, [System De
 General SQL clients can execute VisionQL SQL but cannot naturally render `IMAGE`, `BOX2D`, detection arrays, or continuous results. Workbench provides three specialized experiences:
 
 1. **Development and debugging:** write SQL and inspect images, detection boxes, and live results directly.
-2. **Catalog exploration:** browse tables, streams, models, functions, and Sinks and insert object names into the editor.
+2. **Catalog exploration:** browse catalogs, schemas, provider tables, models, and functions and insert object names into the editor.
 3. **Operations:** inspect continuous-query state, actual inference cost, dropped frames, and source outages, and then pause, resume, or stop jobs.
 
 Workbench is not a notebook, general-purpose BI tool, VMS, labeling platform, or independent identity-management system.
@@ -30,7 +30,7 @@ The [PRD](../prd.md) §3.8 capability list is authoritative. v0.2 includes SQL e
 1. **Only public engine protocols.** Queries, catalogs, operations, and metrics use Arrow Flight SQL or public SQL. There are no Workbench-only engine RPCs.
 2. **No persistent business state.** Workbench keeps login sessions, active previews, thumbnails, and short-term metrics in memory. A restart may require login and rerunning an interactive query but never affects durable jobs in `vqld`.
 3. **Do not alter SQL semantics.** Result limits apply to transport. Workbench never injects `LIMIT`, filters, or sampling into user SQL.
-4. **Transfer fewer pixels by default.** Results first return references and thumbnails; originals are fetched on demand. The engine writes large exports directly to a Sink.
+4. **Transfer fewer pixels by default.** Results first return references and thumbnails; originals are fetched on demand. The engine writes large exports directly to a writable Table.
 5. **The engine defines errors and capabilities.** Workbench uses stable error codes and capability metadata. It does not parse prose errors or maintain a second authorization model.
 
 ## 2. User Tasks and Information Architecture
@@ -39,7 +39,7 @@ The [PRD](../prd.md) §3.8 capability list is authoritative. v0.2 includes SQL e
 
 **Task A: debug a visual query**
 
-1. Select a table or stream from the catalog.
+1. Select a Table from the catalog.
 2. Write or paste SQL.
 3. Run the selected statement.
 4. Inspect images and boxes in the result table.
@@ -48,7 +48,7 @@ The [PRD](../prd.md) §3.8 capability list is authoritative. v0.2 includes SQL e
 
 **Task B: preview a live stream**
 
-1. Execute an unbounded SELECT without a Sink.
+1. Execute an unbounded SELECT without a Table write.
 2. Observe the newest N rows and live metrics.
 3. Cancel the current preview before changing SQL.
 4. Let the BFF cancel the Flight query when the result view or browser closes.
@@ -136,7 +136,7 @@ The engine protocol returns references by default. The Workbench Flight session 
 
 | State | Owner | Persistence |
 |---|---|---|
-| Tables, streams, models, functions, Sinks | `vqld` Catalog | Yes |
+| Catalogs, schemas, tables, models, functions | `vqld` Catalog | Yes |
 | Continuous-query definitions, state, checkpoints | `vqld` | Yes |
 | Identity and permissions | `vqld` / external IdP | Not stored by Workbench |
 | Workbench login session | BFF memory | No; login again after restart |
@@ -172,7 +172,7 @@ v0.2 does not ship Arrow JS in the browser. The BFF converts only bounded intera
 | Query identity | `VisionqlFlightInfoV1` in `FlightInfo.app_metadata` supplies query ID, statement kind, and mode |
 | Long queries and cancellation | `PollFlightInfo`, `CancelFlightInfo`, and cancellation propagation on disconnect |
 | Table catalog | `GetCatalogs`, `GetDbSchemas`, `GetTables`, `GetTableTypes` |
-| Other catalog objects | `SHOW STREAMS/MODELS/FUNCTIONS/SINKS`, `DESCRIBE`, `SHOW CREATE` |
+| Other catalog objects | `SHOW MODELS/FUNCTIONS`, `DESCRIBE`, `SHOW CREATE` |
 | Continuous queries | `SUBMIT QUERY`, `SHOW/DESCRIBE QUERY`, `SHOW QUERY DEPENDENCIES`, `PAUSE`, `RESUME`, `STOP` |
 | Metrics | Prometheus endpoint configured at deployment; BFF filters labels such as `query_id` |
 | Errors | Standard gRPC status plus `visionql-error-bin` trailing metadata |
@@ -342,7 +342,7 @@ Each schema field contains at least name, Arrow storage type, VisionQL logical t
 
 ### 6.1 Editor
 
-v0.2 provides syntax highlighting for SQL, VQL DDL, types, built-ins, and table functions; bracket matching, comments, formatting, find/replace, and basic diagnostics; catalog completion for relations, columns, models, functions, and Sinks; “run selection” and “run current statement”; `Cmd/Ctrl+Enter` to run and `Esc` or a button to cancel; and source-span navigation when available.
+v0.2 provides syntax highlighting for SQL, VQL DDL, types, built-ins, and table functions; bracket matching, comments, formatting, find/replace, and basic diagnostics; catalog completion for tables, columns, models, and functions; “run selection” and “run current statement”; `Cmd/Ctrl+Enter` to run and `Esc` or a button to cancel; and source-span navigation when available.
 
 The syntax package handles highlighting and statement boundaries, not final semantics. Completion may briefly be stale; the engine always decides execution.
 
@@ -355,7 +355,7 @@ The BFF uses a lexer that understands semicolons, strings, quoted identifiers, a
 - Cancel a bounded SELECT and mark it truncated at the display limit, then continue the script.
 - Ordinary unbounded `SELECT` and `INSERT INTO ... SELECT ...` attach and do not complete naturally, so they must be the last statement. If prepare finds one earlier, stop before executing it and ask the user to split the script; never convert it to a background job.
 - Explicit `SUBMIT QUERY <name> AS INSERT INTO ... SELECT ...` has kind `persistent_submission`. It immediately returns query ID, name, state, and definition revision, allowing later script statements. Link its “submitted” result to Jobs.
-- Ordinary unbounded `INSERT` displays the fixed attached status stream. Cancellation, page exit, or session expiry terminates the Sink query without creating a durable job.
+- Ordinary unbounded `INSERT` displays the fixed attached status stream. Cancellation, page exit, or session expiry terminates the Table-write query without creating a durable job.
 - A script is not an implicit transaction. Later statements may depend on earlier DDL, so global semantic preflight is impossible. If a later unbounded statement is invalidly positioned, already completed statements do not roll back. Atomic DDL must be provided by the individual engine statement.
 
 Share golden lexer cases with the engine parser for strings, comments, quoted identifiers, and VQL DDL. Any boundary mismatch blocks release. Runtime semantic classification still trusts only engine metadata.
@@ -370,7 +370,7 @@ An unbounded preview cannot use cumulative 1,000-row or 8 MiB caps. It uses a fi
 
 Deployment may tighten these values but the page cannot expand them without bound. Workbench does not rewrite SQL: aggregation, sorting, and inference retain complete query semantics. Bounded limits only constrain browser transport; unbounded limits only constrain preview resources.
 
-Large exports bypass the BFF. The export assistant generates `INSERT INTO` or CTAS SQL, displays it, and lets the user confirm before `vqld` writes directly to Lance, Parquet, or another Sink.
+Large exports bypass the BFF. The export assistant generates `INSERT INTO` or CTAS SQL, displays it, and lets the user confirm before `vqld` writes directly to a Lance, Parquet, or another writable Table.
 
 ### 6.4 Query History and Drafts
 
@@ -450,11 +450,9 @@ Result batches arrive through the active Flight `DoGet`. The BFF fetches Prometh
 
 | Object | Public source |
 |---|---|
-| Table / View | Flight SQL `GetTables`, including schema when needed |
-| Stream | `SHOW STREAMS` + `DESCRIBE STREAM` |
+| Catalog / Schema / Table | Unity Catalog-compatible API or Flight SQL metadata, including schema when needed |
 | Model | `SHOW MODELS` + `DESCRIBE MODEL` |
 | Function | `SHOW FUNCTIONS` + `DESCRIBE FUNCTION` |
-| Sink | `SHOW SINKS` + `DESCRIBE SINK` |
 | DDL | Sanitized `SHOW CREATE ...` |
 
 The engine returns only objects visible to the current principal. Workbench does not simulate permission filtering in the client.
@@ -464,11 +462,11 @@ The engine returns only objects visible to the current principal. Workbench does
 - Cache catalog data in the BFF per user session for 30 seconds; the browser caches only the current page's needs.
 - Invalidate related entries immediately after successful catalog DDL.
 - Allow manual refresh. On failure, retain the old snapshot and mark it “may be stale.”
-- Completion uses the latest successful snapshot and shows object type to disambiguate same-named Tables and Streams.
+- Completion uses the latest successful snapshot and shows each Table's provider and read/write/bounded capabilities.
 
 ### 9.3 Object Detail
 
-Show only public, queryable information: schema, logical types, and nullability; source kind, sanitized location, event time, and watermark; Model type, source digest, Runtime kind/protocol, processor kinds, canonical schema, and constraints; Function signature, implementation language/body digest, and volatility; Sink format and sanitized target; and copyable sanitized DDL.
+Show only public, queryable information: schema, logical types, and nullability; Table provider, capabilities, sanitized location, event time, and watermark; Model type, source digest, Runtime kind/protocol, processor kinds, canonical schema, and constraints; Function signature, implementation language/body digest, and volatility; and copyable sanitized DDL.
 
 v0.2 does not edit objects on the detail page. Generate SQL and return to Query for changes, preserving a declarative and reviewable path.
 
@@ -484,7 +482,7 @@ Fetch list metrics once and merge by `query_id`, not once per row. Detail reuses
 
 ### 10.2 Detail Page
 
-First run `DESCRIBE QUERY '<query_id>'`, then `SHOW QUERY DEPENDENCIES '<query_id>'` for the resolved Function, Model, source, and Sink identities and semantic fingerprints in the Query Manifest. Never infer dependencies from saved SQL.
+First run `DESCRIBE QUERY '<query_id>'`, then `SHOW QUERY DEPENDENCIES '<query_id>'` for the resolved Function, Model, readable Table, and writable Table identities and semantic fingerprints in the Query Manifest. Never infer dependencies from saved SQL.
 
 Show four groups:
 
@@ -644,7 +642,7 @@ Hard constraints:
 | Front-end unit | Type rendering, `BOX2D` coordinates, confidence filters, ring, state machines, error mapping |
 | Accessibility | Keyboard, focus, textual detections, contrast, reduced motion |
 | BFF unit | Script lexing, sequential prepare, result limits, Arrow-to-JSON, blob TTL, `media_ref`, injection prevention |
-| Protocol contract | Fixed SqlInfo IDs/capabilities, all metadata RPCs, `statement_info_v1`, FlightInfo metadata, attached Sink status, prepared statements, cancel, per-RPC session token, Protobuf errors, `IMAGE` schema/version, system SQL |
+| Protocol contract | Fixed SqlInfo IDs/capabilities, all metadata RPCs, `statement_info_v1`, FlightInfo metadata, attached Table-write status, prepared statements, cancel, per-RPC session token, Protobuf errors, `IMAGE` schema/version, system SQL |
 | Integration | Mock Flight slow clients, disconnect, cancel, trailing-metadata errors, unknown capability/field fallback |
 | Real engine E2E | Login, DDL, bounded query, multimodal rendering, live preview, Jobs actions, permission denial |
 | Security | CSRF, XSS strings, forged/expired/revoked locators and media references, log redaction, cross-user cache and Flight-session isolation |

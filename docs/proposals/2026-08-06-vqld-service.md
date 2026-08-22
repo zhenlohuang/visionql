@@ -24,7 +24,7 @@ The embedded v0.1 kernel does not listen on a port. In v0.2, `vqld` owns network
 - Flight SQL statement query/update, prepared statements, `GetSchema`, `GetCatalogs`, `GetDbSchemas`, `GetTables`, `GetTableTypes`, `GetSqlInfo`, and `PollFlightInfo` for long-running queries.
 - Both bounded and unbounded statement-query results return Arrow batches through `DoGet`. An unbounded query returns consumable `FlightInfo` as soon as its schema and endpoint are ready, without waiting for completion. Cancellation uses `CancelFlightInfo`; a disconnected client also triggers the server cancellation token.
 - Handshake returns a logical session token. `SET` values and temporary execution state belong to that session, not to the underlying gRPC channel. Channels may be reused, but clients must include the token on every RPC and the server must validate it before selecting a Session. A channel that once completed Handshake is not authorization.
-- `SHOW STREAMS/MODELS/FUNCTIONS/SINKS` and `DESCRIBE` are public SQL. There are no private catalog RPCs.
+- `SHOW TABLES/MODELS/FUNCTIONS` and `DESCRIBE` are public SQL. Catalog, Schema, and Table metadata is also available through the UC-compatible API owned by `vql-catalog`. There are no private catalog RPCs.
 - ADBC and JDBC use Flight SQL drivers rather than a second query or catalog protocol. A driver that does not understand `visionql.image` can still read its standard Struct storage type.
 - Vendor `GetSqlInfo` fields publish the VisionQL client-protocol version, SQL-dialect version, `visionql.image` extension version, and capability names for independently released clients.
 
@@ -84,13 +84,13 @@ message VisionqlErrorV1 {
 
 `code`, source span, and `retryable` are protocol fields; `message` and `hint` are human-readable. The source span is a half-open byte range `[source_start, source_end)` within the current statement's UTF-8 text and is omitted when no reliable location exists. Flight clients unaware of the extension can still consume the standard status. Workbench must read the envelope instead of parsing error strings and adds `statement_index` itself for multi-statement scripts.
 
-The first v0.2 service release includes TLS, authentication, table/stream-level authorization, and the public job SQL `SUBMIT QUERY`, `SHOW/DESCRIBE QUERY`, `SHOW QUERY DEPENDENCIES`, and `PAUSE/RESUME/STOP`. There is no Workbench-only management RPC.
+The first v0.2 service release includes TLS, authentication, table-level authorization, and the public job SQL `SUBMIT QUERY`, `SHOW/DESCRIBE QUERY`, `SHOW QUERY DEPENDENCIES`, and `PAUSE/RESUME/STOP`. There is no Workbench-only management RPC.
 
 Unbounded-statement lifecycle is explicit:
 
-- Ordinary unbounded `SELECT` and `INSERT INTO <sink> SELECT ...` attach to the current Flight session. Results or status continue through Flight and terminate on client cancellation, session expiry, or connection loss. They do not create a QueryJob, and a service upgrade must not silently change the lifecycle of the same SQL.
-- Only explicit `SUBMIT QUERY <name> AS INSERT INTO <sink> SELECT ...` creates a durable job. Its statement-query result is one Arrow row with `query_id Utf8, name Utf8, state Utf8, definition_revision Utf8`. It returns as soon as planning and the Catalog transaction complete. `vqld` then manages the job independently of the Flight request.
-- The current Flight request waits for bounded SELECT and INSERT completion. Console Sink cannot be the target of a durable service job.
+- Ordinary unbounded `SELECT` and `INSERT INTO <table> SELECT ...` attach to the current Flight session. Results or status continue through Flight and terminate on client cancellation, session expiry, or connection loss. They do not create a QueryJob, and a service upgrade must not silently change the lifecycle of the same SQL.
+- Only explicit `SUBMIT QUERY <name> AS INSERT INTO <table> SELECT ...` creates a durable job. Its statement-query result is one Arrow row with `query_id Utf8, name Utf8, state Utf8, definition_revision Utf8`. It returns as soon as planning and the Catalog transaction complete. `vqld` then manages the job independently of the Flight request.
+- The current Flight request waits for bounded SELECT and INSERT completion. The destination of a durable write must be a writable provider Table.
 
 ### Media Protocol Required by Workbench
 
@@ -148,7 +148,7 @@ The embedded kernel first creates the process-local query definition snapshot de
 
 A Manifest records:
 
-- the normalized SQL and fully resolved Table, Stream, Model, Function, and Sink specifications, including internal revisions and semantic fingerprints;
+- the normalized SQL and fully resolved readable/writable Table, Model, and Function specifications, including internal revisions and semantic fingerprints;
 - resolved Model artifact hashes or service bindings, Runtime and processor contracts, canonical schemas, and determinism;
 - the submitting principal and authorization-relevant object identities;
 - the logical-plan fingerprint and state-format versions required to reject incompatible recovery.
@@ -164,8 +164,8 @@ v0.2 provides checkpoints and crash recovery for jobs created by `SUBMIT QUERY`.
 The coordinator selects a completed epoch as a checkpoint boundary based on elapsed time or state growth. Each boundary uses this protocol:
 
 1. Starting from the state restored from the current checkpoint, apply the epoch and produce closed-window output.
-2. Write output to the Sink and wait for every write acknowledgement.
-3. Atomically persist a new checkpoint containing the logical-plan hash, Query Manifest identity, watermark, normalized window state, every `WindowStateCodec` version, and the Sink delivery sequence.
+2. Write output to the destination Table and wait for every write acknowledgement.
+3. Atomically persist a new checkpoint containing the logical-plan hash, Query Manifest identity, watermark, normalized window state, every `WindowStateCodec` version, and the Table delivery sequence.
 
 The checkpoint extends the process-local normalized state described in [design.md](../design.md) §5.4 with the versioned codec above. It records operator ID, state-schema fingerprint, codec version, and engine state-format version and does not call `state()` on an active accumulator. Recovery requires those fields to match the Query Manifest. Incompatibility moves the job to `state=FAILED, error_code=RECOVERY_INCOMPATIBLE`; it must not attempt best-effort deserialization.
 
@@ -175,7 +175,7 @@ Recovery behavior is:
 - Window results written after the checkpoint and before the crash may be emitted again. Delivery of acknowledged output is therefore at least once.
 - Source data during crashes or disconnections cannot be recovered. Report the resulting gap through metrics and gap records without inventing rows.
 
-Offset-based replay for replayable sources such as a future Kafka frame source is not scheduled. `SourceProgress` already belongs to the same checkpoint boundary, so that work extends offset-commit ordering without changing this structure. Exactly-once delivery is also unscheduled and would require checkpoint and transactional Sink commit in the same barrier; this protocol does not pretend to provide it.
+Offset-based replay for replayable sources such as a future Kafka frame source is not scheduled. `SourceProgress` already belongs to the same checkpoint boundary, so that work extends offset-commit ordering without changing this structure. Exactly-once delivery is also unscheduled and would require checkpoint and transactional Table commit in the same barrier; this protocol does not pretend to provide it.
 
 ### Continuous-query State Machine
 
@@ -221,7 +221,7 @@ In addition to the embedded security constraints in [design.md](../design.md) §
 
 ## Testing and Acceptance
 
-Test all specified metadata RPCs, statement/prepared transport mappings, `statement_info_v1`, FlightInfo query IDs, attached unbounded status streams, disconnect cancellation, per-RPC session isolation, Protobuf error envelopes, `IMAGE` storage schema and version, TLS/authentication/authorization, `SUBMIT QUERY`, query detail/dependency/control SQL, all three `IMAGE` modes, locator tampering/revocation/expiry, `FRAME_AT`, and capability negotiation. Kill the process at every boundary before and after Sink acknowledgement and checkpoint persistence. Verify that normalized window state is not lost, acknowledged output can only be duplicated, and codec/version incompatibility fails safely.
+Test all specified metadata RPCs, statement/prepared transport mappings, `statement_info_v1`, FlightInfo query IDs, attached unbounded status streams, disconnect cancellation, per-RPC session isolation, Protobuf error envelopes, `IMAGE` storage schema and version, TLS/authentication/authorization, `SUBMIT QUERY`, query detail/dependency/control SQL, all three `IMAGE` modes, locator tampering/revocation/expiry, `FRAME_AT`, and capability negotiation. Kill the process at every boundary before and after writable-table acknowledgement and checkpoint persistence. Verify that normalized window state is not lost, acknowledged output can only be duplicated, and codec/version incompatibility fails safely.
 
 ## Open Questions
 

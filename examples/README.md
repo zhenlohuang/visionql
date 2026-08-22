@@ -53,7 +53,7 @@ the ignored `data/models/` development directory. See
 ## SQL
 
 [`sql/video_people_count.sql`](sql/video_people_count.sql) demonstrates sampled historical video,
-model inference, a batch `TUMBLE` aggregation, and the Console Sink:
+model inference and a batch `TUMBLE` aggregation returned directly to the caller:
 
 ```bash
 cargo run -p vql-cli -- run examples/sql/video_people_count.sql

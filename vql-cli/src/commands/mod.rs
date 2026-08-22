@@ -62,9 +62,9 @@ mod tests {
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         let statements = split_statements(
-            "CREATE STREAM camera FROM 'rtsp://127.0.0.1/live';
+            "CREATE TABLE camera USING RTSP OPTIONS (url = 'rtsp://127.0.0.1/live');
              SELECT frame_id FROM camera;
-             DROP STREAM camera;",
+             DROP TABLE camera;",
         )
         .unwrap();
 

@@ -95,7 +95,7 @@ docker compose --profile rtsp up -d mediamtx
 docker compose --profile rtsp down
 ```
 
-Run the Kafka Sink system test against that profile with:
+Run the Kafka table-write system test against that profile with:
 
 ```bash
 docker compose --profile kafka up -d kafka

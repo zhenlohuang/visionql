@@ -3,9 +3,9 @@ use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 
 use std::collections::BTreeMap;
 
-use super::ast::{CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement};
+use super::ast::{CreateModel, CreateTable, ShowKind, TableColumn, VqlStatement};
 use crate::catalog::{
-    EventTimePolicy, KafkaSinkConfig, ModelType, RtspTransport, SinkKind, TableProviderKind,
+    EventTimePolicy, KafkaTableConfig, ModelType, RtspTableConfig, RtspTransport, TableProvider,
 };
 use crate::{ErrorCode, Result, VqlError};
 
@@ -66,8 +66,6 @@ fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
         )),
         Some("TABLE") => parse_create_table(tokens),
         Some("MODEL") => parse_create_model(tokens),
-        Some("SINK") => parse_create_sink(tokens),
-        Some("STREAM") => parse_create_stream(tokens),
         Some("INDEX") => Err(VqlError::feature(
             "vector indexes are not available",
             "v0.3",
@@ -76,249 +74,421 @@ fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
             "aggregate and table functions are not available",
             "未排期",
         )),
-        _ => invalid("expected CREATE TABLE, MODEL, FUNCTION, or SINK"),
+        _ => invalid("expected CREATE TABLE, MODEL, or FUNCTION"),
     }
-}
-
-fn parse_create_stream(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() < 5 {
-        return invalid("expected CREATE STREAM <name> FROM 'rtsp://...'");
-    }
-    let name = identifier(tokens.get(2), "stream name")?;
-    expect_word(tokens.get(3), "FROM")?;
-    let endpoint = string_literal(tokens.get(4))?;
-    let mut fps = 5.0;
-    let mut event_time = EventTimePolicy::CaptureTime;
-    let mut watermark_delay_ms = 2_000;
-    let mut transport = RtspTransport::Tcp;
-    let mut index = 5;
-    if index < tokens.len() {
-        expect_word(tokens.get(index), "WITH")?;
-        index += 1;
-        expect_token(tokens.get(index), Token::LParen, "'(' after WITH")?;
-        index += 1;
-        while tokens.get(index) != Some(&Token::RParen) {
-            let option = identifier(tokens.get(index), "stream option")?.to_ascii_lowercase();
-            index += 1;
-            expect_token(tokens.get(index), Token::Eq, "'=' after stream option")?;
-            index += 1;
-            match option.as_str() {
-                "fps" => {
-                    fps = parse_number(tokens.get(index), "fps")?;
-                    if !fps.is_finite() || fps <= 0.0 || fps > 120.0 {
-                        return Err(VqlError::new(
-                            ErrorCode::InvalidOption,
-                            "fps must be greater than 0 and at most 120",
-                        ));
-                    }
-                    index += 1;
-                }
-                "event_time" => {
-                    event_time = match string_literal(tokens.get(index))?
-                        .to_ascii_lowercase()
-                        .as_str()
-                    {
-                        "capture_time" => EventTimePolicy::CaptureTime,
-                        "ingest_time" => EventTimePolicy::IngestTime,
-                        _ => {
-                            return Err(VqlError::new(
-                                ErrorCode::InvalidOption,
-                                "event_time must be 'capture_time' or 'ingest_time'",
-                            ));
-                        }
-                    };
-                    index += 1;
-                }
-                "watermark" => {
-                    let (value, consumed) = parse_fixed_interval_ms(&tokens[index..])?;
-                    watermark_delay_ms = value;
-                    index += consumed;
-                }
-                "transport" => {
-                    transport = match string_literal(tokens.get(index))?
-                        .to_ascii_lowercase()
-                        .as_str()
-                    {
-                        "tcp" => RtspTransport::Tcp,
-                        "udp" => RtspTransport::Udp,
-                        _ => {
-                            return Err(VqlError::new(
-                                ErrorCode::InvalidOption,
-                                "transport must be 'tcp' or 'udp'",
-                            ));
-                        }
-                    };
-                    index += 1;
-                }
-                _ => {
-                    return Err(VqlError::new(
-                        ErrorCode::InvalidOption,
-                        format!("unknown RTSP option '{option}'"),
-                    ));
-                }
-            }
-            match tokens.get(index) {
-                Some(Token::Comma) => index += 1,
-                Some(Token::RParen) => {}
-                _ => return invalid("expected ',' or ')' after stream option"),
-            }
-        }
-        index += 1;
-    }
-    if index != tokens.len() {
-        return invalid("unexpected tokens after CREATE STREAM");
-    }
-    Ok(VqlStatement::CreateStream(CreateStream {
-        name,
-        endpoint,
-        fps,
-        event_time,
-        watermark_delay_ms,
-        transport,
-    }))
-}
-
-fn parse_fixed_interval_ms(tokens: &[Token]) -> Result<(i64, usize)> {
-    expect_word(tokens.first(), "INTERVAL")?;
-    let raw = string_literal(tokens.get(1))?;
-    let value = raw.parse::<f64>().map_err(|error| {
-        VqlError::new(
-            ErrorCode::InvalidOption,
-            "watermark interval must be numeric",
-        )
-        .with_source(error)
-    })?;
-    if !value.is_finite() || value < 0.0 {
-        return Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            "watermark interval must be finite and non-negative",
-        ));
-    }
-    let multiplier = match word(tokens.get(2)).as_deref() {
-        Some("MILLISECOND") | Some("MILLISECONDS") => 1.0,
-        Some("SECOND") | Some("SECONDS") => 1_000.0,
-        Some("MINUTE") | Some("MINUTES") => 60_000.0,
-        _ => return invalid("watermark must use MILLISECOND, SECOND, or MINUTE"),
-    };
-    let millis = value * multiplier;
-    if millis > i64::MAX as f64 {
-        return Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            "watermark interval is too large",
-        ));
-    }
-    Ok((millis.round() as i64, 3))
 }
 
 fn parse_create_table(tokens: &[Token]) -> Result<VqlStatement> {
-    if token_is(tokens.get(3), "AS") {
+    let name = identifier(tokens.get(2), "table name")?;
+    let mut index = 3;
+    let columns = if tokens.get(index) == Some(&Token::LParen) {
+        parse_table_columns(tokens, &mut index)?
+    } else {
+        Vec::new()
+    };
+    if token_is(tokens.get(index), "AS") {
         return Err(VqlError::feature(
             "CREATE TABLE AS SELECT is not available",
             "v0.3",
         ));
     }
-    let name = identifier(tokens.get(2), "table name")?;
-    expect_word(tokens.get(3), "USING")?;
-    let provider = match word(tokens.get(4)).as_deref() {
-        Some("IMAGES") => TableProviderKind::Images,
-        Some("VIDEOS") => TableProviderKind::Videos,
-        Some("KAFKA") => {
-            return Err(VqlError::feature(
-                "Kafka table provider is not available",
-                "v0.1",
-            ));
-        }
-        Some("PARQUET") | Some("LANCE") | Some("HNSW") => {
-            return Err(VqlError::feature(
-                "columnar/vector providers are not available",
-                "v0.3",
-            ));
-        }
-        Some(provider) => {
-            return Err(VqlError::new(
-                ErrorCode::InvalidOption,
-                format!("unsupported table provider '{provider}'"),
-            ));
-        }
-        None => return invalid("expected IMAGES or VIDEOS after USING"),
-    };
-    expect_word(tokens.get(5), "LOCATION")?;
-    let location = string_literal(tokens.get(6))?;
-    let mut recursive = false;
-    let mut fps = None;
-    let mut start_time_ms = None;
-    let mut index = 7;
-    if index < tokens.len() {
-        expect_word(tokens.get(index), "WITH")?;
-        index += 1;
-        expect_token(tokens.get(index), Token::LParen, "'(' after WITH")?;
-        index += 1;
-        while index < tokens.len() {
-            if tokens.get(index) == Some(&Token::RParen) {
-                index += 1;
-                break;
-            }
-            let option = identifier(tokens.get(index), "option name")?.to_ascii_lowercase();
-            index += 1;
-            expect_token(tokens.get(index), Token::Eq, "'=' after option name")?;
-            index += 1;
-            match (provider, option.as_str()) {
-                (TableProviderKind::Images | TableProviderKind::Videos, "recursive") => {
-                    recursive = parse_boolean(tokens.get(index))?;
-                }
-                (TableProviderKind::Videos, "fps") => {
-                    let value = parse_number(tokens.get(index), "fps")?;
-                    if !value.is_finite() || value <= 0.0 || value > 120.0 {
-                        return Err(VqlError::new(
-                            ErrorCode::InvalidOption,
-                            "fps must be greater than 0 and at most 120",
-                        ));
-                    }
-                    fps = Some(value);
-                }
-                (TableProviderKind::Videos, "start_time") => {
-                    let value = string_literal(tokens.get(index))?;
-                    let parsed = chrono::DateTime::parse_from_rfc3339(&value).map_err(|error| {
-                        VqlError::new(
-                            ErrorCode::InvalidOption,
-                            "start_time must be an RFC 3339 timestamp",
-                        )
-                        .with_source(error)
-                    })?;
-                    start_time_ms = Some(parsed.timestamp_millis());
-                }
-                _ => {
+    expect_word(tokens.get(index), "USING")?;
+    index += 1;
+    let provider_name = word(tokens.get(index))
+        .ok_or_else(|| VqlError::new(ErrorCode::InvalidSql, "expected provider after USING"))?;
+    index += 1;
+    let mut location = None;
+    let mut options = BTreeMap::new();
+    while index < tokens.len() {
+        match word(tokens.get(index)).as_deref() {
+            Some("OPTIONS") => parse_table_options(tokens, &mut index, &mut options)?,
+            Some("LOCATION") => {
+                if location.is_some() {
                     return Err(VqlError::new(
                         ErrorCode::InvalidOption,
-                        format!(
-                            "unknown {} option '{option}'",
-                            format!("{provider:?}").to_ascii_uppercase()
-                        ),
+                        "duplicate LOCATION clause",
                     ));
                 }
+                index += 1;
+                location = Some(string_literal(tokens.get(index))?);
+                index += 1;
             }
-            index += 1;
-            match tokens.get(index) {
-                Some(Token::Comma) => index += 1,
-                Some(Token::RParen) => {
-                    index += 1;
-                    break;
-                }
-                _ => return invalid("expected ',' or ')' after WITH option"),
-            }
+            _ => return invalid("expected OPTIONS (...) or LOCATION '<path>'"),
         }
     }
     if index != tokens.len() {
         return invalid("unexpected tokens after CREATE TABLE");
     }
+    let provider = build_table_provider(&provider_name, location, options)?;
+    if !columns.is_empty()
+        && !matches!(
+            provider,
+            TableProvider::Kafka(_) | TableProvider::External { .. }
+        )
+    {
+        return invalid("an explicit column list is supported only for writable table providers");
+    }
     Ok(VqlStatement::CreateTable(CreateTable {
         name,
         provider,
-        location,
-        recursive,
-        fps,
-        start_time_ms,
+        columns,
     }))
+}
+
+fn parse_table_columns(tokens: &[Token], index: &mut usize) -> Result<Vec<TableColumn>> {
+    *index += 1;
+    let mut columns = Vec::new();
+    while tokens.get(*index) != Some(&Token::RParen) {
+        let name = identifier(tokens.get(*index), "column name")?;
+        *index += 1;
+        let data_type = identifier(tokens.get(*index), "column type")?.to_ascii_uppercase();
+        *index += 1;
+        let nullable = if token_is(tokens.get(*index), "NOT") {
+            *index += 1;
+            expect_word(tokens.get(*index), "NULL")?;
+            *index += 1;
+            false
+        } else {
+            true
+        };
+        columns.push(TableColumn {
+            name,
+            data_type,
+            nullable,
+        });
+        match tokens.get(*index) {
+            Some(Token::Comma) => *index += 1,
+            Some(Token::RParen) => {}
+            _ => return invalid("expected ',' or ')' after column definition"),
+        }
+    }
+    *index += 1;
+    Ok(columns)
+}
+
+fn parse_table_options(
+    tokens: &[Token],
+    index: &mut usize,
+    options: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    *index += 1;
+    expect_token(tokens.get(*index), Token::LParen, "'(' after OPTIONS")?;
+    *index += 1;
+    while tokens.get(*index) != Some(&Token::RParen) {
+        let key = match tokens.get(*index) {
+            Some(Token::Word(value)) => value.value.to_ascii_lowercase(),
+            Some(Token::SingleQuotedString(value)) | Some(Token::DoubleQuotedString(value)) => {
+                value.to_ascii_lowercase()
+            }
+            _ => return invalid("expected option name"),
+        };
+        *index += 1;
+        expect_token(tokens.get(*index), Token::Eq, "'=' after option name")?;
+        *index += 1;
+        let value = option_string(tokens.get(*index))?;
+        *index += 1;
+        if options.insert(key.clone(), value).is_some() {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                format!("duplicate table option '{key}'"),
+            ));
+        }
+        match tokens.get(*index) {
+            Some(Token::Comma) => *index += 1,
+            Some(Token::RParen) => {}
+            _ => return invalid("expected ',' or ')' after table option"),
+        }
+    }
+    *index += 1;
+    Ok(())
+}
+
+fn build_table_provider(
+    provider: &str,
+    location: Option<String>,
+    mut options: BTreeMap<String, String>,
+) -> Result<TableProvider> {
+    let provider = match provider {
+        "IMAGES" => TableProvider::Images {
+            location: required_location(location, "IMAGES")?,
+            recursive: take_bool(&mut options, "recursive", false)?,
+        },
+        "VIDEOS" => {
+            let fps = take_number(&mut options, "fps")?;
+            if fps.is_some_and(|fps| !fps.is_finite() || fps <= 0.0 || fps > 120.0) {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "fps must be greater than 0 and at most 120",
+                ));
+            }
+            let start_time_ms = options
+                .remove("start_time")
+                .map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(&value)
+                        .map(|value| value.timestamp_millis())
+                        .map_err(|error| {
+                            VqlError::new(
+                                ErrorCode::InvalidOption,
+                                "start_time must be an RFC 3339 timestamp",
+                            )
+                            .with_source(error)
+                        })
+                })
+                .transpose()?;
+            TableProvider::Videos {
+                location: required_location(location, "VIDEOS")?,
+                recursive: take_bool(&mut options, "recursive", false)?,
+                fps,
+                start_time_ms,
+            }
+        }
+        "RTSP" => {
+            if location.is_some() {
+                return invalid("USING RTSP uses OPTIONS (url = 'rtsp://...'), not LOCATION");
+            }
+            let endpoint = required_option(&mut options, "url", "RTSP")?;
+            let fps = take_number(&mut options, "fps")?.unwrap_or(5.0);
+            if !fps.is_finite() || fps <= 0.0 || fps > 120.0 {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "fps must be greater than 0 and at most 120",
+                ));
+            }
+            let event_time = match options
+                .remove("event_time")
+                .unwrap_or_else(|| "capture_time".to_owned())
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "capture_time" => EventTimePolicy::CaptureTime,
+                "ingest_time" => EventTimePolicy::IngestTime,
+                _ => {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        "event_time must be 'capture_time' or 'ingest_time'",
+                    ));
+                }
+            };
+            let watermark_delay_ms = options
+                .remove("watermark")
+                .map(|value| parse_duration_ms(&value))
+                .transpose()?
+                .unwrap_or(2_000);
+            let transport = match options
+                .remove("transport")
+                .unwrap_or_else(|| "tcp".to_owned())
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "tcp" => RtspTransport::Tcp,
+                "udp" => RtspTransport::Udp,
+                _ => {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        "transport must be 'tcp' or 'udp'",
+                    ));
+                }
+            };
+            TableProvider::Rtsp(RtspTableConfig {
+                name: String::new(),
+                endpoint,
+                fps,
+                event_time,
+                watermark_delay_ms,
+                transport,
+            })
+        }
+        "KAFKA" => {
+            if location.is_some() {
+                return invalid("USING KAFKA uses OPTIONS, not LOCATION");
+            }
+            let bootstrap_servers = required_option(&mut options, "bootstrap_servers", "KAFKA")?;
+            validate_kafka_bootstrap_servers(&bootstrap_servers)?;
+            let topic = required_option(&mut options, "topic", "KAFKA")?;
+            validate_kafka_topic(&topic)?;
+            let format = options
+                .remove("format")
+                .unwrap_or_else(|| "json".to_owned());
+            if !format.eq_ignore_ascii_case("json") {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "KAFKA format must be 'json'",
+                ));
+            }
+            let credential_ref = options.remove("credential_ref");
+            if let Some(reference) = credential_ref.as_deref()
+                && (reference.is_empty()
+                    || reference.trim() != reference
+                    || reference.len() > 1_024
+                    || reference.chars().any(char::is_control))
+            {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "credential_ref must be a non-empty opaque reference of at most 1024 characters",
+                ));
+            }
+            let delivery_timeout_ms =
+                take_unsigned(&mut options, "delivery_timeout_ms")?.unwrap_or(30_000);
+            let buffer_capacity = take_unsigned(&mut options, "buffer_capacity")?
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|error| {
+                    VqlError::new(
+                        ErrorCode::InvalidOption,
+                        "buffer_capacity is too large for this platform",
+                    )
+                    .with_source(error)
+                })?
+                .unwrap_or(1_024);
+            if !(1..=3_600_000).contains(&delivery_timeout_ms) {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "delivery_timeout_ms must be between 1 and 3600000",
+                ));
+            }
+            if !(1..=100_000).contains(&buffer_capacity) {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "buffer_capacity must be between 1 and 100000",
+                ));
+            }
+            TableProvider::Kafka(KafkaTableConfig {
+                bootstrap_servers,
+                topic,
+                credential_ref,
+                delivery_timeout_ms,
+                buffer_capacity,
+            })
+        }
+        "PARQUET" | "LANCE" | "HNSW" => {
+            return Err(VqlError::feature(
+                "columnar/vector providers are not available",
+                "v0.3",
+            ));
+        }
+        _ => {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                format!("unsupported table provider '{provider}'"),
+            ));
+        }
+    };
+    if let Some(option) = options.keys().next() {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            format!("unknown {provider:?} option '{option}'"),
+        ));
+    }
+    Ok(provider)
+}
+
+fn required_location(location: Option<String>, provider: &str) -> Result<String> {
+    location.ok_or_else(|| {
+        VqlError::new(
+            ErrorCode::InvalidOption,
+            format!("USING {provider} requires LOCATION"),
+        )
+    })
+}
+
+fn required_option(
+    options: &mut BTreeMap<String, String>,
+    name: &str,
+    provider: &str,
+) -> Result<String> {
+    options.remove(name).ok_or_else(|| {
+        VqlError::new(
+            ErrorCode::InvalidOption,
+            format!("{provider} requires option '{name}'"),
+        )
+    })
+}
+
+fn take_bool(options: &mut BTreeMap<String, String>, name: &str, default: bool) -> Result<bool> {
+    options
+        .remove(name)
+        .map(|value| {
+            value.parse::<bool>().map_err(|error| {
+                VqlError::new(
+                    ErrorCode::InvalidOption,
+                    format!("{name} must be true or false"),
+                )
+                .with_source(error)
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
+}
+
+fn take_number(options: &mut BTreeMap<String, String>, name: &str) -> Result<Option<f64>> {
+    options
+        .remove(name)
+        .map(|value| {
+            value.parse::<f64>().map_err(|error| {
+                VqlError::new(ErrorCode::InvalidOption, format!("{name} must be numeric"))
+                    .with_source(error)
+            })
+        })
+        .transpose()
+}
+
+fn take_unsigned(options: &mut BTreeMap<String, String>, name: &str) -> Result<Option<u64>> {
+    options
+        .remove(name)
+        .map(|value| {
+            value.parse::<u64>().map_err(|error| {
+                VqlError::new(
+                    ErrorCode::InvalidOption,
+                    format!("{name} must be a non-negative integer"),
+                )
+                .with_source(error)
+            })
+        })
+        .transpose()
+}
+
+fn option_string(token: Option<&Token>) -> Result<String> {
+    match token {
+        Some(Token::SingleQuotedString(value)) | Some(Token::DoubleQuotedString(value)) => {
+            Ok(value.clone())
+        }
+        Some(Token::Number(value, _)) => Ok(value.clone()),
+        Some(Token::Word(value)) => Ok(value.value.clone()),
+        _ => invalid("table option values must be strings, numbers, or booleans"),
+    }
+}
+
+fn parse_duration_ms(value: &str) -> Result<i64> {
+    let mut parts = value.split_whitespace();
+    let number = parts
+        .next()
+        .ok_or_else(|| VqlError::new(ErrorCode::InvalidOption, "watermark is empty"))?
+        .parse::<f64>()
+        .map_err(|error| {
+            VqlError::new(
+                ErrorCode::InvalidOption,
+                "watermark must start with a number",
+            )
+            .with_source(error)
+        })?;
+    let multiplier = match parts.next().map(str::to_ascii_lowercase).as_deref() {
+        Some("millisecond" | "milliseconds" | "ms") => 1.0,
+        Some("second" | "seconds" | "s") => 1_000.0,
+        Some("minute" | "minutes" | "m") => 60_000.0,
+        _ => {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                "watermark must use milliseconds, seconds, or minutes",
+            ));
+        }
+    };
+    if parts.next().is_some() || !number.is_finite() || number < 0.0 {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "watermark must be a finite non-negative duration",
+        ));
+    }
+    Ok((number * multiplier).round() as i64)
 }
 
 fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
@@ -485,173 +655,6 @@ fn parse_json_value(tokens: &[Token], index: &mut usize) -> Result<serde_json::V
     }
 }
 
-fn parse_create_sink(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() < 5 {
-        return invalid("expected CREATE SINK <name> TYPE console|kafka");
-    }
-    let name = identifier(tokens.get(2), "sink name")?;
-    expect_word(tokens.get(3), "TYPE")?;
-    match word(tokens.get(4)).as_deref() {
-        Some("CONSOLE") if tokens.len() == 5 => Ok(VqlStatement::CreateSink {
-            name,
-            kind: SinkKind::Console,
-            kafka: None,
-        }),
-        Some("CONSOLE") => invalid("Console Sink does not accept WITH options"),
-        Some("KAFKA") => parse_kafka_sink(tokens, name),
-        Some("PARQUET") | Some("LANCE") => {
-            Err(VqlError::feature("file Sinks are not available", "v0.3"))
-        }
-        _ => invalid("v0.1 supports TYPE console or kafka"),
-    }
-}
-
-fn parse_kafka_sink(tokens: &[Token], name: String) -> Result<VqlStatement> {
-    let mut bootstrap_servers = None;
-    let mut topic = None;
-    let mut credential_ref = None;
-    let mut delivery_timeout_ms = 30_000_u64;
-    let mut buffer_capacity = 1_024_usize;
-    let mut format = "json".to_owned();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut index = 5;
-    expect_word(tokens.get(index), "WITH")?;
-    index += 1;
-    expect_token(tokens.get(index), Token::LParen, "'(' after WITH")?;
-    index += 1;
-    while tokens.get(index) != Some(&Token::RParen) {
-        let option = identifier(tokens.get(index), "Kafka Sink option")?.to_ascii_lowercase();
-        if !seen.insert(option.clone()) {
-            return Err(VqlError::new(
-                ErrorCode::InvalidOption,
-                format!("duplicate Kafka Sink option '{option}'"),
-            ));
-        }
-        index += 1;
-        expect_token(tokens.get(index), Token::Eq, "'=' after Kafka Sink option")?;
-        index += 1;
-        match option.as_str() {
-            "bootstrap_servers" => {
-                bootstrap_servers = Some(string_literal(tokens.get(index))?);
-                index += 1;
-            }
-            "topic" => {
-                topic = Some(string_literal(tokens.get(index))?);
-                index += 1;
-            }
-            "credential_ref" => {
-                credential_ref = Some(string_literal(tokens.get(index))?);
-                index += 1;
-            }
-            "format" => {
-                format = string_literal(tokens.get(index))?.to_ascii_lowercase();
-                index += 1;
-            }
-            "delivery_timeout_ms" => {
-                delivery_timeout_ms =
-                    parse_unsigned_integer(tokens.get(index), "delivery_timeout_ms")?;
-                index += 1;
-            }
-            "buffer_capacity" => {
-                let value = parse_unsigned_integer(tokens.get(index), "buffer_capacity")?;
-                buffer_capacity = usize::try_from(value).map_err(|error| {
-                    VqlError::new(
-                        ErrorCode::InvalidOption,
-                        "buffer_capacity is too large for this platform",
-                    )
-                    .with_source(error)
-                })?;
-                index += 1;
-            }
-            _ => {
-                return Err(VqlError::new(
-                    ErrorCode::InvalidOption,
-                    format!("unknown Kafka Sink option '{option}'"),
-                ));
-            }
-        }
-        match tokens.get(index) {
-            Some(Token::Comma) => index += 1,
-            Some(Token::RParen) => {}
-            _ => return invalid("expected ',' or ')' after Kafka Sink option"),
-        }
-    }
-    index += 1;
-    if index != tokens.len() {
-        return invalid("unexpected tokens after CREATE SINK");
-    }
-
-    let bootstrap_servers = bootstrap_servers.ok_or_else(|| {
-        VqlError::new(
-            ErrorCode::InvalidOption,
-            "Kafka Sink requires bootstrap_servers",
-        )
-    })?;
-    validate_kafka_bootstrap_servers(&bootstrap_servers)?;
-    let topic = topic
-        .ok_or_else(|| VqlError::new(ErrorCode::InvalidOption, "Kafka Sink requires topic"))?;
-    validate_kafka_topic(&topic)?;
-    if let Some(reference) = credential_ref.as_deref()
-        && (reference.is_empty()
-            || reference.trim() != reference
-            || reference.len() > 1_024
-            || reference.chars().any(char::is_control))
-    {
-        return Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            "credential_ref must be a non-empty opaque reference of at most 1024 characters",
-        ));
-    }
-    if format != "json" {
-        return Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            "v0.1 Kafka Sink format must be 'json'",
-        ));
-    }
-    if !(1..=3_600_000).contains(&delivery_timeout_ms) {
-        return Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            "delivery_timeout_ms must be between 1 and 3600000",
-        ));
-    }
-    if !(1..=100_000).contains(&buffer_capacity) {
-        return Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            "buffer_capacity must be between 1 and 100000",
-        ));
-    }
-
-    Ok(VqlStatement::CreateSink {
-        name,
-        kind: SinkKind::Kafka,
-        kafka: Some(KafkaSinkConfig {
-            bootstrap_servers,
-            topic,
-            credential_ref,
-            delivery_timeout_ms,
-            buffer_capacity,
-        }),
-    })
-}
-
-fn parse_unsigned_integer(token: Option<&Token>, label: &str) -> Result<u64> {
-    match token {
-        Some(Token::Number(value, false)) if value.bytes().all(|byte| byte.is_ascii_digit()) => {
-            value.parse::<u64>().map_err(|error| {
-                VqlError::new(
-                    ErrorCode::InvalidOption,
-                    format!("{label} must be a non-negative integer"),
-                )
-                .with_source(error)
-            })
-        }
-        _ => Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            format!("{label} must be a non-negative integer"),
-        )),
-    }
-}
-
 fn validate_kafka_bootstrap_servers(value: &str) -> Result<()> {
     let invalid = || {
         VqlError::new(
@@ -730,17 +733,13 @@ fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
         });
     }
     if tokens.len() != 2 {
-        return invalid(
-            "expected SHOW TABLES, STREAMS, MODELS, FUNCTIONS, SINKS, or SHOW CREATE <kind> <name>",
-        );
+        return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or SHOW CREATE <kind> <name>");
     }
     let kind = match word(tokens.get(1)).as_deref() {
         Some("TABLES") => ShowKind::Tables,
-        Some("STREAMS") => ShowKind::Streams,
         Some("MODELS") => ShowKind::Models,
         Some("FUNCTIONS") => ShowKind::Functions,
-        Some("SINKS") => ShowKind::Sinks,
-        _ => return invalid("expected SHOW TABLES, STREAMS, MODELS, FUNCTIONS, or SINKS"),
+        _ => return invalid("expected SHOW TABLES, MODELS, or FUNCTIONS"),
     };
     Ok(VqlStatement::Show(kind))
 }
@@ -748,10 +747,8 @@ fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
 fn singular_kind(token: Option<&Token>) -> Result<ShowKind> {
     match word(token).as_deref() {
         Some("TABLE") => Ok(ShowKind::Tables),
-        Some("STREAM") => Ok(ShowKind::Streams),
         Some("MODEL") => Ok(ShowKind::Models),
         Some("FUNCTION") => Ok(ShowKind::Functions),
-        Some("SINK") => Ok(ShowKind::Sinks),
         _ => invalid("unsupported object kind"),
     }
 }
@@ -814,24 +811,6 @@ fn string_literal(token: Option<&Token>) -> Result<String> {
     }
 }
 
-fn parse_boolean(token: Option<&Token>) -> Result<bool> {
-    match word(token).as_deref() {
-        Some("TRUE") => Ok(true),
-        Some("FALSE") => Ok(false),
-        _ => invalid("recursive must be true or false"),
-    }
-}
-
-fn parse_number(token: Option<&Token>, label: &str) -> Result<f64> {
-    match token {
-        Some(Token::Number(value, _)) => value.parse::<f64>().map_err(|error| {
-            VqlError::new(ErrorCode::InvalidOption, format!("{label} must be numeric"))
-                .with_source(error)
-        }),
-        _ => invalid(format!("{label} must be numeric")),
-    }
-}
-
 fn expect_token(token: Option<&Token>, expected: Token, label: &str) -> Result<()> {
     if token == Some(&expected) {
         Ok(())
@@ -851,18 +830,18 @@ mod tests {
     #[test]
     fn parses_images_ddl() {
         let parsed = parse_statement(
-            "CREATE TABLE photos USING IMAGES LOCATION './photos' WITH (recursive=true)",
+            "CREATE TABLE photos USING IMAGES OPTIONS (recursive = 'true') LOCATION './photos'",
         )
         .unwrap();
         assert_eq!(
             parsed,
             VqlStatement::CreateTable(CreateTable {
                 name: "photos".to_owned(),
-                provider: TableProviderKind::Images,
-                location: "./photos".to_owned(),
-                recursive: true,
-                fps: None,
-                start_time_ms: None,
+                provider: TableProvider::Images {
+                    location: "./photos".to_owned(),
+                    recursive: true,
+                },
+                columns: Vec::new(),
             })
         );
     }
@@ -870,85 +849,99 @@ mod tests {
     #[test]
     fn parses_videos_options() {
         let parsed = parse_statement(
-            "CREATE TABLE clips USING VIDEOS LOCATION './clips' WITH \
-             (fps=5, recursive=true, start_time='2026-08-08T00:00:00Z')",
+            "CREATE TABLE clips USING VIDEOS OPTIONS \
+             (fps = '5', recursive = 'true', start_time = '2026-08-08T00:00:00Z') LOCATION './clips'",
         )
         .unwrap();
         let VqlStatement::CreateTable(create) = parsed else {
             panic!("expected CREATE TABLE")
         };
-        assert_eq!(create.provider, TableProviderKind::Videos);
-        assert_eq!(create.fps, Some(5.0));
-        assert!(create.recursive);
-        assert_eq!(create.start_time_ms, Some(1_786_147_200_000));
+        assert_eq!(
+            create.provider,
+            TableProvider::Videos {
+                location: "./clips".to_owned(),
+                recursive: true,
+                fps: Some(5.0),
+                start_time_ms: Some(1_786_147_200_000),
+            }
+        );
     }
 
     #[test]
-    fn parses_rtsp_stream_options() {
+    fn parses_rtsp_table_options() {
         let parsed = parse_statement(
-            "CREATE STREAM cam_entrance FROM 'rtsp://10.0.0.15:554/main' WITH (\
-             fps=5, event_time='capture_time', watermark=INTERVAL '2' SECOND, transport='tcp')",
+            "CREATE TABLE cam_entrance USING RTSP OPTIONS (\
+             url = 'rtsp://10.0.0.15:554/main', fps = '5', event_time = 'capture_time', \
+             watermark = '2 seconds', transport = 'tcp')",
         )
         .unwrap();
         assert_eq!(
             parsed,
-            VqlStatement::CreateStream(CreateStream {
+            VqlStatement::CreateTable(CreateTable {
                 name: "cam_entrance".to_owned(),
-                endpoint: "rtsp://10.0.0.15:554/main".to_owned(),
-                fps: 5.0,
-                event_time: EventTimePolicy::CaptureTime,
-                watermark_delay_ms: 2_000,
-                transport: RtspTransport::Tcp,
+                provider: TableProvider::Rtsp(RtspTableConfig {
+                    name: String::new(),
+                    endpoint: "rtsp://10.0.0.15:554/main".to_owned(),
+                    fps: 5.0,
+                    event_time: EventTimePolicy::CaptureTime,
+                    watermark_delay_ms: 2_000,
+                    transport: RtspTransport::Tcp,
+                }),
+                columns: Vec::new(),
             })
         );
     }
 
     #[test]
-    fn parses_kafka_sink_options() {
+    fn parses_kafka_table_options() {
         let parsed = parse_statement(
-            "CREATE SINK people_per_minute TYPE KAFKA WITH (\
-             bootstrap_servers='broker-1:9092,broker-2:9092', \
-             topic='people-per-minute', format='json', \
-             credential_ref='secret://kafka/producer', \
-             delivery_timeout_ms=45000, buffer_capacity=256)",
+            "CREATE TABLE people_per_minute (people BIGINT) USING KAFKA OPTIONS (\
+             bootstrap_servers = 'broker-1:9092,broker-2:9092', \
+             topic = 'people-per-minute', format = 'json', \
+             credential_ref = 'secret://kafka/producer', \
+             delivery_timeout_ms = '45000', buffer_capacity = '256')",
         )
         .unwrap();
 
         assert_eq!(
             parsed,
-            VqlStatement::CreateSink {
+            VqlStatement::CreateTable(CreateTable {
                 name: "people_per_minute".to_owned(),
-                kind: SinkKind::Kafka,
-                kafka: Some(KafkaSinkConfig {
+                provider: TableProvider::Kafka(KafkaTableConfig {
                     bootstrap_servers: "broker-1:9092,broker-2:9092".to_owned(),
                     topic: "people-per-minute".to_owned(),
                     credential_ref: Some("secret://kafka/producer".to_owned()),
                     delivery_timeout_ms: 45_000,
                     buffer_capacity: 256,
                 }),
-            }
+                columns: vec![TableColumn {
+                    name: "people".to_owned(),
+                    data_type: "BIGINT".to_owned(),
+                    nullable: true,
+                }],
+            })
         );
     }
 
     #[test]
-    fn rejects_invalid_kafka_sink_options() {
+    fn rejects_invalid_kafka_table_options() {
         for sql in [
-            "CREATE SINK out TYPE KAFKA WITH (topic='events')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='http://broker:9092', topic='events')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='user:secret@broker:9092', topic='events')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker', topic='events')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:0', topic='events')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:70000', topic='events')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092,', topic='events')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='bad topic')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', format='avro')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', delivery_timeout_ms=0)",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', buffer_capacity=100001)",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', topic='other')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', retries=3)",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', credential_ref='')",
-            "CREATE SINK out TYPE KAFKA WITH (bootstrap_servers='broker:9092', topic='events', username='user')",
+            "CREATE TABLE out USING KAFKA OPTIONS (topic = 'events')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'http://broker:9092', topic = 'events')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'user:secret@broker:9092', topic = 'events')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker', topic = 'events')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:0', topic = 'events')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:70000', topic = 'events')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092,', topic = 'events')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'bad topic')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'events', format = 'avro')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'events', delivery_timeout_ms = '0')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'events', buffer_capacity = '100001')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'events', topic = 'other')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'events', retries = '3')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'events', credential_ref = '')",
+            "CREATE TABLE out USING KAFKA OPTIONS (bootstrap_servers = 'broker:9092', topic = 'events', username = 'user')",
         ] {
             assert_eq!(
                 parse_statement(sql).unwrap_err().code,
@@ -959,12 +952,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_rtsp_stream_options() {
+    fn rejects_invalid_rtsp_table_options() {
         for sql in [
-            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (fps=0)",
-            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (event_time='wall_time')",
-            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (watermark=INTERVAL '-1' SECOND)",
-            "CREATE STREAM cam FROM 'rtsp://camera/live' WITH (transport='quic')",
+            "CREATE TABLE cam USING RTSP OPTIONS (url = 'rtsp://camera/live', fps = '0')",
+            "CREATE TABLE cam USING RTSP OPTIONS (url = 'rtsp://camera/live', event_time = 'wall_time')",
+            "CREATE TABLE cam USING RTSP OPTIONS (url = 'rtsp://camera/live', watermark = '-1 second')",
+            "CREATE TABLE cam USING RTSP OPTIONS (url = 'rtsp://camera/live', transport = 'quic')",
         ] {
             assert_eq!(
                 parse_statement(sql).unwrap_err().code,
@@ -976,10 +969,26 @@ mod tests {
     #[test]
     fn rejects_unknown_images_option() {
         let error = parse_statement(
-            "CREATE TABLE photos USING IMAGES LOCATION './photos' WITH (magic=true)",
+            "CREATE TABLE photos USING IMAGES OPTIONS (magic = 'true') LOCATION './photos'",
         )
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidOption);
+    }
+
+    #[test]
+    fn rejects_removed_stream_and_sink_object_syntax() {
+        for sql in [
+            "CREATE STREAM camera FROM 'rtsp://camera/live'",
+            "CREATE SINK events TYPE KAFKA",
+            "SHOW STREAMS",
+            "SHOW SINKS",
+        ] {
+            assert_eq!(
+                parse_statement(sql).unwrap_err().code,
+                ErrorCode::InvalidSql,
+                "{sql}"
+            );
+        }
     }
 
     #[test]
@@ -1042,7 +1051,6 @@ mod tests {
     #[test]
     fn future_capabilities_have_stable_target_versions() {
         let cases = [
-            ("CREATE TABLE events USING KAFKA LOCATION 'topic'", "v0.1"),
             ("CREATE TABLE out USING PARQUET LOCATION './out'", "v0.3"),
             ("CREATE TABLE out AS SELECT 1", "v0.3"),
             ("CREATE INDEX idx USING HNSW", "v0.3"),

@@ -41,7 +41,7 @@ Toolchain is pinned to Rust 1.91.1 by `rust-toolchain.toml` (workspace MSRV is 1
 
 ## Architecture
 
-Four crates: `vql-kernel` (engine and owner tests), `vql-cli` (clap + reedline shell), `vql-python` (PyO3 bindings + Python UDF host), and `vql-testing` (shared SQL conformance and system tests). The hosts only inject config and optional capabilities; `vql-kernel` never depends on clap or PyO3, never opens a port, and reads no global singletons.
+Five crates: `vql-catalog` (catalog domains, snapshots, backend ports, SQLite, and the UC-compatible API), `vql-kernel` (engine and owner tests), `vql-cli` (clap + reedline shell), `vql-python` (PyO3 bindings + Python UDF host), and `vql-testing` (shared SQL conformance and system tests). The hosts only inject config and optional capabilities; `vql-kernel` never depends on clap or PyO3, never opens a port, and reads no global singletons.
 
 `Engine` (`engine.rs`) owns four long-lived pieces shared by every session: the SQLite `CatalogStore`, a Tokio runtime, `MediaRuntime`, and `ModelRuntime`. `Session` is a cheap clone over the engine plus per-session state (`fail_on_error`, active-query cancellation token, optional Python UDF host).
 
@@ -49,9 +49,9 @@ Four crates: `vql-kernel` (engine and owner tests), `vql-cli` (clap + reedline s
 
 `Session::sql` (`session.rs`) is the single entry point and splits on statement kind:
 
-- **VQL DDL** (`CREATE TABLE/MODEL/SINK`, `DROP`, `SHOW`, `DESCRIBE`) is parsed by the hand-written parser in `sql/ddl_parser.rs` into `sql/ast.rs` types and validated before commit. `CREATE FUNCTION` is classified there but parsed and validated by DataFusion's `CreateFunction` and VisionQL `FunctionFactory`; the resulting normalized definition is then committed to the Catalog. `Statement::Ddl` carries both a human message and a RecordBatch.
+- **VQL DDL** (`CREATE TABLE/MODEL`, `RESOLVE MODEL`, `DROP`, `SHOW`, `DESCRIBE`) is parsed by the hand-written parser in `sql/ddl_parser.rs` into `sql/ast.rs` types and validated before commit. `CREATE FUNCTION` is classified there but parsed and validated by DataFusion's `CreateFunction` and VisionQL `FunctionFactory`; the resulting normalized definition is then committed to the Catalog. `Statement::Ddl` carries both a human message and a RecordBatch.
 - **Queries** go through `planner::plan_statement`: `planner/normalize.rs` performs textual rewrites (SQL-macro expansion, typed-inference named arguments, `box.center` → `BOX_CENTER`, correlated `UNNEST`), DataFusion plans the result, and `planner/inference.rs` rewrites typed inference markers into `InferenceNode` extension nodes.
-- `INSERT INTO <sink> SELECT ...` reuses the query path and wraps the DataFrame with `planner/sink.rs` (`SinkWrite` / `SinkExec`).
+- `INSERT INTO <table> SELECT ...` resolves a writable provider Table and wraps bounded DataFrames with the internal `planner/sink.rs` nodes (`SinkWrite` / `SinkExec`).
 
 ### Two invariants worth preserving
 
@@ -61,11 +61,11 @@ Four crates: `vql-kernel` (engine and owner tests), `vql-cli` (clap + reedline s
 
 ### Catalog
 
-`catalog/store.rs` is an append-only revision log in SQLite: `revisions` rows are immutable, `objects` rows point at a `head_revision`, and `DROP` writes a tombstone revision. Schemas are stored as Arrow IPC. Every DDL commits one object in a transaction. Planning takes a `DefinitionSnapshot` once and pins it for the whole query, so concurrent DDL cannot change a running query's meaning. Relation names (tables) share one namespace; models, functions, and sinks each have their own. Unquoted identifiers lowercase.
+`vql-catalog` owns the append-only revision log and SQLite backend: `revisions` rows are immutable, `objects` rows point at a `head_revision`, and `DROP` writes a tombstone revision. Schemas are stored as Arrow IPC. Every DDL commits one object in a transaction. Planning takes a `DefinitionSnapshot` once and pins it for the whole query, so concurrent DDL cannot change a running query's meaning. SQL defaults to `vql.default`; all relation endpoints are Tables distinguished by provider capabilities. Models and functions retain separate namespaces. Unquoted identifiers lowercase.
 
 ### Media and models
 
-`MediaRuntime` prefers the `ffmpeg-native` decoder (default cargo feature, needs FFmpeg 8 dev libraries) and silently falls back to the `ffmpeg`/`ffprobe` subprocess decoder; `video_available()` gates `USING VIDEOS`. Video tables expand to frame rows inside the scan operator using the table's `WITH (fps = ...)`, sampled by PTS.
+`MediaRuntime` prefers the `ffmpeg-native` decoder (default cargo feature, needs FFmpeg 8 dev libraries) and silently falls back to the `ffmpeg`/`ffprobe` subprocess decoder; `video_available()` gates `USING VIDEOS`. Video tables expand to frame rows inside the scan operator using the table's `OPTIONS (fps = ...)`, sampled by PTS.
 
 A Model stores a typed `RuntimeSpec`, `PreProcessor` spec, and `PostProcessor` spec. `runtime.*` selects and binds execution; processor-specific values live only in complete `pre_processor.options` and `post_processor.options` objects. Unknown fields and unsupported combinations fail before Catalog commit. Invocation-only values such as `classes` and `min_confidence` belong to `IMAGE_DETECTION`, not the Model. Sources resolve through `models/resolver.rs`; the runtime opens a local/cached ONNX artifact or binds a Triton KServe V2 endpoint. `mock://` remains an internal test backend.
 

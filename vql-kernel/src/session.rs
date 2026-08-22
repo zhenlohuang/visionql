@@ -13,7 +13,7 @@ use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{
-    FunctionImplementation, ModelDef, ObjectKind, SinkDef, StreamDef, TableDef, TableProviderKind,
+    FunctionImplementation, ModelDef, ObjectKind, RtspTableConfig, TableDef, TableProvider,
 };
 use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::rtsp::{rtsp_schema, start_rtsp_source};
@@ -27,7 +27,8 @@ use crate::planner::{
 };
 use crate::resources::{QueryBudget, QueryReservation, ResourceMetrics, SessionMemoryPool};
 use crate::sql::{
-    CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement, parse_statement, render_create,
+    CreateModel, CreateTable, ShowKind, TableColumn, VqlStatement, parse_statement, render_create,
+    render_create_table,
 };
 use crate::types::{image_field, is_image_storage};
 use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
@@ -521,7 +522,7 @@ pub struct QueryHandle {
 #[derive(Debug, Clone)]
 struct StreamingQuery {
     name: String,
-    definition: StreamDef,
+    definition: RtspTableConfig,
     skip: usize,
     fetch: Option<usize>,
     tumble: Option<crate::stream::TumblePlan>,
@@ -1119,13 +1120,9 @@ impl Session {
     pub fn sql(&self, sql: &str) -> Result<Statement> {
         match parse_statement(sql)? {
             VqlStatement::CreateTable(create) => self.create_table(create).map(Statement::Ddl),
-            VqlStatement::CreateStream(create) => self.create_stream(create).map(Statement::Ddl),
             VqlStatement::CreateModel(create) => self.create_model(create).map(Statement::Ddl),
             VqlStatement::ResolveModel { name } => self.resolve_model(&name).map(Statement::Ddl),
             VqlStatement::CreateFunction { sql } => self.create_function(&sql).map(Statement::Ddl),
-            VqlStatement::CreateSink { name, kind, kafka } => {
-                self.create_sink(&name, kind, kafka).map(Statement::Ddl)
-            }
             VqlStatement::Drop { kind, name } => self.drop_object(kind, &name).map(Statement::Ddl),
             VqlStatement::Show(kind) => self.show_objects(kind).map(Statement::Ddl),
             VqlStatement::ShowCreate { kind, name } => {
@@ -1135,7 +1132,7 @@ impl Session {
             VqlStatement::Query { sql }
                 if sql.trim_start().to_ascii_uppercase().starts_with("INSERT") =>
             {
-                self.insert_into_sink(&sql).map(Statement::Query)
+                self.insert_into_table(&sql).map(Statement::Query)
             }
             VqlStatement::Query { sql } => self.query(&sql).map(Statement::Query),
             VqlStatement::Explain { sql } => self.explain(&sql).map(Statement::Explain),
@@ -1211,14 +1208,15 @@ impl Session {
             Arc::clone(&metrics),
         ))?;
         let streaming = planned.stream_name.as_ref().map(|name| {
-            let definition = snapshot
-                .stream(name)
-                .expect("planned stream exists in the query snapshot")
-                .definition
-                .clone();
+            let table = snapshot
+                .table(name)
+                .expect("planned RTSP table exists in the query snapshot");
+            let TableProvider::Rtsp(definition) = &table.definition.provider else {
+                unreachable!("planned unbounded table must use RTSP")
+            };
             StreamingQuery {
                 name: name.clone(),
-                definition,
+                definition: definition.clone(),
                 skip: planned.stream_skip,
                 fetch: planned.stream_fetch,
                 tumble: planned.tumble.clone(),
@@ -1275,25 +1273,27 @@ impl Session {
         {
             return Err(VqlError::new(
                 ErrorCode::InvalidSql,
-                "expected EXPLAIN INSERT INTO <sink> <query>",
+                "expected EXPLAIN INSERT INTO <table> <query>",
             ));
         }
-        let sink_name = parts.next().ok_or_else(|| {
-            VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a sink name")
+        let table_name = parts.next().ok_or_else(|| {
+            VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a table name")
         })?;
         let query = parts.next().ok_or_else(|| {
             VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a SELECT query")
         })?;
         let snapshot = self.engine.inner.catalog.snapshot()?;
-        let sink = snapshot.sink(sink_name).ok_or_else(|| {
+        let table = snapshot.table(table_name).ok_or_else(|| {
             VqlError::new(
                 ErrorCode::NotFound,
-                format!("sink '{sink_name}' does not exist"),
+                format!("table '{table_name}' does not exist"),
             )
         })?;
-        let kind = match sink.definition.kind {
-            crate::catalog::SinkKind::Console => "console",
-            crate::catalog::SinkKind::Kafka => "kafka",
+        let TableProvider::Kafka(_) = &table.definition.provider else {
+            return Err(VqlError::new(
+                ErrorCode::InvalidSql,
+                format!("table '{table_name}' is not writable"),
+            ));
         };
         let mut handle = self.query(&format!("EXPLAIN {query}"))?;
         let (state, plan) = handle.dataframe.into_parts();
@@ -1308,8 +1308,8 @@ impl Session {
             datafusion::logical_expr::StringifiedPlan::new(
                 datafusion::logical_expr::PlanType::FinalLogicalPlan,
                 format!(
-                    "VisionQLSink name={} type={} topology_append=Sink",
-                    sink.definition.name, kind
+                    "VisionQLWrite name={} provider=KAFKA topology_append=TableWrite",
+                    table.definition.name
                 ),
             ),
         );
@@ -1321,40 +1321,60 @@ impl Session {
     }
 
     fn create_table(&self, create: CreateTable) -> Result<DdlResult> {
-        let location = normalize_location(&create.location)?;
-        let definition = TableDef {
-            name: create.name.clone(),
-            provider: create.provider,
-            location: location.to_string_lossy().into_owned(),
-            recursive: create.recursive,
-            fps: create.fps,
-            start_time_ms: create.start_time_ms,
-        };
-        match definition.provider {
-            TableProviderKind::Images => {
-                ImagesTableProvider::try_new(&definition.location, 0, definition.recursive)?;
+        let name = create.name.to_ascii_lowercase();
+        let mut provider = create.provider;
+        let schema = match &mut provider {
+            TableProvider::Images {
+                location,
+                recursive,
+            } => {
+                *location = normalize_location(location)?.to_string_lossy().into_owned();
+                ImagesTableProvider::try_new(location.clone(), 0, *recursive)?;
+                images_schema()
             }
-            TableProviderKind::Videos => {
+            TableProvider::Videos {
+                location,
+                recursive,
+                fps,
+                start_time_ms,
+            } => {
                 if !self.engine.inner.media.video_available() {
                     return Err(VqlError::new(
                         ErrorCode::FeatureNotAvailable,
                         "USING VIDEOS requires FFmpeg 8 or ffmpeg/ffprobe executables",
                     ));
                 }
+                *location = normalize_location(location)?.to_string_lossy().into_owned();
                 VideosTableProvider::try_new(
-                    &definition.location,
+                    location.clone(),
                     0,
-                    definition.recursive,
-                    definition.fps,
-                    definition.start_time_ms,
+                    *recursive,
+                    *fps,
+                    *start_time_ms,
                     Arc::clone(&self.engine.inner.media),
                 )?;
+                videos_schema(start_time_ms.is_none())
             }
-        }
-        let schema = match definition.provider {
-            TableProviderKind::Images => images_schema(),
-            TableProviderKind::Videos => videos_schema(definition.start_time_ms.is_none()),
+            TableProvider::Rtsp(config) => {
+                if !self.engine.inner.media.rtsp_available() {
+                    return Err(VqlError::new(
+                        ErrorCode::FeatureNotAvailable,
+                        "USING RTSP requires the ffmpeg-native feature",
+                    ));
+                }
+                config.name = name.clone();
+                config.endpoint = normalize_rtsp_endpoint(&config.endpoint)?;
+                rtsp_schema()
+            }
+            TableProvider::Kafka(_) => schema_for_columns(&create.columns)?,
+            TableProvider::External { .. } => {
+                return Err(VqlError::new(
+                    ErrorCode::FeatureNotAvailable,
+                    "this external table provider is catalog-only and cannot be created with VQL SQL",
+                ));
+            }
         };
+        let definition = TableDef::new(name.clone(), provider);
         let revision = self
             .engine
             .inner
@@ -1362,30 +1382,7 @@ impl Session {
             .create_table(&definition, &schema)?;
         Ok(message_result(format!(
             "created table '{}' at revision {revision}",
-            create.name
-        )))
-    }
-
-    fn create_stream(&self, create: CreateStream) -> Result<DdlResult> {
-        if !self.engine.inner.media.rtsp_available() {
-            return Err(VqlError::new(
-                ErrorCode::FeatureNotAvailable,
-                "CREATE STREAM requires the ffmpeg-native feature",
-            ));
-        }
-        let endpoint = normalize_rtsp_endpoint(&create.endpoint)?;
-        let definition = StreamDef {
-            name: create.name.to_ascii_lowercase(),
-            endpoint,
-            fps: create.fps,
-            event_time: create.event_time,
-            watermark_delay_ms: create.watermark_delay_ms,
-            transport: create.transport,
-        };
-        let revision = self.engine.inner.catalog.create_stream(&definition)?;
-        Ok(message_result(format!(
-            "created stream '{}' at revision {revision}",
-            definition.name
+            name
         )))
     }
 
@@ -1490,25 +1487,7 @@ impl Session {
         )))
     }
 
-    fn create_sink(
-        &self,
-        name: &str,
-        kind: crate::catalog::SinkKind,
-        kafka: Option<crate::catalog::KafkaSinkConfig>,
-    ) -> Result<DdlResult> {
-        let sink = SinkDef {
-            name: name.to_ascii_lowercase(),
-            kind,
-            kafka,
-        };
-        let revision = self.engine.inner.catalog.create_sink(&sink)?;
-        Ok(message_result(format!(
-            "created sink '{}' at revision {revision}",
-            sink.name
-        )))
-    }
-
-    fn insert_into_sink(&self, sql: &str) -> Result<QueryHandle> {
+    fn insert_into_table(&self, sql: &str) -> Result<QueryHandle> {
         let mut parts = sql
             .trim()
             .trim_end_matches(';')
@@ -1522,11 +1501,11 @@ impl Session {
         {
             return Err(VqlError::new(
                 ErrorCode::InvalidSql,
-                "expected INSERT INTO <sink> SELECT ...",
+                "expected INSERT INTO <table> SELECT ...",
             ));
         }
-        let sink_name = parts.next().ok_or_else(|| {
-            VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a sink name")
+        let table_name = parts.next().ok_or_else(|| {
+            VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a table name")
         })?;
         let query = parts.next().ok_or_else(|| {
             VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a SELECT query")
@@ -1539,20 +1518,43 @@ impl Session {
         {
             return Err(VqlError::new(
                 ErrorCode::InvalidSql,
-                "v0.1 Sink writes require SELECT or WITH",
+                "INSERT INTO writes require SELECT or WITH",
             ));
         }
         let snapshot = self.engine.inner.catalog.snapshot()?;
-        let sink = snapshot.sink(sink_name).ok_or_else(|| {
+        let table = snapshot.table(table_name).ok_or_else(|| {
             VqlError::new(
                 ErrorCode::NotFound,
-                format!("sink '{sink_name}' does not exist"),
+                format!("table '{table_name}' does not exist"),
             )
         })?;
+        let TableProvider::Kafka(config) = &table.definition.provider else {
+            return Err(VqlError::new(
+                ErrorCode::InvalidSql,
+                format!("table '{table_name}' is not writable"),
+            ));
+        };
         let mut handle = self.query(query)?;
+        if !table.schema.fields().is_empty()
+            && !schemas_are_write_compatible(&table.schema, &handle.output_schema)
+        {
+            return Err(VqlError::new(
+                ErrorCode::InvalidSql,
+                format!(
+                    "INSERT INTO table '{table_name}' output schema does not match the declared table schema"
+                ),
+            ));
+        }
+        let write_schema = if table.schema.fields().is_empty() {
+            Arc::clone(&handle.output_schema)
+        } else {
+            Arc::clone(&table.schema)
+        };
         let target = SinkTarget::try_new(
-            sink.definition.clone(),
+            table.definition.name.clone(),
+            config.clone(),
             &handle.output_schema,
+            write_schema,
             handle.cancellation.clone(),
             self.engine.inner.config.secret_provider().cloned(),
             handle.budget.clone(),
@@ -1569,24 +1571,16 @@ impl Session {
     fn drop_object(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
         let revision = match kind {
             ShowKind::Tables => return self.drop_table(name),
-            ShowKind::Streams => self.engine.inner.catalog.drop_stream(name)?,
             ShowKind::Models => {
                 let revision = self.engine.inner.catalog.drop_model(name)?;
                 self.engine.inner.models.evict_stale()?;
                 revision
             }
-            ShowKind::Functions => {
-                self.engine
-                    .inner
-                    .catalog
-                    .drop_object("function", ObjectKind::Function, name)?
-            }
-            ShowKind::Sinks => {
-                self.engine
-                    .inner
-                    .catalog
-                    .drop_object("sink", ObjectKind::Sink, name)?
-            }
+            ShowKind::Functions => self
+                .engine
+                .inner
+                .catalog
+                .drop_object(ObjectKind::Function, name)?,
         };
         Ok(message_result(format!(
             "dropped object '{name}' at revision {revision}"
@@ -1596,9 +1590,6 @@ impl Session {
     fn show_objects(&self, kind: ShowKind) -> Result<DdlResult> {
         if kind == ShowKind::Tables {
             return self.show_tables();
-        }
-        if kind == ShowKind::Streams {
-            return self.show_streams();
         }
         if kind == ShowKind::Models {
             return self.show_models();
@@ -1615,17 +1606,7 @@ impl Session {
                     (name.to_owned(), implementation.to_owned(), value.revision)
                 })
                 .collect(),
-            ShowKind::Sinks => snapshot
-                .sinks()
-                .map(|(name, value)| {
-                    (
-                        name.to_owned(),
-                        format!("{:?}", value.definition.kind),
-                        value.revision,
-                    )
-                })
-                .collect(),
-            ShowKind::Tables | ShowKind::Streams | ShowKind::Models => unreachable!(),
+            ShowKind::Tables | ShowKind::Models => unreachable!(),
         };
         named_objects_result(rows)
     }
@@ -1637,13 +1618,7 @@ impl Session {
                 "TABLE",
                 snapshot
                     .table(name)
-                    .map(|object| render_create(&object.definition)),
-            ),
-            ShowKind::Streams => (
-                "STREAM",
-                snapshot
-                    .stream(name)
-                    .map(|object| render_create(&object.definition)),
+                    .map(|object| render_create_table(&object.definition, &object.schema)),
             ),
             ShowKind::Models => (
                 "MODEL",
@@ -1655,12 +1630,6 @@ impl Session {
                 "FUNCTION",
                 snapshot
                     .function(name)
-                    .map(|object| render_create(&object.definition)),
-            ),
-            ShowKind::Sinks => (
-                "SINK",
-                snapshot
-                    .sink(name)
                     .map(|object| render_create(&object.definition)),
             ),
         };
@@ -1708,8 +1677,15 @@ impl Session {
         let mut revisions = Vec::new();
         for (name, table) in snapshot.tables() {
             names.push(name.to_owned());
-            providers.push(format!("{:?}", table.definition.provider).to_ascii_uppercase());
-            locations.push(table.definition.location.clone());
+            providers.push(format!("{:?}", table.definition.provider.kind()).to_ascii_uppercase());
+            locations.push(
+                table
+                    .definition
+                    .provider
+                    .location()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
             revisions.push(table.revision);
         }
         let schema = Arc::new(Schema::new(vec![
@@ -1732,83 +1708,6 @@ impl Session {
         })?;
         Ok(DdlResult {
             message: format!("{} table(s)", batch.num_rows()),
-            batches: vec![batch],
-        })
-    }
-
-    fn show_streams(&self) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
-        let streams = snapshot.streams().collect::<Vec<_>>();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("stream_name", DataType::Utf8, false),
-            Field::new("connector", DataType::Utf8, false),
-            Field::new("endpoint", DataType::Utf8, false),
-            Field::new("fps", DataType::Float64, false),
-            Field::new("event_time", DataType::Utf8, false),
-            Field::new("watermark_ms", DataType::Int64, false),
-            Field::new("transport", DataType::Utf8, false),
-            Field::new("revision", DataType::Int64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(
-                    streams.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-                )) as ArrayRef,
-                Arc::new(StringArray::from(vec!["RTSP"; streams.len()])),
-                Arc::new(StringArray::from(
-                    streams
-                        .iter()
-                        .map(|(_, stream)| stream.definition.endpoint.as_str())
-                        .collect::<Vec<_>>(),
-                )),
-                Arc::new(arrow::array::Float64Array::from(
-                    streams
-                        .iter()
-                        .map(|(_, stream)| stream.definition.fps)
-                        .collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    streams
-                        .iter()
-                        .map(|(_, stream)| match stream.definition.event_time {
-                            crate::catalog::EventTimePolicy::CaptureTime => "capture_time",
-                            crate::catalog::EventTimePolicy::IngestTime => "ingest_time",
-                        })
-                        .collect::<Vec<_>>(),
-                )),
-                Arc::new(Int64Array::from(
-                    streams
-                        .iter()
-                        .map(|(_, stream)| stream.definition.watermark_delay_ms)
-                        .collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    streams
-                        .iter()
-                        .map(|(_, stream)| match stream.definition.transport {
-                            crate::catalog::RtspTransport::Tcp => "tcp",
-                            crate::catalog::RtspTransport::Udp => "udp",
-                        })
-                        .collect::<Vec<_>>(),
-                )),
-                Arc::new(Int64Array::from(
-                    streams
-                        .iter()
-                        .map(|(_, stream)| stream.revision)
-                        .collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .map_err(|error| {
-            VqlError::new(
-                ErrorCode::Execution,
-                "failed to build stream catalog result",
-            )
-            .with_source(error)
-        })?;
-        Ok(DdlResult {
-            message: format!("{} stream(s)", batch.num_rows()),
             batches: vec![batch],
         })
     }
@@ -1877,7 +1776,6 @@ impl Session {
         let relation_schema = snapshot
             .table(name)
             .map(|table| Arc::clone(&table.schema))
-            .or_else(|| snapshot.stream(name).map(|_| rtsp_schema()))
             .ok_or_else(|| {
                 VqlError::new(
                     ErrorCode::NotFound,
@@ -1921,6 +1819,45 @@ impl Session {
             batches: vec![batch],
         })
     }
+}
+
+fn schema_for_columns(columns: &[TableColumn]) -> Result<SchemaRef> {
+    let fields = columns
+        .iter()
+        .map(|column| {
+            let data_type = match column.data_type.as_str() {
+                "STRING" => DataType::Utf8,
+                "BIGINT" | "LONG" => DataType::Int64,
+                "INT" | "INTEGER" => DataType::Int32,
+                "BOOLEAN" => DataType::Boolean,
+                "FLOAT" => DataType::Float32,
+                "DOUBLE" => DataType::Float64,
+                "TIMESTAMP" => {
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, Some("UTC".into()))
+                }
+                data_type => {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidSql,
+                        format!("unsupported table column type '{data_type}'"),
+                    ));
+                }
+            };
+            Ok(Field::new(&column.name, data_type, column.nullable))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Arc::new(Schema::new(fields)))
+}
+
+fn schemas_are_write_compatible(target: &SchemaRef, output: &SchemaRef) -> bool {
+    target.fields().len() == output.fields().len()
+        && target
+            .fields()
+            .iter()
+            .zip(output.fields())
+            .all(|(target, output)| {
+                target.data_type() == output.data_type()
+                    && (target.is_nullable() || !output.is_nullable())
+            })
 }
 
 fn function_ddl_error(error: datafusion::common::DataFusionError) -> VqlError {
@@ -2215,7 +2152,7 @@ mod tests {
         std::fs::create_dir(&photos).unwrap();
         let catalog_path = temp.path().join("catalog.db");
         let create = format!(
-            "CREATE TABLE photos USING IMAGES LOCATION '{}' WITH (recursive=true);",
+            "CREATE TABLE photos USING IMAGES LOCATION '{}' OPTIONS (recursive = true);",
             photos.display()
         );
 
@@ -2273,6 +2210,31 @@ mod tests {
             .join("\n")
     }
 
+    fn create_rtsp_table(engine: &Engine, name: &str, endpoint: &str) {
+        let definition = TableDef::new(
+            name,
+            TableProvider::Rtsp(RtspTableConfig {
+                name: name.to_owned(),
+                endpoint: endpoint.to_owned(),
+                fps: 5.0,
+                event_time: crate::catalog::EventTimePolicy::CaptureTime,
+                watermark_delay_ms: 100,
+                transport: crate::catalog::RtspTransport::Tcp,
+            }),
+        );
+        engine
+            .inner
+            .catalog
+            .backend()
+            .create_table(
+                crate::catalog::DEFAULT_CATALOG,
+                crate::catalog::DEFAULT_SCHEMA,
+                &definition,
+                &rtsp_schema(),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn show_create_round_trips_all_catalog_objects_and_redacts_secrets() {
         let temp = tempdir().unwrap();
@@ -2283,19 +2245,18 @@ mod tests {
         session
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
-                 CREATE STREAM entrance FROM 'rtsp://camera.example/live' WITH (
-                   fps=7.5, event_time='ingest_time',
-                   watermark=INTERVAL '1500' MILLISECOND, transport='udp');
+                 CREATE TABLE entrance USING RTSP OPTIONS (
+                   url = 'rtsp://camera.example/live', fps = '7.5', event_time = 'ingest_time',
+                   watermark = '1500 milliseconds', transport = 'udp');
                  CREATE MODEL detector TYPE OBJECT_DETECTION
                    FROM 'mock://person' USING ONNX_RUNTIME;
                  CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1;
                  CREATE FUNCTION py_double(value BIGINT) RETURNS BIGINT
                    LANGUAGE PYTHON AS 'ops:double';
-                 CREATE SINK terminal TYPE CONSOLE;
-                 CREATE SINK events TYPE KAFKA WITH (
-                   bootstrap_servers='broker:9092', topic='events', format='json',
-                   credential_ref='secret://kafka/producer',
-                   delivery_timeout_ms=45000, buffer_capacity=256);",
+                 CREATE TABLE events (event_id BIGINT NOT NULL) USING KAFKA OPTIONS (
+                   bootstrap_servers = 'broker:9092', topic = 'events', format = 'json',
+                   credential_ref = 'secret://kafka/producer',
+                   delivery_timeout_ms = '45000', buffer_capacity = '256');",
                 photos.display()
             ))
             .unwrap();
@@ -2307,12 +2268,11 @@ mod tests {
 
         let statements = [
             show_create_sql(&session, "SHOW CREATE TABLE photos"),
-            show_create_sql(&session, "SHOW CREATE STREAM entrance"),
+            show_create_sql(&session, "SHOW CREATE TABLE entrance"),
             resolved_model,
             show_create_sql(&session, "SHOW CREATE FUNCTION plus_one"),
             show_create_sql(&session, "SHOW CREATE FUNCTION py_double"),
-            show_create_sql(&session, "SHOW CREATE SINK terminal"),
-            show_create_sql(&session, "SHOW CREATE SINK events"),
+            show_create_sql(&session, "SHOW CREATE TABLE events"),
         ];
         let kafka = statements.last().unwrap();
         assert!(!kafka.contains("secret://kafka/producer"));
@@ -2324,6 +2284,18 @@ mod tests {
             parse_statement(statement).unwrap();
             copy_session.sql(statement).unwrap();
         }
+        let copied_events = copy
+            .inner
+            .catalog
+            .snapshot()
+            .unwrap()
+            .table("events")
+            .unwrap()
+            .schema
+            .clone();
+        assert_eq!(copied_events.fields().len(), 1);
+        assert_eq!(copied_events.field(0).name(), "event_id");
+        assert!(!copied_events.field(0).is_nullable());
         assert!(
             copy.inner
                 .catalog
@@ -3019,7 +2991,7 @@ mod tests {
         let session = engine.session().build().unwrap();
         session
             .sql(&format!(
-                "CREATE TABLE clips USING VIDEOS LOCATION '{}' WITH (fps=5)",
+                "CREATE TABLE clips USING VIDEOS LOCATION '{}' OPTIONS (fps = 5)",
                 videos.display()
             ))
             .unwrap();
@@ -3224,54 +3196,17 @@ mod tests {
     }
 
     #[test]
-    fn console_sink_uses_sink_plan_nodes() {
-        let temp = tempdir().unwrap();
-        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let session = engine.session().build().unwrap();
-        session.sql("CREATE SINK terminal TYPE console").unwrap();
-        let bounded = explain_text(&session, "EXPLAIN SELECT 1 AS value ORDER BY value");
-        assert!(!bounded.contains("Unsupported node"));
-        let explain = explain_text(&session, "EXPLAIN INSERT INTO terminal SELECT 42 AS answer");
-        assert!(explain.contains("VisionQLSink name=terminal type=console"));
-        let insert = session
-            .sql("INSERT INTO terminal SELECT 42 AS answer")
-            .unwrap();
-        let Statement::Query(query) = &insert else {
-            panic!("INSERT INTO console sink must produce a foreground query");
-        };
-        assert!(
-            query
-                .dataframe
-                .logical_plan()
-                .display_indent()
-                .to_string()
-                .contains("SinkWrite")
-        );
-        let physical = engine
-            .inner
-            .runtime
-            .block_on(query.dataframe.create_physical_plan())
-            .unwrap();
-        assert!(
-            datafusion::physical_plan::displayable(physical.as_ref())
-                .indent(true)
-                .to_string()
-                .contains("SinkExec")
-        );
-        insert.collect().unwrap();
-    }
-
-    #[test]
-    fn streaming_kafka_sink_runs_after_the_epoch_plan() {
+    fn streaming_kafka_table_runs_after_the_epoch_plan() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         session
             .run_script(
-                "CREATE STREAM camera FROM 'rtsp://127.0.0.1/live' \
-                 WITH (event_time='ingest_time', watermark=INTERVAL '0' SECOND);\
-                 CREATE SINK events TYPE KAFKA WITH (\
-                 bootstrap_servers='127.0.0.1:9092', topic='events');",
+                "CREATE TABLE camera USING RTSP OPTIONS (\
+                 url = 'rtsp://127.0.0.1/live', event_time = 'ingest_time', \
+                 watermark = '0 seconds');\
+                 CREATE TABLE events USING KAFKA OPTIONS (\
+                 bootstrap_servers = '127.0.0.1:9092', topic = 'events');",
             )
             .unwrap();
 
@@ -3283,7 +3218,7 @@ mod tests {
             )
             .unwrap()
         else {
-            panic!("INSERT INTO Kafka Sink must produce a foreground query");
+            panic!("INSERT INTO Kafka table must produce a foreground query");
         };
 
         let streaming = insert.streaming.as_ref().expect("streaming query");
@@ -3351,7 +3286,7 @@ mod tests {
     }
 
     #[test]
-    fn kafka_sink_reopens_from_catalog_without_connecting() {
+    fn kafka_table_reopens_from_catalog_without_connecting() {
         let temp = tempdir().unwrap();
         let catalog = temp.path().join("catalog.db");
         {
@@ -3359,9 +3294,9 @@ mod tests {
             let session = engine.session().build().unwrap();
             session
                 .sql(
-                    "CREATE SINK events TYPE KAFKA WITH (\
-                     bootstrap_servers='broker-1:9092,broker-2:9092', \
-                     topic='events', delivery_timeout_ms=45000, buffer_capacity=256)",
+                    "CREATE TABLE events USING KAFKA OPTIONS (\
+                     bootstrap_servers = 'broker-1:9092,broker-2:9092', \
+                     topic = 'events', delivery_timeout_ms = 45000, buffer_capacity = 256)",
                 )
                 .unwrap();
         }
@@ -3372,7 +3307,7 @@ mod tests {
             .sql("INSERT INTO events SELECT 1 AS event_id")
             .unwrap()
         else {
-            panic!("reopened Kafka Sink must produce a query");
+            panic!("reopened Kafka table must produce a query");
         };
 
         assert!(
@@ -3386,19 +3321,42 @@ mod tests {
     }
 
     #[test]
+    fn insert_into_declared_kafka_table_matches_columns_by_position() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(
+                "CREATE TABLE events (people BIGINT) USING KAFKA OPTIONS (\
+                 bootstrap_servers = '127.0.0.1:9092', topic = 'events')",
+            )
+            .unwrap();
+
+        let Statement::Query(insert) = session
+            .sql("INSERT INTO events SELECT CAST(1 AS BIGINT)")
+            .unwrap()
+        else {
+            panic!("INSERT INTO Kafka table must produce a query");
+        };
+        let target = insert.sink_target.as_ref().unwrap();
+        assert_eq!(target.write_schema().field(0).name(), "people");
+        assert_eq!(target.write_schema().field(0).data_type(), &DataType::Int64);
+    }
+
+    #[test]
     fn kafka_credential_reference_requires_a_host_provider() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         session
             .sql(
-                "CREATE SINK events TYPE KAFKA WITH (\
-                 bootstrap_servers='127.0.0.1:9092', topic='events', \
-                 credential_ref='secret://kafka/producer')",
+                "CREATE TABLE events USING KAFKA OPTIONS (\
+                 bootstrap_servers = '127.0.0.1:9092', topic = 'events', \
+                 credential_ref = 'secret://kafka/producer')",
             )
             .unwrap();
         let explain = explain_text(&session, "EXPLAIN INSERT INTO events SELECT 1 AS event_id");
-        assert!(explain.contains("VisionQLSink name=events type=kafka"));
+        assert!(explain.contains("VisionQLWrite name=events provider=KAFKA"));
         let insert = session
             .sql("INSERT INTO events SELECT 1 AS event_id")
             .unwrap();
@@ -3432,9 +3390,9 @@ mod tests {
         let session = engine.session().build().unwrap();
         session
             .sql(
-                "CREATE SINK events TYPE KAFKA WITH (\
-                 bootstrap_servers='127.0.0.1:9092', topic='events', \
-                 credential_ref='secret://kafka/producer')",
+                "CREATE TABLE events USING KAFKA OPTIONS (\
+                 bootstrap_servers = '127.0.0.1:9092', topic = 'events', \
+                 credential_ref = 'secret://kafka/producer')",
             )
             .unwrap();
         let insert = session
@@ -3657,18 +3615,19 @@ mod tests {
 
     #[cfg(feature = "ffmpeg-native")]
     #[test]
-    fn stream_lifecycle_and_streaming_planning_are_available_without_connecting() {
+    fn rtsp_table_lifecycle_and_streaming_planning_are_available_without_connecting() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         session
             .sql(
-                "CREATE STREAM entrance FROM 'rtsp://camera.example:554/live' WITH (\
-                 fps=5, event_time='capture_time', watermark=INTERVAL '2' SECOND, transport='tcp')",
+                "CREATE TABLE entrance USING RTSP OPTIONS (\
+                 url = 'rtsp://camera.example:554/live', fps = 5, \
+                 event_time = 'capture_time', watermark = '2 seconds', transport = 'tcp')",
             )
             .unwrap();
 
-        let shown = session.sql("SHOW STREAMS").unwrap().collect().unwrap();
+        let shown = session.sql("SHOW TABLES").unwrap().collect().unwrap();
         assert_eq!(shown[0].num_rows(), 1);
         let names = shown[0]
             .column(0)
@@ -3821,9 +3780,9 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidSql);
         assert!(error.message.contains("event-time column 'ts'"));
 
-        session.sql("DROP STREAM entrance").unwrap();
+        session.sql("DROP TABLE entrance").unwrap();
         assert_eq!(
-            session.sql("SHOW STREAMS").unwrap().collect().unwrap()[0].num_rows(),
+            session.sql("SHOW TABLES").unwrap().collect().unwrap()[0].num_rows(),
             0
         );
     }
@@ -3839,7 +3798,9 @@ mod tests {
             "rtsp://camera/live?token=secret",
         ] {
             let error = session
-                .sql(&format!("CREATE STREAM cam FROM '{endpoint}'"))
+                .sql(&format!(
+                    "CREATE TABLE cam USING RTSP OPTIONS (url = '{endpoint}')"
+                ))
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::InvalidOption);
         }
@@ -3855,18 +3816,7 @@ mod tests {
         let video = temp.path().join("stream.mp4");
         assert!(crate::test_util::generate_test_video(&video));
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        engine
-            .inner
-            .catalog
-            .create_stream(&StreamDef {
-                name: "local_stream".to_owned(),
-                endpoint: video.to_string_lossy().into_owned(),
-                fps: 5.0,
-                event_time: crate::catalog::EventTimePolicy::CaptureTime,
-                watermark_delay_ms: 100,
-                transport: crate::catalog::RtspTransport::Tcp,
-            })
-            .unwrap();
+        create_rtsp_table(&engine, "local_stream", &video.to_string_lossy());
         let session = engine.session().build().unwrap();
         let statement = session
             .sql("SELECT frame FROM local_stream LIMIT 2 OFFSET 1")
@@ -3923,18 +3873,7 @@ mod tests {
         let video = temp.path().join("window-stream.mp4");
         assert!(crate::test_util::generate_test_video(&video));
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        engine
-            .inner
-            .catalog
-            .create_stream(&StreamDef {
-                name: "window_stream".to_owned(),
-                endpoint: video.to_string_lossy().into_owned(),
-                fps: 5.0,
-                event_time: crate::catalog::EventTimePolicy::CaptureTime,
-                watermark_delay_ms: 100,
-                transport: crate::catalog::RtspTransport::Tcp,
-            })
-            .unwrap();
+        create_rtsp_table(&engine, "window_stream", &video.to_string_lossy());
         let session = engine.session().build().unwrap();
 
         let statement = session
@@ -4012,18 +3951,7 @@ mod tests {
         let video = temp.path().join("graceful-stream.mp4");
         assert!(crate::test_util::generate_test_video(&video));
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        engine
-            .inner
-            .catalog
-            .create_stream(&StreamDef {
-                name: "graceful_stream".to_owned(),
-                endpoint: video.to_string_lossy().into_owned(),
-                fps: 5.0,
-                event_time: crate::catalog::EventTimePolicy::CaptureTime,
-                watermark_delay_ms: 100,
-                transport: crate::catalog::RtspTransport::Tcp,
-            })
-            .unwrap();
+        create_rtsp_table(&engine, "graceful_stream", &video.to_string_lossy());
         let session = engine.session().build().unwrap();
         let Statement::Query(query) = session.sql("SELECT frame_id FROM graceful_stream").unwrap()
         else {
@@ -4078,18 +4006,7 @@ mod tests {
         let video = temp.path().join("people-stream.mp4");
         assert!(crate::test_util::generate_test_video(&video));
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        engine
-            .inner
-            .catalog
-            .create_stream(&StreamDef {
-                name: "people_stream".to_owned(),
-                endpoint: video.to_string_lossy().into_owned(),
-                fps: 5.0,
-                event_time: crate::catalog::EventTimePolicy::CaptureTime,
-                watermark_delay_ms: 100,
-                transport: crate::catalog::RtspTransport::Tcp,
-            })
-            .unwrap();
+        create_rtsp_table(&engine, "people_stream", &video.to_string_lossy());
         let session = engine.session().build().unwrap();
         session
             .run_script(

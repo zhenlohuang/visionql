@@ -6,7 +6,7 @@ use arrow::array::{
     ArrayRef, Float64Array, Int32Array, Int64Array, StringArray, TimestampMillisecondArray,
     UInt64Array,
 };
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
@@ -25,36 +25,12 @@ use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 
 use crate::media::{FrameInfo, MediaRuntime, TimeRange, VideoMetadata};
-use crate::types::{ImageRef, ImageRefBuilder, image_field, make_locator};
+use crate::types::{ImageRef, ImageRefBuilder, make_locator};
 use crate::{ErrorCode, Result, VqlError};
 
 const BATCH_SIZE: usize = 1024;
 
-pub(crate) fn videos_schema(synthetic_event_time: bool) -> SchemaRef {
-    let mut ts = Field::new(
-        "ts",
-        DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-        false,
-    );
-    if synthetic_event_time {
-        ts = ts.with_metadata(std::collections::HashMap::from([(
-            "visionql.synthetic_event_time".to_owned(),
-            "true".to_owned(),
-        )]));
-    }
-    Arc::new(Schema::new(vec![
-        Field::new("uri", DataType::Utf8, false),
-        ts,
-        Field::new("pts_ms", DataType::Int64, false),
-        Field::new("frame_id", DataType::UInt64, false),
-        image_field("frame", false),
-        Field::new("duration", DataType::Float64, true),
-        Field::new("fps", DataType::Float64, true),
-        Field::new("width", DataType::Int32, true),
-        Field::new("height", DataType::Int32, true),
-        Field::new("codec", DataType::Utf8, true),
-    ]))
-}
+pub(crate) use vql_catalog::videos_schema;
 
 #[derive(Debug)]
 pub(crate) struct VideosTableProvider {

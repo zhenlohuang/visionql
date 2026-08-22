@@ -1,6 +1,6 @@
-use crate::types::{ImageRef, ImageRefBuilder, image_field, make_locator};
+use crate::types::{ImageRef, ImageRefBuilder, make_locator};
 use arrow::array::{ArrayRef, Int32Array, StringArray, TimestampMillisecondArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
@@ -23,19 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BATCH_SIZE: usize = 1024;
 
-pub(crate) fn images_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("uri", DataType::Utf8, false),
-        image_field("image", false),
-        Field::new("width", DataType::Int32, true),
-        Field::new("height", DataType::Int32, true),
-        Field::new(
-            "captured_at",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            true,
-        ),
-    ]))
-}
+pub(crate) use vql_catalog::images_schema;
 
 #[derive(Debug, Default)]
 pub(crate) struct ImagesScanMetrics {

@@ -1,6 +1,6 @@
 # VisionQL Proposals
 
-This directory contains focused designs for VisionQL features that can be developed and delivered independently but are not yet part of the current scope in [design.md](../design.md). The complete design for active work—including image and video tables, the model runtime, RTSP and windows, and Console/Kafka Sinks—remains in `design.md`. Product requirements are defined in [prd.md](../prd.md).
+This directory contains focused designs for VisionQL features that can be developed and delivered independently but are not yet part of the current scope in [design.md](../design.md). The complete design for active work—including provider Tables, the model runtime, RTSP, Kafka writes, and windows—remains in `design.md`. Product requirements are defined in [prd.md](../prd.md).
 
 ## Index
 
@@ -8,7 +8,7 @@ This directory contains focused designs for VisionQL features that can be develo
 |---|---|---|---|---|
 | [2026-08-05](./2026-08-05-workbench.md) | Workbench | Draft | v0.2 | Multimodal SQL client for editing, result and live preview, catalog browsing, and job operations |
 | [2026-08-06](./2026-08-06-vqld-service.md) | vqld Service | Draft | v0.2 | Public Flight SQL contract, media protocol, durable jobs, checkpoints, and recovery |
-| [2026-08-06](./2026-08-06-parquet-sink.md) | Parquet Sink | Draft | v0.3 | Persist results through bounded appends and streaming rolling files |
+| [2026-08-06](./2026-08-06-parquet-sink.md) | Parquet Table Writes | Draft | v0.3 | Persist results through bounded appends and streaming rolling files |
 | [2026-08-07](./2026-08-07-cross-modal-retrieval.md) | Cross-modal Retrieval with Lance | Draft | v0.3 | Typed image/text embedding, vector Top-K, HNSW, and Lance storage |
 
 ## Planned but Not Yet Proposed

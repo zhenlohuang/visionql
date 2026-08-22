@@ -22,7 +22,7 @@ use datafusion::physical_expr::expressions::Column as PhysicalColumn;
 use crate::types::is_image_storage;
 use crate::{ErrorCode, Result, VqlError};
 
-const WINDOW_INPUT_NAME: &str = "__vql_tumble_output";
+const WINDOW_INPUT_NAME: &str = "__vql_window_output";
 const DEFAULT_TUMBLE_STATE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -517,7 +517,7 @@ impl TumbleState {
             vec![Vec::with_capacity(keys.len()); self.spec.aggregate_schema.fields().len()];
         for key in keys {
             let entry = self.windows.remove(&key).ok_or_else(|| {
-                VqlError::new(ErrorCode::Internal, "closed TUMBLE window disappeared")
+                VqlError::new(ErrorCode::Internal, "closed streaming window disappeared")
             })?;
             debug_assert!(entry.first_epoch_id <= entry.last_epoch_id);
             for (index, value) in key.groups.into_iter().enumerate() {
@@ -537,8 +537,11 @@ impl TumbleState {
         RecordBatch::try_new(Arc::clone(&self.spec.aggregate_schema), arrays)
             .map(Some)
             .map_err(|error| {
-                VqlError::new(ErrorCode::Internal, "failed to build closed TUMBLE windows")
-                    .with_source(error)
+                VqlError::new(
+                    ErrorCode::Internal,
+                    "failed to build closed streaming windows",
+                )
+                .with_source(error)
             })
     }
 

@@ -29,7 +29,7 @@ A table points at one dataset; `manifest.json` records the path as `table_locati
 
 ```sql
 CREATE TABLE photos USING IMAGES LOCATION './data/datasets/images/coco128/images/';
-CREATE TABLE clips  USING VIDEOS LOCATION './data/datasets/videos/sample-videos/' WITH (fps = 2);
+CREATE TABLE clips USING VIDEOS LOCATION './data/datasets/videos/sample-videos/' OPTIONS (fps = 2);
 ```
 
 Because modality comes first, a whole modality is also a valid table root — handy for a quick
@@ -37,7 +37,7 @@ sweep across every dataset at once:
 
 ```sql
 CREATE TABLE all_clips USING VIDEOS LOCATION './data/datasets/videos/'
-WITH (recursive = true, fps = 2);
+OPTIONS (recursive = true, fps = 2);
 ```
 
 Keep runtime state out of the dataset tree by exporting `VQL_HOME=./data/.vql` from the repository

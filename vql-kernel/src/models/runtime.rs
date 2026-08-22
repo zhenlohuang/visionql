@@ -21,7 +21,7 @@ use super::postprocess::{
 use super::registry::PipelineRegistry;
 use super::scheduler::{InferenceReservations, ModelScheduler};
 use crate::catalog::{
-    CatalogStore, ModelType, ResolvedExecutionSpec, ResolvedModelDef, TableProviderKind,
+    CatalogStore, ModelType, ResolvedExecutionSpec, ResolvedModelDef, TableProvider,
 };
 use crate::media::{DecodedFrame, MediaRuntime};
 use crate::resources::QueryBudget;
@@ -197,9 +197,9 @@ impl ModelRuntime {
         }
         let locator = parse_locator(locators.value(row))?;
         let table = self.catalog.table_at_revision(locator.table_revision)?;
-        let path = safe_path(&table.location, &locator.relative_path)?;
-        match table.provider {
-            TableProviderKind::Images => {
+        match &table.provider {
+            TableProvider::Images { location, .. } => {
+                let path = safe_path(location, &locator.relative_path)?;
                 let (width, height) = image::image_dimensions(&path).map_err(|error| {
                     VqlError::new(ErrorCode::Execution, "failed to inspect model IMAGE input")
                         .with_source(error)
@@ -211,7 +211,8 @@ impl ModelRuntime {
                 })?;
                 Ok((image, reservation))
             }
-            TableProviderKind::Videos => {
+            TableProvider::Videos { location, .. } => {
+                let path = safe_path(location, &locator.relative_path)?;
                 let metadata = self.media.probe(&path)?;
                 let width = u32::try_from(metadata.width).map_err(|_| {
                     VqlError::new(ErrorCode::Execution, "video width must be non-negative")
@@ -225,6 +226,12 @@ impl ModelRuntime {
                         .decode_frame(&path, locator.pts_ms.unwrap_or_default())?,
                 )?;
                 Ok((image, reservation))
+            }
+            TableProvider::Rtsp(_) | TableProvider::Kafka(_) | TableProvider::External { .. } => {
+                Err(VqlError::new(
+                    ErrorCode::Catalog,
+                    "model IMAGE locator references a table provider without local media",
+                ))
             }
         }
     }
@@ -368,7 +375,9 @@ impl ScalarUDFImpl for ImageDetection {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
-        Ok(ModelType::ObjectDetection.canonical_output_type())
+        Ok(crate::models::canonical_output_type(
+            ModelType::ObjectDetection,
+        ))
     }
 
     fn invoke_with_args(

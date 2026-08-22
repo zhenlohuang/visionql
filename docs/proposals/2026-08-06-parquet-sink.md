@@ -5,7 +5,7 @@ target_version: v0.3
 updated_at: 2026-08-15
 ---
 
-# Parquet Sink
+# Parquet Table Writes
 
 ## Summary
 
@@ -13,7 +13,7 @@ The v0.3 persisted-results feature writes query output to Parquet files, includi
 
 ## Motivation and Scope
 
-This proposal covers Parquet write behavior and restoration of logical types when data is read back. The public `CREATE SINK` contract is defined in [design.md](../design.md) §8.4. Lance persistence ships with v0.3 cross-modal retrieval, as described in the [Cross-modal Retrieval proposal](./2026-08-07-cross-modal-retrieval.md).
+This proposal covers Parquet Table write behavior and restoration of logical types when data is read back. Provider-table write semantics extend the contract in [design.md](../design.md) §8.4. Lance persistence ships with v0.3 cross-modal retrieval, as described in the [Cross-modal Retrieval proposal](./2026-08-07-cross-modal-retrieval.md).
 
 ## Detailed Design
 
@@ -24,7 +24,7 @@ This proposal covers Parquet write behavior and restoration of logical types whe
 
 ## Relationship to the System Design
 
-- Follow the public Sink contract in [design.md](../design.md) §8.4, including registration, validation, cancellation, timeout, bounded buffering, and coordinator-owned retries.
+- Follow the public writable-Table contract in [design.md](../design.md) §8.4, including registration, validation, cancellation, timeout, bounded buffering, and coordinator-owned retries.
 - Follow the `IMAGE` payload invariants in [design.md](../design.md) §6.2: `buffer_id` and `buffer_slot` must never be persisted.
 - Restore logical types according to the Arrow extension-type contract in [design.md](../design.md) §6.1.
 

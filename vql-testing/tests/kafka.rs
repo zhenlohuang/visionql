@@ -64,12 +64,12 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         session
             .sql(&format!(
-                "CREATE SINK events TYPE KAFKA WITH (\
-                 bootstrap_servers='{}', topic='{topic}', \
-                 delivery_timeout_ms=15000, buffer_capacity=2)",
+                "CREATE TABLE events USING KAFKA OPTIONS (\
+                 bootstrap_servers = '{}', topic = '{topic}', \
+                 delivery_timeout_ms = 15000, buffer_capacity = 2)",
                 escape_sql_literal(bootstrap_servers)
             ))
-            .map_err(|error| format!("create Kafka Sink: {error}"))?;
+            .map_err(|error| format!("create Kafka table: {error}"))?;
         let statement = session
             .sql(
                 "INSERT INTO events \
@@ -77,10 +77,10 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
                  (CAST(42 AS BIGINT), CAST(NULL AS VARCHAR)), \
                  (CAST(7 AS BIGINT), 'seven')) AS rows(answer, note)",
             )
-            .map_err(|error| format!("plan Kafka Sink query: {error}"))?;
+            .map_err(|error| format!("plan Kafka table write: {error}"))?;
         let batches = statement
             .collect()
-            .map_err(|error| format!("publish Kafka Sink query: {error}"))?;
+            .map_err(|error| format!("publish Kafka table write: {error}"))?;
         let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
         if rows != 2 {
             return Err(format!("expected 2 acknowledged query rows, found {rows}"));

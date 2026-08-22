@@ -72,7 +72,7 @@ Then run a query against the downloaded COCO sample:
 CREATE TABLE sample_images
 USING IMAGES
 LOCATION './data/datasets/images/coco128/images'
-WITH (recursive = true);
+OPTIONS (recursive = true);
 
 SELECT uri, width, height
 FROM sample_images
@@ -144,12 +144,13 @@ Set `HF_TOKEN` when resolving a private Hugging Face bundle. Credentials are pro
 The v0.1 streaming path registers one live camera and runs an attached query until the client cancels it. FFmpeg decodes on a controlled worker, sampling uses event time, watermarks advance outside data rows, and disconnects retry with exponential backoff.
 
 ```sql
-CREATE STREAM cam_entrance
-FROM 'rtsp://10.0.0.15:554/main'
-WITH (
+CREATE TABLE cam_entrance
+USING RTSP
+OPTIONS (
+  url = 'rtsp://10.0.0.15:554/main',
   fps = 5,
   event_time = 'capture_time',
-  watermark = INTERVAL '2' SECOND,
+  watermark = '2 seconds',
   transport = 'tcp'
 );
 
@@ -164,9 +165,9 @@ FROM cam_entrance
 GROUP BY 1;
 ```
 
-The shell and `vql run` print unbounded results incrementally. The first Ctrl-C stops source intake, drains admitted epochs, and flushes the attached Sink; press Ctrl-C again while that shutdown is in progress to cancel immediately. An unbounded statement must be last in a `vql run` script so stopping it cannot start later SQL. `Projection`, `Filter`, `UNNEST`, scalar functions, typed inference, and one `TUMBLE` aggregate are accepted. Streaming windows support `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`; they close only after the watermark reaches the window end. `DISTINCT`, media-valued state, and unsupported unbounded plan shapes are rejected during planning. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
+The shell and `vql run` print unbounded results incrementally. The first Ctrl-C stops source intake, drains admitted epochs, and flushes an attached table write; press Ctrl-C again while that shutdown is in progress to cancel immediately. An unbounded statement must be last in a `vql run` script so stopping it cannot start later SQL. `Projection`, `Filter`, `UNNEST`, scalar functions, typed inference, and one `TUMBLE` aggregate are accepted. Streaming windows support `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`; they close only after the watermark reaches the window end. `DISTINCT`, media-valued state, and unsupported unbounded plan shapes are rejected during planning. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
 
-Kafka Sink authentication is configured with an opaque `credential_ref`; embedding hosts install a `SecretProvider` on `EngineConfig`, and resolved credentials never enter the Catalog or SQL text. `KafkaAuthentication` and `KafkaTlsConfig` are VisionQL-owned public types supporting TLS/mTLS, SASL/PLAIN, SCRAM-SHA-256/512, and static OAUTHBEARER tokens without exposing the internal Kafka client. The repository's local Compose profile uses plaintext Kafka and does not require a reference.
+Kafka output is a writable table declared with `CREATE TABLE ... USING KAFKA`. Authentication uses an opaque `credential_ref`; embedding hosts install a `SecretProvider` on `EngineConfig`, and resolved credentials never enter the Catalog or SQL text. `KafkaAuthentication` and `KafkaTlsConfig` are VisionQL-owned public types supporting TLS/mTLS, SASL/PLAIN, SCRAM-SHA-256/512, and static OAUTHBEARER tokens without exposing the internal Kafka client. The repository's local Compose profile uses plaintext Kafka and does not require a reference.
 
 ## Python API
 
@@ -209,7 +210,7 @@ vql shell
 vql run <script.sql>
 ```
 
-SQL `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Sink placement without opening sources or probing models and services. Run it through the shell or a SQL script like any other statement. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG_LEVEL=debug` when diagnosing execution.
+SQL `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Table-write placement without opening sources or probing models and services. Run it through the shell or a SQL script like any other statement. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG_LEVEL=debug` when diagnosing execution.
 
 In `vql shell`, enter `\q` on its own line or press Ctrl-D to exit. Ctrl-C clears pending input at the prompt; during an unbounded query, the first Ctrl-C requests a graceful stop and the second cancels immediately.
 
@@ -224,9 +225,9 @@ version = 1
 level = "info"
 
 [catalog]
-backend = "embedded"
+backend = "sqlite"
 
-[catalog.embedded]
+[catalog.sqlite]
 path = "catalog/vql.db"
 
 [kernel.session]
@@ -238,28 +239,30 @@ Relative paths are resolved from `VQL_HOME`. Configuration is strict: an unsuppo
 | State or setting | Default and behavior |
 |---|---|
 | Configuration | `$VQL_HOME/config.toml`; optional, schema `version = 1` |
-| Catalog | Embedded backend at `$VQL_HOME/catalog/vql.db`; Python and Rust hosts may explicitly override the path |
+| Catalog | SQLite backend at `$VQL_HOME/catalog/vql.db`; Python and Rust hosts may explicitly override the path |
 | Shell history | `$VQL_HOME/history` |
 | Model cache | `$VQL_HOME/cache/models/`; local `file://` models stay at their source path |
 | Session memory | 512 MiB shared by every query and retained result in one Session; Python may override it with `connect(session_memory_limit_bytes=...)` |
 | `HF_TOKEN` | Authenticates private `hf://` downloads |
 | `VQL_LOG_LEVEL` | Overrides `log.level`; accepts `error`, `warn`, `info`, `debug`, or `trace` |
 
-An explicit host-side Catalog override changes only the embedded Catalog path; configuration, shell history, and the model cache remain under the same `VQL_HOME`.
+An explicit host-side Catalog override changes only the SQLite Catalog path; configuration, shell history, and the model cache remain under the same `VQL_HOME`.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     HOSTS["CLI / Python"] --> API["Engine / Session"]
-    API --> FRONTEND["VQL SQL + Catalog"]
+    API --> FRONTEND["VQL SQL"]
+    FRONTEND --> CATALOG["vql-catalog / vql.default"]
+    CATALOG --> FRONTEND
     FRONTEND --> PLAN["Planner + DataFusion"]
     PLAN --> RUNTIME["Media + Model Runtimes"]
     RUNTIME --> ARROW["Arrow RecordBatches"]
     ARROW --> HOSTS
 ```
 
-The CLI and Python hosts share `vql-kernel`, which owns SQL planning, Catalog definition snapshots, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. For design rationale—including lazy media decoding, optimizer-visible inference, and the batch/stream boundary—read the [system design](docs/design.md).
+The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. The separate `vql-catalog` crate owns catalog domains, definition snapshots, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface. SQL resolves unqualified names in `vql.default`. See the [Catalog design](docs/catalog.md) and [system design](docs/design.md).
 
 ## Documentation
 
@@ -268,6 +271,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, Catalog de
 | [Examples](examples/README.md) | End-to-end SQL, Python, and notebook workflows |
 | [Product requirements](docs/prd.md) | Product value, public semantics, and version scope |
 | [System design](docs/design.md) | Engine architecture, contracts, and extension boundaries |
+| [Catalog design](docs/catalog.md) | Unity Catalog API boundary, namespaces, providers, and backends |
 | [Roadmap](ROADMAP.md) | Delivered and planned capabilities by version |
 | [Proposals](docs/proposals/README.md) | Focused designs for later features |
 | [Integration tests](vql-testing/README.md) | Sqllogictest cases, fixtures, and Compose services |

@@ -104,15 +104,25 @@ impl From<std::io::Error> for VqlError {
     }
 }
 
-impl From<rusqlite::Error> for VqlError {
-    fn from(source: rusqlite::Error) -> Self {
+impl From<serde_json::Error> for VqlError {
+    fn from(source: serde_json::Error) -> Self {
         Self::new(ErrorCode::Catalog, source.to_string()).with_source(source)
     }
 }
 
-impl From<serde_json::Error> for VqlError {
-    fn from(source: serde_json::Error) -> Self {
-        Self::new(ErrorCode::Catalog, source.to_string()).with_source(source)
+impl From<vql_catalog::CatalogError> for VqlError {
+    fn from(source: vql_catalog::CatalogError) -> Self {
+        let code = match source.code {
+            vql_catalog::CatalogErrorCode::AlreadyExists => ErrorCode::AlreadyExists,
+            vql_catalog::CatalogErrorCode::NotFound => ErrorCode::NotFound,
+            vql_catalog::CatalogErrorCode::InvalidArgument => ErrorCode::InvalidOption,
+            vql_catalog::CatalogErrorCode::Conflict | vql_catalog::CatalogErrorCode::Storage => {
+                ErrorCode::Catalog
+            }
+            vql_catalog::CatalogErrorCode::Internal => ErrorCode::Internal,
+        };
+        let message = source.message.clone();
+        Self::new(code, message).with_source(source)
     }
 }
 

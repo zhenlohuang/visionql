@@ -20,7 +20,7 @@ The architecture must satisfy five goals:
 
 ### 1.2 Covered Capabilities
 
-This document is the v0.1 design baseline. It covers local image and video directory tables, SQL model inference, RTSP with `TUMBLE`, Console and Kafka Sinks, and CLI and Python hosts. The [PRD](./prd.md) and [Roadmap](../ROADMAP.md) define complete scope and delivery order. Capabilities for v0.2 and later that have a concrete design live under [proposals/](./proposals/README.md); unscheduled ideas are deliberately left undesigned.
+This document is the v0.1 design baseline. It covers local image and video directory tables, RTSP and Kafka provider tables, SQL model inference, `TUMBLE`, and CLI and Python hosts. The [Catalog design](./catalog.md), [PRD](./prd.md), and [Roadmap](../ROADMAP.md) define the public boundaries and delivery order.
 
 Syntax that belongs to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, name the target release or state that it is unscheduled, and avoid creating an unusable Catalog object. Section 7.1 defines statement-level behavior.
 
@@ -41,7 +41,7 @@ The product non-goals are in PRD Section 4. This design also excludes the follow
 | Continuous query | A long-running query with at least one unbounded source |
 | Epoch | A short interval of source output represented by RecordBatches plus the matching watermark, source progress, and resource lease |
 | Data fragment | A bounded DataFusion plan executed for one epoch; it contains no watermark or progress messages |
-| Job coordinator | The streaming runtime component that sequences epochs, window state, and Sink acknowledgements |
+| Job coordinator | The streaming runtime component that sequences epochs, window state, and writable-table acknowledgements |
 | Media reference | Logical coordinates for an image or video frame; it contains no decoded pixels |
 | Frame buffer | A buffer of decoded frames valid only within one process and one epoch |
 | Query definition snapshot | The immutable Catalog definitions and resolved execution specifications captured while a query is planned; it is process-local in v0.1 |
@@ -59,12 +59,12 @@ The product non-goals are in PRD Section 4. This design also excludes the follow
 | G5 | Streaming has event time and honest delivery semantics | Watermarks, source offsets, and frame leases live in the epoch control plane, not in rows that a Filter could discard. |
 | G6 | One bad row does not stop a query by default | Decode or inference failure keeps the input row, writes NULL to the affected result, and records a structured error metric. Strict mode fails the query. |
 | G7 | Results remain consumable by the Arrow ecosystem | Multimodal values use standard Arrow storage types with extension metadata. Process-local memory never crosses a process boundary, and clients that do not recognize the extension can still read its storage type. |
-| G8 | Future features do not distort the mainline | Model types, PreProcessors, Runtimes, PostProcessors, sources, Sinks, and logical nodes extend through narrow traits or registries. Unsupported features fail explicitly. |
+| G8 | Future features do not distort the mainline | Model types, PreProcessors, Runtimes, PostProcessors, table providers, and logical nodes extend through narrow traits or registries. Unsupported features fail explicitly. |
 
 Three implementation rules follow:
 
 1. Reduce work before optimizing individual operations: column pruning, time pruning, explicit sampling, inference deduplication, batch inference, then hardware specialization.
-2. Media, inference, window, and Sink buffers are bounded and charged to the query budget. An unbounded queue is a correctness defect.
+2. Media, inference, window, and table-write buffers are bounded and charged to the query budget. An unbounded queue is a correctness defect.
 3. Reject parameters the implementation does not consume; never preserve them silently.
 
 ---
@@ -97,7 +97,7 @@ flowchart TB
     subgraph RUNTIME["Runtime services"]
         MEDIA["Media read / decode / frame buffer"]
         MODELS["Model load / batching / inference"]
-        CONNECTORS["Table, Stream, and Sink connectors"]
+        CONNECTORS["Table provider connectors"]
         BUDGET["Memory and resource budgets"]
         METRICS["Metrics and structured logs"]
     end
@@ -126,10 +126,10 @@ flowchart TB
 | Catalog | Transactional persistence of current definitions, internal generations, schemas, and resolved Model specifications | Video bytes, model weights, plaintext credentials, or durable jobs |
 | Planner | Definition snapshots, type checks, DataFusion logical planning, typed inference extraction, streamability checks, and `TumblePlan` extraction | GPU placement or model loading |
 | DataFusion physical planner | Lowering a bounded logical plan, including VisionQL extension nodes, to an `ExecutionPlan` | Watermarks, source progress, or restart recovery |
-| Job coordinator | Driving epochs in order; advancing control state; cancellation; Sink acknowledgement | Interpreting SQL expressions |
+| Job coordinator | Driving epochs in order; advancing control state; cancellation; writable-table acknowledgement | Interpreting SQL expressions |
 | Media runtime | Probe, read, decode, sample, frame buffer, and encode | Model preprocessing or post-processing |
 | Model runtime | Artifact resolution, PreProcessor/Runtime/PostProcessor registries, sessions, bounded scheduling, and inference | SQL semantics or Catalog authorization |
-| Connectors | Reading images, video, and RTSP; writing Console and Kafka | Rewriting query plans |
+| Connectors | Reading image, video, and RTSP tables; writing Kafka tables | Rewriting query plans |
 
 ### 3.3 Batch and Streaming Paths
 
@@ -149,23 +149,23 @@ flowchart TB
 
 ### 4.1 DataFusion Logical Plan and VQL Metadata
 
-Standard relational work uses DataFusion `LogicalPlan` nodes. VisionQL adds an extension node only when model or Sink semantics cannot be represented faithfully by a standard node.
+Standard relational work uses DataFusion `LogicalPlan` nodes. VisionQL adds an extension node only when model inference or a provider-specific table write cannot be represented faithfully by a standard node.
 
 | Extension node | Logical behavior | Physical implementation |
 |---|---|---|
 | `Inference` | Append a model result column to an input relation | `InferenceExec` (Section 10) |
-| `SinkWrite` | Write a relation to a Catalog Sink | `SinkExec` or streaming Sink driver |
+| `SinkWrite` | Internal write node for a writable Catalog Table | `SinkExec` or streaming Kafka writer |
 
 A video table expands into frames inside the `USING VIDEOS` scan at the fps declared by the table. It is not a separate logical node or table-valued function.
 
-`TUMBLE` remains an ordinary DataFusion time-bucket expression plus `Aggregate`. For a continuous query, planning extracts the aggregate's inputs and output template into a side `TumblePlan`; it does not add a `TumbleAggregate` extension node.
+`TUMBLE` is a VisionQL time-bucket UDF represented as an ordinary scalar expression plus a DataFusion `Aggregate`. For a continuous query, planning extracts the aggregate's inputs and output template into a side `TumblePlan`; it does not add a `TumbleAggregate` extension node.
 
 The planned statement keeps the DataFusion plan together with only the metadata required by attached execution:
 
 ```text
 PlannedStatement {
   dataframe: DataFrame,
-  stream: Option<{ name, skip, fetch }>,
+  source_table: Option<{ name, skip, fetch }>,
   tumble: Option<TumblePlan>,
 }
 ```
@@ -181,7 +181,7 @@ SQL
   → inference extraction and common-expression elimination
   → column, predicate, and explicit-sampling pushdown
   → streamability validation
-  → optional Stream and TumblePlan metadata
+  → optional unbounded-source and TumblePlan metadata
   → bounded execution or attached epoch execution
 ```
 
@@ -189,7 +189,7 @@ Planning reads only the Catalog and lightweight metadata. Object listing, model 
 
 ### 4.3 Immutable Query Definition Snapshot
 
-Planning opens one Catalog transaction and constructs a `DefinitionSnapshot` containing the current Tables, Streams, Models, Functions, and Sinks. A query-specific DataFusion session is then populated from that snapshot. Resolved Model specifications are copied into `Inference` nodes, while the selected Stream and Sink specifications are copied into the attached result handle or Sink target.
+Planning opens one Catalog transaction and constructs a `DefinitionSnapshot` containing the current Tables, Models, and Functions in `vql.default`. RTSP and Kafka definitions are Tables with provider capabilities. A query-specific DataFusion session is populated from that snapshot. Resolved Model specifications are copied into `Inference` nodes, while selected provider configurations are copied into the attached result handle or internal write target.
 
 The planned `DataFrame` and those copied specifications are the v0.1 execution source of truth. Replacing or dropping a Catalog definition affects newly planned queries but does not replan a running query. Internal table generations remain available for media locators, but v0.1 has no public revision lifecycle, durable query identity, Manifest store, lease manager, or Manifest garbage collector.
 
@@ -201,11 +201,11 @@ VisionQL validates unbounded plans against an allowlist instead of assuming an a
 
 Allowed shapes:
 
-- one RTSP source;
+- one RTSP provider table;
 - Projection, Filter, `UNNEST`, built-in scalar functions, and `Inference`;
 - at most one `TUMBLE` aggregate;
-- a stateless SELECT preview or one Sink;
-- Projection, Filter, and Sink after the window.
+- a stateless SELECT preview or one Kafka table write;
+- Projection, Filter, and one table write after the window.
 
 Rejected shapes:
 
@@ -248,7 +248,7 @@ sequenceDiagram
     participant C as Job coordinator
     participant D as DataFusion fragment
     participant W as TUMBLE state
-    participant K as Sink
+    participant K as Table writer
 
     S->>C: StreamEpoch(data, progress, watermark, frame lease)
     C->>D: bind epoch batches and run bounded fragment
@@ -266,8 +266,8 @@ The sequence is strict:
 
 1. Epochs from one source are applied serially by `epoch_id`; decode, preprocessing, and inference may still run in parallel within the data fragment.
 2. The coordinator passes a watermark to stateful operators only after every output for that epoch has completed.
-3. An epoch completes only after state updates and all newly closed-window writes have been acknowledged by the Sink.
-4. Cancellation stops the active DataFusion stream, model requests, and Sink requests before releasing the frame lease.
+3. An epoch completes only after state updates and all newly closed-window writes have been acknowledged by the Table writer.
+4. Cancellation stops the active DataFusion stream, model requests, and Table writes before releasing the frame lease.
 5. This design has one source and one partition, so it does not merge watermark frontiers.
 
 The coordinator retains the planned DataFusion logical template, not a compiled `ExecutionPlan` or a separate epoch-plan abstraction. For each epoch it:
@@ -276,13 +276,13 @@ The coordinator retains the planned DataFusion logical template, not a compiled 
 2. calls DataFusion execution on the rebound `DataFrame`, which builds a fresh physical tree;
 3. drains the bounded fragment before advancing the watermark;
 4. for `TUMBLE`, applies projected aggregate inputs to process-local `TumbleState`, then binds closed-window rows into the planned output template;
-5. waits for output or Sink acknowledgement before releasing the frame lease.
+5. waits for output or writable-table acknowledgement before releasing the frame lease.
 
 Stateful window data and the epoch control plane remain outside DataFusion. No `EpochPlanTemplate`, `EpochInputExec`, `reset_state`, or physical-plan reuse API is required in v0.1.
 
 ### 5.3 Backpressure and Frame Loss
 
-Backpressure travels upstream from `Sink → state → data fragment → source buffer`. Every buffer has a hard capacity.
+Backpressure travels upstream from `Table writer → state → data fragment → source buffer`. Every buffer has a hard capacity.
 
 - Replayable sources wait when capacity is unavailable.
 - When the RTSP source-to-coordinator queue is full, sampled frames that have not entered an epoch may be dropped and recorded as `source_overrun` with their count and range.
@@ -393,7 +393,7 @@ Batch video normally fuses read, decode, and preprocessing inside `InferenceExec
 VQL reuses the sqlparser-rs tokenizer and DataFusion SQL AST, with a dedicated parser only for VisionQL extensions:
 
 1. Split a complete script while respecting strings, comments, and quoted identifiers.
-2. Send `CREATE STREAM/MODEL/SINK` and VisionQL operational statements to the VQL DDL parser.
+2. Send provider-table DDL, `CREATE MODEL`, `RESOLVE MODEL`, and VisionQL operational statements to the VQL DDL parser.
 3. Send SELECT, INSERT, standard DDL, and `CREATE FUNCTION` through the DataFusion-supported grammar. A VisionQL `FunctionFactory` validates and persists supported Function definitions.
 4. Normalize constructs such as `.center`, `TUMBLE`, and typed inference markers at the AST or logical-plan layer.
 5. Pass normalized relational expressions to the DataFusion planner interface.
@@ -402,13 +402,12 @@ Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs 
 
 | Statement | Behavior |
 |---|---|
-| `CREATE TABLE ... USING IMAGES/VIDEOS` | Create an external image or video table (Section 8.2) |
-| `CREATE STREAM ... FROM 'rtsp://...'` | Create one RTSP stream (Section 8.3) |
+| `CREATE TABLE ... USING IMAGES/VIDEOS/RTSP` | Create a readable provider table (Sections 8.2–8.3) |
+| `CREATE TABLE ... USING KAFKA` | Create a writable Kafka table (Section 8.4) |
 | `CREATE MODEL ... TYPE ... FROM ... USING ... WITH (...)` | Store one unresolved typed Model declaration without network I/O |
 | `RESOLVE MODEL <name>` | Download/cache an artifact or validate a service and persist its resolved execution contract |
 | `CREATE FUNCTION ... RETURN <expression>` | Create a DataFusion-backed SQL expression function |
 | `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` | Create a batched Python function; executable only from a Python host |
-| `CREATE SINK ...` | Create a Console or Kafka Sink |
 
 `DROP`, `SHOW`, `DESCRIBE`, and `SHOW CREATE` use the same VQL DDL path. `SHOW CREATE` must be sanitized and parseable. Statements outside Section 1.2 fail without registering placeholders.
 
@@ -426,25 +425,23 @@ $VQL_HOME/
     └── models/
 ```
 
-`config.toml` is optional and uses schema `version = 1`. It selects the `embedded` Catalog backend and its path, the default Session memory limit, and the process log level. Relative paths resolve from `VQL_HOME`; unknown versions, backends, sections, fields, levels, and memory units fail startup. `VQL_LOG_LEVEL` overrides only the configured log level. Explicit Rust or Python host configuration may override the embedded Catalog path or Session memory limit; history and cache remain under `VQL_HOME`. Datasets are not runtime state: repository examples use `./data/datasets/`, while every real table points to an arbitrary user-selected `LOCATION`.
+`config.toml` is optional and uses configuration schema `version = 1`. It selects the `sqlite` Catalog backend and its path, the default Session memory limit, and the process log level. Relative paths resolve from `VQL_HOME`; unknown versions, backends, sections, fields, levels, and memory units fail startup. `VQL_LOG_LEVEL` overrides only the configured log level. Explicit Rust or Python host configuration may override the SQLite path or Session memory limit; history and cache remain under `VQL_HOME`.
 
-The `embedded` Catalog backend is currently backed by SQLite and defaults to exactly `$VQL_HOME/catalog/vql.db`. A future backend receives its own `[catalog.<backend>]` table rather than overloading embedded settings.
+`vql-catalog` owns the catalog domain and backend port. SQLite is the current implementation and defaults to exactly `$VQL_HOME/catalog/vql.db`; MySQL and PostgreSQL can implement the same `CatalogBackend` port later. SQL uses `vql.default` implicitly, while the UC-compatible API uses fully qualified identities. See [catalog.md](./catalog.md).
 
 | Object | Stored definition |
 |---|---|
-| Table | Provider, location, options, Arrow schema, internal generation, credential reference |
-| Stream | Connector, sanitized endpoint, fps, event-time policy, watermark, internal generation |
+| Table | Provider, capabilities, location or sanitized endpoint, options, Arrow schema, internal revision, credential reference |
 | Model | Type, raw `FROM` location, selected Runtime and Runtime-scoped `WITH` options; optional resolved source/hash, execution mode, canonical schemas, and determinism |
 | Function | DataFusion signature, normalized SQL expression or Python entry point, volatility, implementation digest |
-| Sink | Connector, format, options, credential reference |
 
 Catalog constraints:
 
 - Every DDL statement commits in one SQLite transaction. Model and Function definitions are independent Catalog objects.
-- Internal foreign keys and generations support consistent snapshot reads but are never exposed as a public revision API.
+- Internal foreign keys and revisions support consistent snapshot reads but are never exposed as a public revision API.
 - A typed inference call is query syntax, not a Function object. Its constant Model name is resolved from the query definition snapshot.
-- Table, Stream, and View share the relation namespace. Model, Function, and Sink each have their own namespace. Section 7.1 defines unquoted-name identity.
-- Schemas use Arrow IPC. The Catalog stores its format version and migration history.
+- All relation providers share the Table namespace. Model and Function each have their own namespace. Section 7.1 defines unquoted-name identity.
+- Schemas use Arrow IPC. Because v0.1 is unreleased, SQLite creates the current schema directly and has no legacy migration chain.
 - Passwords, tokens, S3 secrets, and signed URLs are never stored; only secret references are allowed.
 - `DROP` prevents new planning. Table generations referenced by media locators are retained; a newly attempted media read still reauthorizes against the current Catalog state.
 
@@ -524,7 +521,7 @@ Model inference does not use `FunctionFactory`, `ScalarUDF`, or `AsyncUDF`. A SQ
 | VQL form | Normalized plan form |
 |---|---|
 | `box.center` | `BOX_CENTER(box)` |
-| `TUMBLE(ts, interval)` | Ordinary time-bucket expression and DataFusion Aggregate; continuous planning also extracts a side `TumblePlan` |
+| `TUMBLE(ts, interval)` | VisionQL time-bucket scalar expression and DataFusion Aggregate; continuous planning also extracts a side `TumblePlan` |
 | `FROM t, UNNEST(expr)` | Native DataFusion unnest node; the only row-expansion mechanism |
 | `CREATE ...` | Catalog or runtime operation, absent from the relational plan |
 
@@ -548,9 +545,9 @@ VisionQL built-ins use SQL NULL propagation.
 
 ---
 
-## 8. Sources and Sinks
+## 8. Table Providers
 
-Data ingress and egress use narrow connector traits: providers read Tables and Streams; Sinks write rows.
+Data ingress and egress use narrow connector traits: readable providers scan Tables and writable providers accept rows.
 
 ### 8.1 Minimum Schemas
 
@@ -558,7 +555,7 @@ Data ingress and egress use narrow connector traits: providers read Tables and S
 |---|---|
 | IMAGES | `uri STRING, image IMAGE, width INT, height INT, captured_at TIMESTAMP` |
 | VIDEOS frame table | `uri STRING, ts TIMESTAMP, pts_ms BIGINT, frame_id BIGINT, frame IMAGE, duration DOUBLE, fps DOUBLE, width INT, height INT, codec STRING` |
-| RTSP Stream | `ts TIMESTAMP NOT NULL, frame IMAGE, frame_id BIGINT, source STRING` |
+| RTSP Table | `ts TIMESTAMP NOT NULL, frame IMAGE, frame_id BIGINT, source STRING` |
 
 Unreadable optional metadata becomes NULL. `uri`, media values, and RTSP `ts/frame_id/source` are non-null. Provider options may append partition columns but cannot change the meaning of base columns.
 
@@ -583,9 +580,9 @@ Video expansion rules:
 - The media runtime chooses sequential decode or sparse seek from sample ratio, GOP, and storage capability. Sparse-seek throughput is not a promise until validated by a PoC.
 - A metadata-only query creates frame coordinates but does not read pixels.
 
-### 8.3 RTSP Source
+### 8.3 RTSP Table
 
-`CREATE STREAM ... FROM 'rtsp://...'` creates one RTSP stream. RTSP is non-replayable, so delivery is best-effort; frames lost to a crash, drop, or pause cannot be recovered.
+`CREATE TABLE ... USING RTSP OPTIONS (...)` creates one readable, unbounded Table. RTSP is non-replayable, so delivery is best-effort; frames lost to a crash, drop, or pause cannot be recovered. The UC boundary reports it as an `EXTERNAL` table with explicit VisionQL capability properties, not as a UC-managed `STREAMING_TABLE`.
 
 Ingestion:
 
@@ -603,28 +600,23 @@ Event time and reconnect behavior:
 - Reconnect with exponential backoff from 1s to 30s. Freeze the watermark during the outage; never invent progress from local wall time.
 - Reconnected ingest time preserves the real outage gap and may close windows without fabricating rows. The attached query keeps retrying until cancellation or an unrecoverable error; an outage alone does not emit the final open window.
 
-### 8.4 Common Sink Contract
-
-| Sink | Behavior |
-|---|---|
-| Console | Available only to `vql shell` and foreground `vql run`; prints an `IMAGE` summary, never pixels |
-| Kafka | JSON contract in Section 8.5 |
-
-`CREATE SINK` stores connection metadata. The first `INSERT INTO` plan validates output schema and format. Every Sink supports cancellation, timeout, and a bounded buffer; the coordinator owns retry policy.
-
-### 8.5 Kafka Sink
+### 8.4 Kafka Table
 
 Declare the destination independently from the query:
 
 ```sql
-CREATE SINK people_per_minute TYPE KAFKA
-WITH (
-  bootstrap_servers='127.0.0.1:9092',
-  topic='people-per-minute',
-  format='json',
-  credential_ref='secret://kafka/producer',
-  delivery_timeout_ms=30000,
-  buffer_capacity=1024
+CREATE TABLE people_per_minute (
+  window_start TIMESTAMP,
+  people BIGINT
+)
+USING KAFKA
+OPTIONS (
+  bootstrap_servers = '127.0.0.1:9092',
+  topic = 'people-per-minute',
+  format = 'json',
+  credential_ref = 'secret://kafka/producer',
+  delivery_timeout_ms = 30000,
+  buffer_capacity = 1024
 );
 
 INSERT INTO people_per_minute
@@ -640,9 +632,9 @@ GROUP BY TUMBLE(ts, INTERVAL '1' MINUTE);
 | `format` | Optional, defaults to `json`; v0.1 rejects every other format. |
 | `credential_ref` | Optional opaque reference resolved by the host-supplied `SecretProvider` on the first write. The Catalog never stores the resolved authentication material. SASL/TLS details are supplied by the provider, not as DDL options. |
 | `delivery_timeout_ms` | Optional broker connection/request/delivery deadline; defaults to 30,000 and accepts 1–3,600,000. |
-| `buffer_capacity` | Optional global maximum number of in-flight row deliveries for one Sink query execution, across every DataFusion partition; defaults to 1,024 and accepts 1–100,000. Reaching it stops pulling upstream until a delivery completes. |
+| `buffer_capacity` | Optional global maximum number of in-flight row deliveries for one table-write execution, across every DataFusion partition; defaults to 1,024 and accepts 1–100,000. Reaching it stops pulling upstream until a delivery completes. |
 
-`CREATE SINK` only validates and stores metadata; it performs no network I/O. Planning the first `INSERT INTO` validates the query output schema. Execution resolves `credential_ref` through `EngineConfig::with_secret_provider`, connects lazily, emits one Kafka record per output row with no key, uses `acks=all`, and waits for every record in a batch to be acknowledged before that batch completes. A referenced Sink fails before connecting when the host did not install a provider or resolution fails. The producer is closed with the configured timeout when the foreground query finishes, fails, is cancelled, or its result stream is dropped. The v0.1 attached coordinator disables producer retries and fails the query on delivery failure or timeout. A batch can therefore be partially visible after an error or cancellation, and replay can duplicate rows; transactions and exactly-once delivery are outside this contract.
+`CREATE TABLE` only validates and stores metadata; it performs no network I/O. Planning `INSERT INTO` validates the query output against a declared schema when columns are present. Execution resolves `credential_ref` through `EngineConfig::with_secret_provider`, connects lazily, emits one Kafka record per output row with no key, uses `acks=all`, and waits for every record in a batch to be acknowledged before that batch completes. A referenced table fails before connecting when the host did not install a provider or resolution fails. The producer is closed with the configured timeout when the foreground query finishes, fails, is cancelled, or its result stream is dropped. The v0.1 attached coordinator disables producer retries and fails the query on delivery failure or timeout. A batch can therefore be partially visible after an error or cancellation, and replay can duplicate rows; transactions and exactly-once delivery are outside this contract.
 
 The transport uses `rust-rdkafka` with a statically built `librdkafka` and vendored OpenSSL. Public host integration remains client-neutral: `SecretProvider` returns VisionQL-owned `KafkaAuthentication` and `KafkaTlsConfig` values, which the connector translates into TLS/mTLS, SASL/PLAIN, SCRAM-SHA-256/512, or static OAUTHBEARER client configuration. The producer disables automatic topic creation, idempotence, and client retries to preserve the v0.1 contract; future transactional delivery can use librdkafka without changing the public authentication boundary.
 
@@ -653,7 +645,7 @@ The JSON value contract is:
 - Project a top-level `IMAGE` to `uri`, `locator`, `pts_ms`, `frame_id`, `encoding`, `width`, and `height`. Strip URI user information, query, and fragment. Never emit `encoded`, `buffer_id`, or `buffer_slot`.
 - Reject raw binary output and nested `IMAGE` values during planning; callers must make any intended binary representation explicit as text.
 
-These rules are fixed by exact wire-format tests. The globally bounded in-flight set propagates Kafka backpressure upstream, while cancellation interrupts connection and delivery waits. For an RTSP query, `OFFSET` and `LIMIT` are applied before the acknowledged Sink write, including closed `TUMBLE` output, so rows outside the visible query result are never published.
+These rules are fixed by exact wire-format tests. The globally bounded in-flight set propagates Kafka backpressure upstream, while cancellation interrupts connection and delivery waits. For an RTSP query, `OFFSET` and `LIMIT` are applied before the acknowledged Table write, including closed `TUMBLE` output, so rows outside the visible query result are never published.
 
 ---
 
@@ -879,7 +871,7 @@ Each Session receives one tracked host-memory budget. Every query, asynchronous 
 | Decoded frame buffer | Backpressure batch sources; for RTSP, drop only the oldest sampled frame before epoch admission |
 | Tensor buffers and inference queues | Bounded queues; submitters await capacity |
 | `TUMBLE` state | No spill; fail with guidance to reduce group-key cardinality or shorten the window |
-| Sink buffers | Apply backpressure; fail after timeout according to query policy |
+| Table-write buffers | Apply backpressure; fail after timeout according to query policy |
 
 Device memory is tracked separately when a Runtime can report it. Hosts expose an explicit unavailable state for Runtimes that provide no device allocator telemetry; they must not present an estimated zero as a measured value.
 
@@ -902,7 +894,7 @@ A benchmark records the measured rates, window latency, and frame-drop rate toge
 
 At minimum, expose:
 
-- query: input/output rows, epoch latency, end-to-end latency, error rows, late rows, state memory, and Sink retries;
+- query: input/output rows, epoch latency, end-to-end latency, error rows, late rows, state memory, and table-write retries;
 - media: input bitrate, decode fps, sampled fps, dropped frames by reason, disconnect count, and gap duration;
 - model: Runtime kind/protocol, batching owner, queue depth or remote concurrency, wait time, batch distribution, inference count, stage P50/P95, and device memory where available;
 - resources: current and peak value for every reservation.
@@ -938,10 +930,11 @@ Stable codes are separate from prose messages. Clients react to codes, never err
 ```text
 visionql/
 ├── Cargo.toml                    # root workspace
+├── vql-catalog/                  # domain objects, snapshots, backend ports, SQLite, UC API
 ├── vql-kernel/
 │   └── src/
-│       ├── catalog/              # definitions, snapshots, internal generations, SQLite
-│       ├── connectors/           # Tables, Streams, and Sinks
+│       ├── catalog/              # re-exported catalog contracts used by the kernel
+│       ├── connectors/           # RTSP and Kafka table-provider runtimes
 │       ├── functions/            # built-ins and typed inference markers
 │       ├── media/                # FFmpeg, image codecs, FrameBuffer
 │       ├── models/               # processors, runtimes, scheduler
@@ -957,19 +950,20 @@ visionql/
 └── docs/
 ```
 
-The current root workspace contains exactly these four crates. `vql-server` and Workbench are future v0.2 components described by proposals, not directories in the v0.1 tree.
+The current root workspace contains exactly these five crates. `vql-server` and Workbench are future v0.2 components described by proposals, not directories in the v0.1 tree.
 
 ```text
 vql-cli ─────┐
-vql-python ──┼──→ vql-kernel
+vql-python ──┼──→ vql-kernel ──→ vql-catalog
 vql-testing ─┘
 ```
 
-In v0.1, these remain internal `vql-kernel` modules, `pub(crate)` by default. Public API exposes only what a host needs: `Engine`, `Session`, configuration, results, and injection traits. Extract a crate only when an independent consumer or release cadence appears, a native dependency conflict cannot be handled through features, or measured compile-time improvements justify an ADR.
+`vql-catalog` is independently consumable by the embedded engine and the future service. Its public API exposes catalog domains, snapshots, `CatalogBackend`, `CatalogStore`, and UC wire adapters. `vql-kernel` keeps execution-oriented modules crate-private and exposes only what a host needs: `Engine`, `Session`, configuration, results, and injection traits.
 
 Boundary rules:
 
 - `vql-kernel` cannot depend on PyO3, clap, or Flight.
+- `vql-catalog` cannot depend on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior. Backend implementations sit behind `CatalogBackend`; HTTP is feature-gated.
 - `vql-cli` owns clap, terminal behavior, and signals. `vql-python` owns PyO3 and the Python UDF host. `vql-testing` owns shared SQL conformance and external-service fixtures.
 - `planner` currently co-locates logical extension nodes, their physical planners, and their executors. `stream` owns `StreamEpoch` and `TumbleState`; `session` owns attached epoch orchestration.
 - Media, models, and connectors are assembled behind crate-private boundaries and cannot depend on CLI or Python hosts.
@@ -990,7 +984,7 @@ Boundary rules:
 | ADR-006 | Extract type-owned inference calls into explicit `Inference` nodes | Enables asynchronous batching, deduplication, later cascades/caches, and cost measurement |
 | ADR-007 | Build one immutable definition snapshot per planned query | Prevents DDL from silently changing a running result without adding a durable Manifest subsystem to embedded v0.1 |
 | ADR-008 | Delivery follows source replayability; RTSP is best-effort | Makes no guarantee that the physical source cannot satisfy |
-| ADR-009 | Embedded Catalog backed by SQLite; runtime bytes stay outside it | Preserves zero-dependency startup with transactions and migration support while retaining a backend boundary |
+| ADR-009 | Extract `vql-catalog`; use SQLite first behind `CatalogBackend`; runtime bytes stay outside it | Preserves zero-service startup and makes MySQL/PostgreSQL backends possible without coupling metadata to execution |
 | ADR-011 | Rebind each epoch into the DataFusion logical template and build a fresh physical tree | Reuses DataFusion planning while preventing channel, state, and cancellation leakage without a custom plan-template API |
 | ADR-012 | Keep allowlisted normalized TUMBLE state in memory | Attached v0.1 needs bounded state but not a checkpoint format or restart-recovery ABI |
 | ADR-013 | Model `TYPE` owns the inference interface; user Functions reuse DataFusion's SQL/Python extension path | Keeps inference optimizer-visible and avoids duplicate ownership of model signatures and parameters |

@@ -8,7 +8,7 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 
-use crate::catalog::{CatalogStore, TableProviderKind};
+use crate::catalog::{CatalogStore, TableProvider};
 use crate::media::{DecodedFrame, MediaRuntime};
 use crate::resources::{QueryBudget, QueryReservation};
 use crate::types::{is_image_field, parse_locator};
@@ -141,9 +141,9 @@ impl ImageEncoder {
         }
         let locator = parse_locator(locators.value(row))?;
         let table = self.catalog.table_at_revision(locator.table_revision)?;
-        let path = resolved_media_path(&table.location, &locator.relative_path)?;
-        match table.provider {
-            TableProviderKind::Images => {
+        match &table.provider {
+            TableProvider::Images { location, .. } => {
+                let path = resolved_media_path(location, &locator.relative_path)?;
                 let (width, height) = image::image_dimensions(&path).map_err(|error| {
                     VqlError::new(
                         ErrorCode::Execution,
@@ -161,7 +161,8 @@ impl ImageEncoder {
                 })?;
                 Ok((image, reservation))
             }
-            TableProviderKind::Videos => {
+            TableProvider::Videos { location, .. } => {
+                let path = resolved_media_path(location, &locator.relative_path)?;
                 let metadata = self.media.probe(&path)?;
                 let width = u32::try_from(metadata.width).map_err(|_| {
                     VqlError::new(ErrorCode::Execution, "video width must be non-negative")
@@ -174,6 +175,12 @@ impl ImageEncoder {
                     .media
                     .decode_frame(&path, locator.pts_ms.unwrap_or_default())?;
                 Ok((decoded_image(frame)?, reservation))
+            }
+            TableProvider::Rtsp(_) | TableProvider::Kafka(_) | TableProvider::External { .. } => {
+                Err(VqlError::new(
+                    ErrorCode::Catalog,
+                    "IMAGE locator references a table provider without local media",
+                ))
             }
         }
     }

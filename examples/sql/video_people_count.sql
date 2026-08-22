@@ -1,7 +1,7 @@
 CREATE TABLE entrance_videos
 USING VIDEOS
 LOCATION './data/datasets/videos/sample-videos/'
-WITH (fps = 5);
+OPTIONS (fps = 5);
 
 CREATE MODEL yolo26n
 TYPE OBJECT_DETECTION
@@ -26,9 +26,6 @@ WITH (
 
 RESOLVE MODEL yolo26n;
 
-CREATE SINK console_output TYPE console;
-
-INSERT INTO console_output
 SELECT TUMBLE(ts, INTERVAL '1' MINUTE) AS window_start,
        AVG(person_cnt) AS avg_people,
        MAX(person_cnt) AS peak_people

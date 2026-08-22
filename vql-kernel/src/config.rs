@@ -77,7 +77,7 @@ struct LogConfig {
 #[serde(rename_all = "lowercase")]
 enum CatalogBackend {
     #[default]
-    Embedded,
+    Sqlite,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -86,17 +86,17 @@ struct CatalogConfig {
     #[serde(default)]
     backend: CatalogBackend,
     #[serde(default)]
-    embedded: EmbeddedCatalogConfig,
+    sqlite: SqliteCatalogConfig,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EmbeddedCatalogConfig {
+struct SqliteCatalogConfig {
     #[serde(default = "default_catalog_path")]
     path: PathBuf,
 }
 
-impl Default for EmbeddedCatalogConfig {
+impl Default for SqliteCatalogConfig {
     fn default() -> Self {
         Self {
             path: default_catalog_path(),
@@ -233,17 +233,17 @@ impl EngineConfig {
                 ));
             }
             match config.catalog.backend {
-                CatalogBackend::Embedded => {
-                    if config.catalog.embedded.path.as_os_str().is_empty() {
+                CatalogBackend::Sqlite => {
+                    if config.catalog.sqlite.path.as_os_str().is_empty() {
                         return Err(VqlError::new(
                             ErrorCode::InvalidOption,
-                            "catalog.embedded.path must not be empty",
+                            "catalog.sqlite.path must not be empty",
                         ));
                     }
-                    resolved.catalog_path = if config.catalog.embedded.path.is_absolute() {
-                        config.catalog.embedded.path
+                    resolved.catalog_path = if config.catalog.sqlite.path.is_absolute() {
+                        config.catalog.sqlite.path
                     } else {
-                        resolved.vql_home.join(config.catalog.embedded.path)
+                        resolved.vql_home.join(config.catalog.sqlite.path)
                     };
                 }
             }
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn config_file_resolves_embedded_catalog_and_session_memory() {
+    fn config_file_resolves_sqlite_catalog_and_session_memory() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join(CONFIG_FILE_NAME),
@@ -481,9 +481,9 @@ version = 1
 level = "debug"
 
 [catalog]
-backend = "embedded"
+backend = "sqlite"
 
-[catalog.embedded]
+[catalog.sqlite]
 path = "state/catalog.db"
 
 [kernel.session]
@@ -564,7 +564,7 @@ memory_limit = "768 MiB"
 
         assert_eq!(error.code, ErrorCode::InvalidOption);
         assert!(error.message.contains("unknown variant `postgresql`"));
-        assert!(error.message.contains("embedded"));
+        assert!(error.message.contains("sqlite"));
     }
 
     #[test]

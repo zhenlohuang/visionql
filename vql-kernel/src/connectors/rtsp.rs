@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 #[cfg(feature = "ffmpeg-native")]
 use arrow::array::{ArrayRef, Int64Array, StringArray, TimestampMillisecondArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 #[cfg(feature = "ffmpeg-native")]
 use arrow::record_batch::RecordBatchOptions;
@@ -23,14 +23,13 @@ use datafusion::physical_plan::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::catalog::StreamDef;
+use crate::catalog::RtspTableConfig;
 #[cfg(feature = "ffmpeg-native")]
 use crate::catalog::{EventTimePolicy, RtspTransport};
 #[cfg(feature = "ffmpeg-native")]
 use crate::media::DecodedFrame;
 use crate::media::{FrameBufferLease, MediaRuntime};
 use crate::resources::{QueryBudget, QueryReservation};
-use crate::types::image_field;
 #[cfg(feature = "ffmpeg-native")]
 use crate::types::{ImageRef, ImageRefBuilder};
 use crate::{ErrorCode, Result, VqlError};
@@ -43,18 +42,7 @@ const EPOCH_BUFFER_CAPACITY: usize = 4;
 #[cfg(feature = "ffmpeg-native")]
 const MAX_CAPTURE_DRIFT_MS: i64 = 30_000;
 
-pub(crate) fn rtsp_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(
-            "ts",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            false,
-        ),
-        image_field("frame", false),
-        Field::new("frame_id", DataType::Int64, false),
-        Field::new("source", DataType::Utf8, false),
-    ]))
-}
+pub(crate) use vql_catalog::rtsp_schema;
 
 #[derive(Debug)]
 pub(crate) struct RtspTableProvider {
@@ -285,7 +273,7 @@ impl Drop for RtspEpochReceiver {
 }
 
 pub(crate) fn start_rtsp_source(
-    definition: StreamDef,
+    definition: RtspTableConfig,
     media: Arc<MediaRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -333,7 +321,7 @@ struct SampledFrame {
 
 #[cfg(feature = "ffmpeg-native")]
 struct EpochBuilder {
-    definition: StreamDef,
+    definition: RtspTableConfig,
     media: Arc<MediaRuntime>,
     epoch_id: u64,
     epoch_start_ms: Option<i64>,
@@ -346,7 +334,7 @@ struct EpochBuilder {
 
 #[cfg(feature = "ffmpeg-native")]
 impl EpochBuilder {
-    fn new(definition: StreamDef, media: Arc<MediaRuntime>, budget: QueryBudget) -> Self {
+    fn new(definition: RtspTableConfig, media: Arc<MediaRuntime>, budget: QueryBudget) -> Self {
         Self {
             definition,
             media,
@@ -587,7 +575,7 @@ fn send_error(sender: &mpsc::Sender<Result<StreamEpoch>>, error: VqlError) {
 }
 
 fn run_source_worker(
-    definition: StreamDef,
+    definition: RtspTableConfig,
     media: Arc<MediaRuntime>,
     fail_on_error: Arc<AtomicBool>,
     sender: mpsc::Sender<Result<StreamEpoch>>,
@@ -622,7 +610,7 @@ fn run_source_worker(
 
 #[cfg(feature = "ffmpeg-native")]
 fn run_native_source(
-    definition: StreamDef,
+    definition: RtspTableConfig,
     media: Arc<MediaRuntime>,
     fail_on_error: Arc<AtomicBool>,
     sender: &mpsc::Sender<Result<StreamEpoch>>,
@@ -1036,7 +1024,7 @@ mod tests {
 
     #[test]
     fn watermark_never_moves_backward() {
-        let definition = StreamDef {
+        let definition = RtspTableConfig {
             name: "cam".to_owned(),
             endpoint: "rtsp://camera/live".to_owned(),
             fps: 5.0,
@@ -1056,7 +1044,7 @@ mod tests {
 
     #[test]
     fn overload_drops_only_frames_before_epoch_admission() {
-        let definition = StreamDef {
+        let definition = RtspTableConfig {
             name: "cam".to_owned(),
             endpoint: "rtsp://camera/live".to_owned(),
             fps: 5.0,
@@ -1087,7 +1075,7 @@ mod tests {
 
     #[test]
     fn resource_pressure_drops_the_oldest_sampled_frame() {
-        let definition = StreamDef {
+        let definition = RtspTableConfig {
             name: "cam".to_owned(),
             endpoint: "rtsp://camera/live".to_owned(),
             fps: 5.0,
@@ -1165,7 +1153,7 @@ mod tests {
         assert!(crate::test_util::generate_test_video(&video));
         let media = Arc::new(MediaRuntime::new());
         let cancellation = CancellationToken::new();
-        let definition = StreamDef {
+        let definition = RtspTableConfig {
             name: "test".to_owned(),
             endpoint: video.to_string_lossy().into_owned(),
             fps: 5.0,

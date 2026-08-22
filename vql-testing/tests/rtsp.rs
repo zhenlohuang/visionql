@@ -12,7 +12,7 @@ use vql_testing::REQUIRE_ENV;
 const RTSP_URL_ENV: &str = "VQL_TEST_RTSP_URL";
 const RTSP_SETUP_SQL: &str = include_str!("fixtures/rtsp/setup.sql");
 const PEOPLE_DETECTION_SQL: &str = include_str!("fixtures/rtsp/detect_people.sql");
-const PEOPLE_PER_WINDOW_SQL: &str = include_str!("fixtures/rtsp/people_per_window.sql");
+const PEOPLE_PER_TUMBLE_SQL: &str = include_str!("fixtures/rtsp/people_per_window.sql");
 
 struct ChildGuard(Child);
 
@@ -177,7 +177,7 @@ fn run_rtsp_case(endpoint: &str, video: &Path, model: &Path) -> Result<(), Strin
     }
 
     let windowed = session
-        .sql(PEOPLE_PER_WINDOW_SQL)
+        .sql(PEOPLE_PER_TUMBLE_SQL)
         .map_err(|error| format!("plan RTSP TUMBLE aggregation: {error}"))?;
     let (finished, watchdog) = query_watchdog(session.clone());
     let window_batches = windowed

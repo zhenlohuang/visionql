@@ -16,7 +16,7 @@ use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::catalog::KafkaSinkConfig;
+use crate::catalog::KafkaTableConfig;
 use crate::resources::{QueryBudget, QueryReservation};
 use crate::secrets::KafkaOAuthToken;
 use crate::types::is_image_field;
@@ -28,7 +28,7 @@ const IMAGE_KAFKA_FIELDS: [&str; 7] = [
 
 pub(crate) struct KafkaSink {
     name: String,
-    config: KafkaSinkConfig,
+    config: KafkaTableConfig,
     secret_provider: Option<SecretProviderRef>,
     state: Mutex<KafkaSinkState>,
     delivery_slots: Arc<Semaphore>,
@@ -73,7 +73,7 @@ impl ClientContext for KafkaClientContext {
 impl KafkaSink {
     pub(crate) fn new(
         name: String,
-        config: KafkaSinkConfig,
+        config: KafkaTableConfig,
         secret_provider: Option<SecretProviderRef>,
         budget: QueryBudget,
     ) -> Self {
@@ -114,7 +114,7 @@ impl KafkaSink {
                     permit = &mut permit_wait => {
                         break permit.map_err(|_| VqlError::new(
                             ErrorCode::Internal,
-                            "Kafka Sink delivery semaphore was closed",
+                            "Kafka table delivery semaphore was closed",
                         ))?;
                     }
                     delivery = deliveries.next(), if !deliveries.is_empty() => {
@@ -153,7 +153,7 @@ impl KafkaSink {
                 VqlError::new(
                     ErrorCode::Execution,
                     format!(
-                        "Kafka Sink '{}' requires a SecretProvider for credential_ref",
+                        "Kafka table '{}' requires a SecretProvider for credential_ref",
                         self.name
                     ),
                 )
@@ -165,7 +165,7 @@ impl KafkaSink {
                         VqlError::new(
                             ErrorCode::Execution,
                             format!(
-                                "failed to resolve credential_ref for Kafka Sink '{}'",
+                                "failed to resolve credential_ref for Kafka table '{}'",
                                 self.name
                             ),
                         )
@@ -206,7 +206,7 @@ impl KafkaSink {
                 return Err(VqlError::new(
                     ErrorCode::Internal,
                     format!(
-                        "Kafka Sink '{}' execution lifecycle is unbalanced",
+                        "Kafka table '{}' execution lifecycle is unbalanced",
                         self.name
                     ),
                 ));
@@ -246,7 +246,7 @@ impl KafkaSink {
 
 fn producer_config(
     name: &str,
-    sink: &KafkaSinkConfig,
+    sink: &KafkaTableConfig,
     authentication: Option<&KafkaAuthentication>,
 ) -> (ClientConfig, KafkaClientContext) {
     let delivery_timeout = sink.delivery_timeout_ms.to_string();
@@ -424,14 +424,14 @@ fn encode_json_batch(batch: &RecordBatch) -> Result<Vec<u8>> {
     writer.write(batch).map_err(|error| {
         VqlError::new(
             ErrorCode::Execution,
-            "failed to encode a Kafka Sink batch as JSON",
+            "failed to encode a Kafka table batch as JSON",
         )
         .with_source(error)
     })?;
     writer.finish().map_err(|error| {
         VqlError::new(
             ErrorCode::Execution,
-            "failed to finish Kafka Sink JSON encoding",
+            "failed to finish Kafka table JSON encoding",
         )
         .with_source(error)
     })?;
@@ -547,8 +547,8 @@ mod tests {
         )
     }
 
-    fn kafka_config(buffer_capacity: usize) -> KafkaSinkConfig {
-        KafkaSinkConfig {
+    fn kafka_config(buffer_capacity: usize) -> KafkaTableConfig {
+        KafkaTableConfig {
             bootstrap_servers: "127.0.0.1:9092".to_owned(),
             topic: "events".to_owned(),
             credential_ref: None,

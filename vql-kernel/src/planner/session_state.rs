@@ -7,7 +7,7 @@ use datafusion::execution::session_state::SessionStateBuilder;
 
 use crate::PythonUdfHostRef;
 use crate::catalog::CatalogStore;
-use crate::catalog::{DefinitionSnapshot, TableProviderKind};
+use crate::catalog::{DefinitionSnapshot, TableProvider as CatalogTableProvider};
 use crate::connectors::images::ImagesTableProvider;
 use crate::connectors::rtsp::RtspTableProvider;
 use crate::connectors::videos::VideosTableProvider;
@@ -53,15 +53,7 @@ pub(crate) fn context_for_snapshot(
         Some(budget.clone()),
     )?;
     register_tables(&context, snapshot, media, metrics)?;
-    register_streams(&context, snapshot)?;
     Ok(context)
-}
-
-fn register_streams(context: &SessionContext, snapshot: &DefinitionSnapshot) -> Result<()> {
-    for (name, _stream) in snapshot.streams() {
-        context.register_table(name, Arc::new(RtspTableProvider::new()))?;
-    }
-    Ok(())
 }
 
 pub(crate) fn context_for_function_ddl(
@@ -131,14 +123,13 @@ fn register_tables(
     metrics: Arc<QueryMetrics>,
 ) -> Result<()> {
     for (name, table) in snapshot.tables() {
-        match table.definition.provider {
-            TableProviderKind::Images => {
-                let provider = ImagesTableProvider::try_new(
-                    &table.definition.location,
-                    table.revision,
-                    table.definition.recursive,
-                )?
-                .with_query_metrics(Arc::clone(&metrics));
+        match &table.definition.provider {
+            CatalogTableProvider::Images {
+                location,
+                recursive,
+            } => {
+                let provider = ImagesTableProvider::try_new(location, table.revision, *recursive)?
+                    .with_query_metrics(Arc::clone(&metrics));
                 if provider.schema().as_ref() != table.schema.as_ref() {
                     return Err(VqlError::new(
                         ErrorCode::Catalog,
@@ -147,13 +138,18 @@ fn register_tables(
                 }
                 context.register_table(name, Arc::new(provider))?;
             }
-            TableProviderKind::Videos => {
+            CatalogTableProvider::Videos {
+                location,
+                recursive,
+                fps,
+                start_time_ms,
+            } => {
                 let provider = VideosTableProvider::try_new(
-                    &table.definition.location,
+                    location,
                     table.revision,
-                    table.definition.recursive,
-                    table.definition.fps,
-                    table.definition.start_time_ms,
+                    *recursive,
+                    *fps,
+                    *start_time_ms,
                     Arc::clone(&media),
                 )?
                 .with_query_metrics(Arc::clone(&metrics));
@@ -165,6 +161,10 @@ fn register_tables(
                 }
                 context.register_table(name, Arc::new(provider))?;
             }
+            CatalogTableProvider::Rtsp(_) => {
+                context.register_table(name, Arc::new(RtspTableProvider::new()))?;
+            }
+            CatalogTableProvider::Kafka(_) | CatalogTableProvider::External { .. } => {}
         }
     }
     Ok(())

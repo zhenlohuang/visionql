@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-VisionQL is a Rust workspace with four crates. `vql-kernel/` owns SQL planning, the catalog, media decoding, model execution, and owner tests. `vql-cli/` provides the `vql` shell and script runner. `vql-python/` contains the PyO3/Maturin extension, Python package, and API tests. `vql-testing/` owns shared SQL conformance and external-service system tests. Keep executable examples under `examples/`, helper scripts under `scripts/`, local fixture documentation under `data/`, and product or architecture decisions under `docs/`. Treat `ROADMAP.md` as the source of truth for version scope.
+VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog domains, snapshots, backend ports, SQLite persistence, and the Unity Catalog-compatible API. `vql-kernel/` owns SQL planning, media decoding, model execution, and owner tests. `vql-cli/` provides the `vql` shell and script runner. `vql-python/` contains the PyO3/Maturin extension, Python package, and API tests. `vql-testing/` owns shared SQL conformance and external-service system tests. Keep executable examples under `examples/`, helper scripts under `scripts/`, local fixture documentation under `data/`, and product or architecture decisions under `docs/`. Treat `ROADMAP.md` as the source of truth for version scope.
 
 ## Build, Test, and Development Commands
 

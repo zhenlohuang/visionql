@@ -1,10 +1,11 @@
 use std::fmt::Write;
 
+use arrow::datatypes::{DataType, Schema};
 use chrono::{DateTime, Utc};
 
 use crate::catalog::{
-    EventTimePolicy, FunctionDef, FunctionImplementation, KafkaSinkConfig, ModelDef, ModelType,
-    RtspTransport, SinkDef, SinkKind, StreamDef, TableDef, TableProviderKind,
+    EventTimePolicy, FunctionDef, FunctionImplementation, KafkaTableConfig, ModelDef, ModelType,
+    RtspTransport, TableDef, TableProvider,
 };
 use crate::{ErrorCode, Result, VqlError};
 
@@ -16,57 +17,93 @@ pub(crate) fn render_create(definition: &impl RenderCreate) -> Result<String> {
     definition.render_create()
 }
 
-impl RenderCreate for TableDef {
-    fn render_create(&self) -> Result<String> {
-        let provider = match self.provider {
-            TableProviderKind::Images => "IMAGES",
-            TableProviderKind::Videos => "VIDEOS",
-        };
-        let mut options = vec![format!("recursive = {}", self.recursive)];
-        if let Some(fps) = self.fps {
-            options.push(format!("fps = {fps}"));
+pub(crate) fn render_create_table(definition: &TableDef, schema: &Schema) -> Result<String> {
+    let name = quote_identifier(&definition.name);
+    Ok(match &definition.provider {
+        TableProvider::Kafka(config) => {
+            render_kafka_table(&name, config, &render_table_columns(schema)?)
         }
-        if let Some(start_time_ms) = self.start_time_ms {
-            let start_time =
-                DateTime::<Utc>::from_timestamp_millis(start_time_ms).ok_or_else(|| {
-                    VqlError::new(
-                        ErrorCode::Catalog,
-                        format!("table '{}' has an invalid start_time", self.name),
-                    )
-                })?;
-            options.push(format!(
-                "start_time = {}",
-                quote_string(&start_time.to_rfc3339())
-            ));
-        }
-        Ok(format!(
-            "CREATE TABLE {} USING {provider} LOCATION {} WITH ({})",
-            quote_identifier(&self.name),
-            quote_sanitized_string(&self.location),
-            options.join(", ")
-        ))
-    }
+        _ => definition.render_create()?,
+    })
 }
 
-impl RenderCreate for StreamDef {
+impl RenderCreate for TableDef {
     fn render_create(&self) -> Result<String> {
-        let event_time = match self.event_time {
-            EventTimePolicy::CaptureTime => "capture_time",
-            EventTimePolicy::IngestTime => "ingest_time",
-        };
-        let transport = match self.transport {
-            RtspTransport::Tcp => "tcp",
-            RtspTransport::Udp => "udp",
-        };
-        Ok(format!(
-            "CREATE STREAM {} FROM {} WITH (fps = {}, event_time = {}, watermark = INTERVAL '{}' MILLISECOND, transport = {})",
-            quote_identifier(&self.name),
-            quote_sanitized_string(&self.endpoint),
-            self.fps,
-            quote_string(event_time),
-            self.watermark_delay_ms,
-            quote_string(transport),
-        ))
+        let name = quote_identifier(&self.name);
+        Ok(match &self.provider {
+            TableProvider::Images {
+                location,
+                recursive,
+            } => format!(
+                "CREATE TABLE {name} USING IMAGES OPTIONS (recursive = {}) LOCATION {}",
+                quote_string(&recursive.to_string()),
+                quote_sanitized_string(location),
+            ),
+            TableProvider::Videos {
+                location,
+                recursive,
+                fps,
+                start_time_ms,
+            } => {
+                let mut options = vec![format!(
+                    "recursive = {}",
+                    quote_string(&recursive.to_string())
+                )];
+                if let Some(fps) = fps {
+                    options.push(format!("fps = {}", quote_string(&fps.to_string())));
+                }
+                if let Some(start_time_ms) = start_time_ms {
+                    let start_time = DateTime::<Utc>::from_timestamp_millis(*start_time_ms)
+                        .ok_or_else(|| {
+                            VqlError::new(
+                                ErrorCode::Catalog,
+                                format!("table '{}' has an invalid start_time", self.name),
+                            )
+                        })?;
+                    options.push(format!(
+                        "start_time = {}",
+                        quote_string(&start_time.to_rfc3339())
+                    ));
+                }
+                format!(
+                    "CREATE TABLE {name} USING VIDEOS OPTIONS ({}) LOCATION {}",
+                    options.join(", "),
+                    quote_sanitized_string(location),
+                )
+            }
+            TableProvider::Rtsp(config) => {
+                let event_time = match config.event_time {
+                    EventTimePolicy::CaptureTime => "capture_time",
+                    EventTimePolicy::IngestTime => "ingest_time",
+                };
+                let transport = match config.transport {
+                    RtspTransport::Tcp => "tcp",
+                    RtspTransport::Udp => "udp",
+                };
+                format!(
+                    "CREATE TABLE {name} USING RTSP OPTIONS (url = {}, fps = {}, event_time = {}, watermark = {}, transport = {})",
+                    quote_sanitized_string(&config.endpoint),
+                    quote_string(&config.fps.to_string()),
+                    quote_string(event_time),
+                    quote_string(&format!("{} milliseconds", config.watermark_delay_ms)),
+                    quote_string(transport),
+                )
+            }
+            TableProvider::Kafka(config) => render_kafka_table(&name, config, ""),
+            TableProvider::External {
+                data_source_format,
+                storage_location,
+            } => {
+                let provider = data_source_format.as_deref().unwrap_or("EXTERNAL");
+                match storage_location {
+                    Some(location) => format!(
+                        "CREATE TABLE {name} USING {provider} LOCATION {}",
+                        quote_sanitized_string(location)
+                    ),
+                    None => format!("CREATE TABLE {name} USING {provider}"),
+                }
+            }
+        })
     }
 }
 
@@ -130,27 +167,7 @@ impl RenderCreate for FunctionDef {
     }
 }
 
-impl RenderCreate for SinkDef {
-    fn render_create(&self) -> Result<String> {
-        match self.kind {
-            SinkKind::Console => Ok(format!(
-                "CREATE SINK {} TYPE CONSOLE",
-                quote_identifier(&self.name)
-            )),
-            SinkKind::Kafka => {
-                let kafka = self.kafka.as_ref().ok_or_else(|| {
-                    VqlError::new(
-                        ErrorCode::Catalog,
-                        format!("Kafka Sink '{}' has no configuration", self.name),
-                    )
-                })?;
-                Ok(render_kafka_sink(&self.name, kafka))
-            }
-        }
-    }
-}
-
-fn render_kafka_sink(name: &str, kafka: &KafkaSinkConfig) -> String {
+fn render_kafka_table(name: &str, kafka: &KafkaTableConfig, columns: &str) -> String {
     let mut options = vec![
         format!(
             "bootstrap_servers = {}",
@@ -167,14 +184,52 @@ fn render_kafka_sink(name: &str, kafka: &KafkaSinkConfig) -> String {
     }
     options.push(format!(
         "delivery_timeout_ms = {}",
-        kafka.delivery_timeout_ms
+        quote_string(&kafka.delivery_timeout_ms.to_string())
     ));
-    options.push(format!("buffer_capacity = {}", kafka.buffer_capacity));
+    options.push(format!(
+        "buffer_capacity = {}",
+        quote_string(&kafka.buffer_capacity.to_string())
+    ));
     format!(
-        "CREATE SINK {} TYPE KAFKA WITH ({})",
-        quote_identifier(name),
+        "CREATE TABLE {name}{columns} USING KAFKA OPTIONS ({})",
         options.join(", ")
     )
+}
+
+fn render_table_columns(schema: &Schema) -> Result<String> {
+    if schema.fields().is_empty() {
+        return Ok(String::new());
+    }
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let data_type = match field.data_type() {
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => "STRING",
+                DataType::Int64 => "BIGINT",
+                DataType::Int32 => "INT",
+                DataType::Boolean => "BOOLEAN",
+                DataType::Float32 => "FLOAT",
+                DataType::Float64 => "DOUBLE",
+                DataType::Timestamp(_, _) => "TIMESTAMP",
+                data_type => {
+                    return Err(VqlError::new(
+                        ErrorCode::Catalog,
+                        format!(
+                            "table column '{}' has unsupported SQL type '{data_type}'",
+                            field.name()
+                        ),
+                    ));
+                }
+            };
+            Ok(format!(
+                "{} {data_type}{}",
+                quote_identifier(field.name()),
+                if field.is_nullable() { "" } else { " NOT NULL" }
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(format!(" ({})", columns.join(", ")))
 }
 
 const REDACTED_SECRET_REFERENCE: &str = "[REDACTED_SECRET_REF]";

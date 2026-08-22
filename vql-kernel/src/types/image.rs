@@ -2,50 +2,19 @@ use arrow::array::{
     ArrayRef, BinaryArray, Int32Array, Int64Array, StringArray, StructArray, UInt32Array,
     UInt64Array,
 };
-use arrow::datatypes::{DataType, Field, Fields};
+use arrow::datatypes::{DataType, Field};
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{ErrorCode, Result, VqlError};
 
-const EXTENSION_NAME: &str = "visionql.image";
-
-pub fn image_storage_fields() -> Fields {
-    Fields::from(vec![
-        Arc::new(Field::new("uri", DataType::Utf8, true)),
-        Arc::new(Field::new("locator", DataType::Utf8, true)),
-        Arc::new(Field::new("pts_ms", DataType::Int64, true)),
-        Arc::new(Field::new("frame_id", DataType::UInt64, true)),
-        Arc::new(Field::new("encoded", DataType::Binary, true)),
-        Arc::new(Field::new("encoding", DataType::Utf8, true)),
-        Arc::new(Field::new("width", DataType::Int32, true)),
-        Arc::new(Field::new("height", DataType::Int32, true)),
-        Arc::new(Field::new("buffer_id", DataType::UInt64, true)),
-        Arc::new(Field::new("buffer_slot", DataType::UInt32, true)),
-    ])
-}
-
-pub fn image_field(name: impl Into<String>, nullable: bool) -> Field {
-    Field::new(
-        name.into(),
-        DataType::Struct(image_storage_fields()),
-        nullable,
-    )
-    .with_metadata(HashMap::from([
-        ("ARROW:extension:name".to_owned(), EXTENSION_NAME.to_owned()),
-        (
-            "ARROW:extension:metadata".to_owned(),
-            r#"{"version":1}"#.to_owned(),
-        ),
-    ]))
-}
+pub use vql_catalog::{image_field, image_storage_fields};
 
 pub fn is_image_field(field: &Field) -> bool {
     field
         .metadata()
         .get("ARROW:extension:name")
-        .is_some_and(|name| name == EXTENSION_NAME)
+        .is_some_and(|name| name == "visionql.image")
         && is_image_storage(field.data_type())
 }
 

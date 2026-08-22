@@ -1,27 +1,19 @@
 use std::collections::BTreeMap;
 
-use crate::catalog::{
-    EventTimePolicy, KafkaSinkConfig, ModelType, RtspTransport, SinkKind, TableProviderKind,
-};
+use crate::catalog::{ModelType, TableProvider};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CreateTable {
     pub(crate) name: String,
-    pub(crate) provider: TableProviderKind,
-    pub(crate) location: String,
-    pub(crate) recursive: bool,
-    pub(crate) fps: Option<f64>,
-    pub(crate) start_time_ms: Option<i64>,
+    pub(crate) provider: TableProvider,
+    pub(crate) columns: Vec<TableColumn>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CreateStream {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TableColumn {
     pub(crate) name: String,
-    pub(crate) endpoint: String,
-    pub(crate) fps: f64,
-    pub(crate) event_time: EventTimePolicy,
-    pub(crate) watermark_delay_ms: i64,
-    pub(crate) transport: RtspTransport,
+    pub(crate) data_type: String,
+    pub(crate) nullable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,47 +28,21 @@ pub(crate) struct CreateModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShowKind {
     Tables,
-    Streams,
     Models,
     Functions,
-    Sinks,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum VqlStatement {
     CreateTable(CreateTable),
-    CreateStream(CreateStream),
     CreateModel(CreateModel),
-    ResolveModel {
-        name: String,
-    },
-    CreateFunction {
-        sql: String,
-    },
-    CreateSink {
-        name: String,
-        kind: SinkKind,
-        kafka: Option<KafkaSinkConfig>,
-    },
-    Drop {
-        kind: ShowKind,
-        name: String,
-    },
+    ResolveModel { name: String },
+    CreateFunction { sql: String },
+    Drop { kind: ShowKind, name: String },
     Show(ShowKind),
-    ShowCreate {
-        kind: ShowKind,
-        name: String,
-    },
-    Describe {
-        name: String,
-    },
-    Query {
-        sql: String,
-    },
-    Explain {
-        sql: String,
-    },
-    Set {
-        sql: String,
-    },
+    ShowCreate { kind: ShowKind, name: String },
+    Describe { name: String },
+    Query { sql: String },
+    Explain { sql: String },
+    Set { sql: String },
 }

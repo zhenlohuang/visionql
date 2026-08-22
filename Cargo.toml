@@ -1,5 +1,5 @@
 [workspace]
-members = ["vql-kernel", "vql-cli", "vql-python", "vql-testing"]
+members = ["vql-catalog", "vql-kernel", "vql-cli", "vql-python", "vql-testing"]
 exclude = ["vql-workbench"]
 resolver = "3"
 
@@ -16,6 +16,7 @@ arrow-pyarrow = "=58.3.0"
 arrow-schema = { version = "=58.4.0", features = ["canonical_extension_types"] }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
+axum = "0.8"
 base64 = "0.22.1"
 chrono = "0.4.42"
 clap = { version = "4.5.48", features = ["derive"] }
@@ -46,7 +47,9 @@ tokio-util = "0.7.16"
 toml = "0.9.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tower = { version = "0.5", features = ["util"] }
 url = "2.5.7"
+uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8.2"
 
 [profile.release]

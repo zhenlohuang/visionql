@@ -20,7 +20,7 @@ if __name__ == "__main__":
         raise SystemExit("Run 'python scripts/export_yolo26.py --size n' first")
     session = visionql.connect()
     session.sql(
-        f"CREATE TABLE product_photos USING IMAGES LOCATION '{images}' WITH (recursive=true)"
+        f"CREATE TABLE product_photos USING IMAGES LOCATION '{images}' OPTIONS (recursive = true)"
     ).collect()
     session.sql(
         "CREATE FUNCTION quality(img IMAGE) RETURNS FLOAT "

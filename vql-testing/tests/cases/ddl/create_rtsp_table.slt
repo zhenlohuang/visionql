@@ -1,0 +1,12 @@
+query T
+CREATE TABLE cam_entrance
+USING RTSP
+OPTIONS (
+  url = 'rtsp://127.0.0.1:8554/main',
+  fps = 5,
+  event_time = 'capture_time',
+  watermark = '2 seconds',
+  transport = 'tcp'
+);
+----
+created table 'cam_entrance' at revision 1
