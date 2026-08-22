@@ -52,7 +52,7 @@ pub(crate) trait VideoDecoder: std::fmt::Debug + Send + Sync {
     fn timestamps(&self, path: &Path) -> Result<Vec<i64>>;
     fn decode_frame(&self, path: &Path, pts_ms: i64) -> Result<DecodedFrame>;
 
-    #[allow(dead_code)] // Implementors expose full iteration; v0.1 scans avoid eager pixel decode.
+    #[allow(dead_code)] // Implementors expose full iteration; scans avoid eager pixel decode.
     fn open(&self, path: &Path, range: TimeRange, sample: SampleSpec) -> Result<FrameIter> {
         let selected = sample_timestamps(&self.timestamps(path)?, range, sample)?;
         let decoded = selected

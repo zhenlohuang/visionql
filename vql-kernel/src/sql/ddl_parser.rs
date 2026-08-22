@@ -38,7 +38,7 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
             sql: sql.to_owned(),
         }),
         "SUBMIT" | "PAUSE" | "RESUME" | "STOP" => Err(VqlError::feature(
-            format!("{first} is not available in v0.1"),
+            format!("{first} requires a durable-query service and is not available"),
             "v0.2",
         )),
         _ => Err(VqlError::new(
@@ -513,7 +513,7 @@ fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
                 "未排期",
             ));
         }
-        _ => return invalid("v0.1 supports TYPE OBJECT_DETECTION"),
+        _ => return invalid("the only supported Model TYPE is OBJECT_DETECTION"),
     };
     expect_word(tokens.get(5), "FROM")?;
     let source = string_literal(tokens.get(6))?;

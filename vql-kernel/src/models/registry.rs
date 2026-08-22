@@ -287,7 +287,7 @@ impl PipelineRegistry {
 
     fn runtime(&self, model_type: ModelType, kind: &str) -> Result<&dyn RuntimeFactory> {
         let Some(factory) = self.runtimes.get(kind) else {
-            return invalid_option("USING", format!("unsupported v0.1 Runtime '{kind}'"));
+            return invalid_option("USING", format!("unsupported Runtime '{kind}'"));
         };
         ensure_supported(
             "USING",

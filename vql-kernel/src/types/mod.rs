@@ -40,14 +40,14 @@ pub fn logical_type_of(field: &Field) -> VqlType {
 
 pub fn audio_field(_name: impl Into<String>, _nullable: bool) -> Result<Field> {
     Err(VqlError::feature(
-        "AUDIO is defined as a future logical type but has no v0.1 storage contract",
+        "AUDIO is a reserved logical type and has no storage contract yet",
         "未排期",
     ))
 }
 
 pub fn mask_field(_name: impl Into<String>, _nullable: bool) -> Result<Field> {
     Err(VqlError::feature(
-        "MASK is defined as a future logical type but has no v0.1 storage contract",
+        "MASK is a reserved logical type and has no storage contract yet",
         "未排期",
     ))
 }

@@ -691,7 +691,7 @@ fn validate_aggregate(function: &AggregateFunction) -> Result<()> {
     }
     if function.params.distinct {
         return Err(invalid(format!(
-            "{}(DISTINCT ...) is not supported for streaming TUMBLE in v0.1",
+            "{}(DISTINCT ...) is not supported for streaming TUMBLE",
             name.to_ascii_uppercase()
         )));
     }
@@ -700,7 +700,7 @@ fn validate_aggregate(function: &AggregateFunction) -> Result<()> {
         || function.params.null_treatment.is_some()
     {
         return Err(invalid(format!(
-            "FILTER, ORDER BY, and NULL treatment are not supported inside streaming {} in v0.1; filter rows before the aggregate",
+            "FILTER, ORDER BY, and NULL treatment are not supported inside streaming {}; filter rows before the aggregate",
             name.to_ascii_uppercase()
         )));
     }

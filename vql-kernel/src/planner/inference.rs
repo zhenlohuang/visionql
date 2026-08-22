@@ -353,7 +353,7 @@ fn rewrite_plan_node(
             }
             if inputs.len() != 1 {
                 return Err(DataFusionError::Plan(
-                    "IMAGE_DETECTION is only supported on single-input v0.1 plans".to_owned(),
+                    "IMAGE_DETECTION is only supported on single-input plans".to_owned(),
                 ));
             }
             if !(2..=4).contains(&call.args.len()) {

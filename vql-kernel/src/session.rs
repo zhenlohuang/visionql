@@ -1658,7 +1658,7 @@ impl Session {
             _ => {
                 return Err(VqlError::new(
                     ErrorCode::InvalidOption,
-                    "v0.1 supports SET vql.on_error='null'|'fail'",
+                    "SET vql.on_error accepts 'null' or 'fail'",
                 ));
             }
         };
