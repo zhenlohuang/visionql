@@ -183,7 +183,7 @@ maturin develop --locked
 cd ..
 ```
 
-The synchronous API returns a `QueryHandle`; `collect()` materializes a PyArrow table and `metrics()` returns the query-local row, media, inference, latency, drop, and current/peak resource metrics.
+The synchronous API returns a `QueryHandle`; `collect()` materializes a PyArrow table.
 
 ```python
 import visionql
@@ -198,7 +198,6 @@ result = session.sql("""
 
 table = result.collect()
 print(table)
-print(result.metrics())
 ```
 
 Python-hosted UDFs receive and return Arrow arrays in batches. They require the Python host and are not available in the standalone CLI.
@@ -274,7 +273,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [Kernel design](docs/kernel.md) | Planning, streaming, media, inference, resources, and security |
 | [Catalog design](docs/catalog.md) | Namespaces, definitions, snapshots, providers, backends, and UC API |
 | [CLI design](docs/cli.md) | Shell, script execution, rendering, and signal behavior |
-| [Python binding design](docs/python_binding.md) | PyO3 API, PyArrow results, metrics, and Python UDFs |
+| [Python binding design](docs/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |
 | [Testing design](docs/testing.md) | Test ownership, sqllogictest cases, fixtures, and Compose services |
 | [Roadmap](ROADMAP.md) | Delivered and planned capabilities by version |
 | [Proposals](docs/proposals/README.md) | Focused designs for later features |

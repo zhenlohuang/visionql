@@ -407,8 +407,6 @@ pub(crate) struct TumbleState {
 #[derive(Debug)]
 pub(crate) struct TumbleEpochOutput {
     pub(crate) closed: Option<RecordBatch>,
-    pub(crate) late_rows: u64,
-    pub(crate) state_bytes: usize,
 }
 
 impl TumbleState {
@@ -429,7 +427,6 @@ impl TumbleState {
         watermark_ms: Option<i64>,
         epoch_id: u64,
     ) -> Result<TumbleEpochOutput> {
-        let mut late_rows = 0_u64;
         for batch in batches {
             if batch.schema() != self.spec.input_schema {
                 return Err(VqlError::new(
@@ -443,7 +440,6 @@ impl TumbleState {
                     .current_watermark_ms
                     .is_some_and(|watermark| event_time_ms < watermark)
                 {
-                    late_rows = late_rows.saturating_add(1);
                     continue;
                 }
                 let groups = (0..self.spec.group_count)
@@ -480,11 +476,7 @@ impl TumbleState {
         };
         let closed = self.close_windows()?;
         self.refresh_reservation()?;
-        Ok(TumbleEpochOutput {
-            closed,
-            late_rows,
-            state_bytes: self.memory_bytes,
-        })
+        Ok(TumbleEpochOutput { closed })
     }
 
     fn refresh_reservation(&mut self) -> Result<()> {
@@ -861,8 +853,7 @@ mod tests {
         let first = state
             .apply_epoch(&[projected.slice(0, 3)], Some(1_000), 0)
             .unwrap();
-        assert_eq!(first.late_rows, 0);
-        assert_eq!(first.state_bytes, 0);
+        assert_eq!(state.memory_bytes, 0);
         let first = first.closed.unwrap();
         assert_window(&first, Some("a"), (2, 1, 10, 10.0, 10, 10));
         assert_window(&first, None, (1, 1, 5, 5.0, 5, 5));
@@ -870,16 +861,16 @@ mod tests {
         let late = state
             .apply_epoch(&[projected.slice(5, 1)], None, 1)
             .unwrap();
-        assert_eq!(late.late_rows, 1);
         assert!(late.closed.is_none());
+        assert_eq!(state.memory_bytes, 0);
 
         let open = state
             .apply_epoch(&[projected.slice(3, 2)], None, 2)
             .unwrap();
         assert!(open.closed.is_none());
-        assert!(open.state_bytes > 0);
+        assert!(state.memory_bytes > 0);
         let second = state.apply_epoch(&[], Some(2_000), 3).unwrap();
-        assert_eq!(second.state_bytes, 0);
+        assert_eq!(state.memory_bytes, 0);
         assert_window(&second.closed.unwrap(), Some("a"), (2, 2, 70, 35.0, 30, 40));
     }
 

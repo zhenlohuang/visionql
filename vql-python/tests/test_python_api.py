@@ -19,12 +19,9 @@ def test_collect_and_vectorized_python_udf(tmp_path):
         "LANGUAGE PYTHON AS 'vql_test_udfs:double'"
     ).collect()
     handle = session.sql("SELECT double(column1) AS value FROM (VALUES (1), (2))")
+    assert not hasattr(handle, "metrics")
     table = handle.collect()
     assert table.column("value").to_pylist() == [2, 4]
-    metrics = handle.metrics()
-    assert metrics["input_rows"] == 2
-    assert metrics["output_rows"] == 2
-    assert metrics["resources"]["arrow"]["peak_bytes"] > 0
     assert "value" in session.sql("SELECT 1 AS value")._repr_html_()
 
 

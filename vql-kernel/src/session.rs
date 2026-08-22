@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{ArrayRef, Int64Array, StringArray};
@@ -25,7 +24,7 @@ use crate::planner::{
     SinkTarget, bind_stream_epoch, bind_tumble_output, context_for_function_ddl,
     context_for_snapshot, normalize_function_ddl, plan_statement, wrap_sink,
 };
-use crate::resources::{QueryBudget, QueryReservation, ResourceMetrics, SessionMemoryPool};
+use crate::resources::{QueryBudget, QueryReservation, SessionMemoryPool};
 use crate::sql::{
     CreateModel, CreateTable, ShowKind, TableColumn, VqlStatement, parse_statement, render_create,
     render_create_table,
@@ -125,13 +124,6 @@ impl Statement {
         }
     }
 
-    pub fn metrics(&self) -> Option<Arc<QueryMetrics>> {
-        match self {
-            Self::Query(query) | Self::Explain(query) | Self::Set(query) => Some(query.metrics()),
-            Self::Ddl(_) => None,
-        }
-    }
-
     pub fn cancel(&self) {
         match self {
             Self::Query(query) | Self::Explain(query) | Self::Set(query) => query.cancel(),
@@ -176,326 +168,9 @@ pub struct DdlResult {
     batches: Vec<RecordBatch>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameDropReason {
-    SourceOverrun,
-    ResourceBudget,
-    DecodeError,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DroppedFrameRange {
-    pub reason: FrameDropReason,
-    pub count: u64,
-    pub first_event_time_ms: Option<i64>,
-    pub last_event_time_ms: Option<i64>,
-}
-
-const MAX_PERCENTILE_SAMPLES: usize = 2_048;
-const MAX_BATCH_HISTOGRAM_BUCKET: usize = 64;
-
-#[derive(Debug, Default)]
-struct PercentileSamples {
-    values: Vec<u64>,
-    next: usize,
-}
-
 impl DdlResult {
     pub fn batches(&self) -> &[RecordBatch] {
         &self.batches
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct QueryMetrics {
-    input_rows: AtomicU64,
-    output_rows: AtomicU64,
-    decode_frames: AtomicU64,
-    inference_rows: AtomicU64,
-    inference_batches: AtomicU64,
-    error_rows: AtomicU64,
-    inference_p50_micros: AtomicU64,
-    inference_p95_micros: AtomicU64,
-    batch_histogram: Mutex<Vec<u64>>,
-    inference_latencies_micros: Mutex<PercentileSamples>,
-    model_queue_p50_micros: AtomicU64,
-    model_queue_p95_micros: AtomicU64,
-    model_queue_samples_micros: Mutex<PercentileSamples>,
-    model_service_p50_micros: AtomicU64,
-    model_service_p95_micros: AtomicU64,
-    model_service_samples_micros: Mutex<PercentileSamples>,
-    source_generation: AtomicU64,
-    source_reconnects: AtomicU64,
-    event_time_fallbacks: AtomicU64,
-    source_dropped_frames: AtomicU64,
-    sampled_frames: AtomicU64,
-    first_sampled_event_time_ms: AtomicI64,
-    last_sampled_event_time_ms: AtomicI64,
-    has_sampled_event_range: AtomicBool,
-    source_input_bytes: AtomicU64,
-    observation_micros: AtomicU64,
-    source_gap_duration_ms: AtomicU64,
-    dropped_frame_ranges: Mutex<Vec<DroppedFrameRange>>,
-    watermark_ms: AtomicI64,
-    has_watermark: AtomicBool,
-    late_rows: AtomicU64,
-    window_state_bytes: AtomicU64,
-    sink_retries: AtomicU64,
-    epoch_p50_micros: AtomicU64,
-    epoch_p95_micros: AtomicU64,
-    epoch_samples_micros: Mutex<PercentileSamples>,
-    e2e_p50_micros: AtomicU64,
-    e2e_p95_micros: AtomicU64,
-    e2e_samples_micros: Mutex<PercentileSamples>,
-    pub(crate) resources: Arc<ResourceMetrics>,
-}
-
-impl QueryMetrics {
-    pub fn input_rows(&self) -> u64 {
-        self.input_rows.load(Ordering::Relaxed)
-    }
-    pub fn output_rows(&self) -> u64 {
-        self.output_rows.load(Ordering::Relaxed)
-    }
-
-    pub fn decode_frames(&self) -> u64 {
-        self.decode_frames.load(Ordering::Relaxed)
-    }
-
-    pub fn inference_rows(&self) -> u64 {
-        self.inference_rows.load(Ordering::Relaxed)
-    }
-    pub fn inference_batches(&self) -> u64 {
-        self.inference_batches.load(Ordering::Relaxed)
-    }
-    pub fn error_rows(&self) -> u64 {
-        self.error_rows.load(Ordering::Relaxed)
-    }
-    pub fn inference_calls(&self) -> u64 {
-        self.inference_batches()
-    }
-    pub fn inference_p50_ms(&self) -> f64 {
-        self.inference_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-    pub fn inference_p95_ms(&self) -> f64 {
-        self.inference_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-    pub fn batch_histogram(&self) -> Vec<u64> {
-        self.batch_histogram
-            .lock()
-            .map(|values| values.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn model_queue_p50_ms(&self) -> f64 {
-        self.model_queue_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn model_queue_p95_ms(&self) -> f64 {
-        self.model_queue_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn model_service_p50_ms(&self) -> f64 {
-        self.model_service_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn model_service_p95_ms(&self) -> f64 {
-        self.model_service_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn source_generation(&self) -> u64 {
-        self.source_generation.load(Ordering::Relaxed)
-    }
-
-    pub fn source_reconnects(&self) -> u64 {
-        self.source_reconnects.load(Ordering::Relaxed)
-    }
-
-    pub fn event_time_fallbacks(&self) -> u64 {
-        self.event_time_fallbacks.load(Ordering::Relaxed)
-    }
-
-    pub fn source_dropped_frames(&self) -> u64 {
-        self.source_dropped_frames.load(Ordering::Relaxed)
-    }
-
-    pub fn sampled_fps(&self) -> f64 {
-        if !self.has_sampled_event_range.load(Ordering::Relaxed) {
-            return 0.0;
-        }
-        let duration_ms = self
-            .last_sampled_event_time_ms
-            .load(Ordering::Relaxed)
-            .saturating_sub(self.first_sampled_event_time_ms.load(Ordering::Relaxed));
-        if duration_ms <= 0 {
-            return 0.0;
-        }
-        self.sampled_frames().saturating_sub(1) as f64 * 1_000.0 / duration_ms as f64
-    }
-
-    pub fn sampled_frames(&self) -> u64 {
-        self.sampled_frames.load(Ordering::Relaxed)
-    }
-
-    pub fn source_input_bytes(&self) -> u64 {
-        self.source_input_bytes.load(Ordering::Relaxed)
-    }
-
-    pub fn input_bitrate_bps(&self) -> f64 {
-        let elapsed = self.observation_micros.load(Ordering::Relaxed);
-        if elapsed == 0 {
-            return 0.0;
-        }
-        self.source_input_bytes() as f64 * 8_000_000.0 / elapsed as f64
-    }
-
-    pub fn source_gap_duration_ms(&self) -> u64 {
-        self.source_gap_duration_ms.load(Ordering::Relaxed)
-    }
-
-    pub fn dropped_frame_ranges(&self) -> Vec<DroppedFrameRange> {
-        self.dropped_frame_ranges
-            .lock()
-            .map(|ranges| ranges.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn watermark_ms(&self) -> Option<i64> {
-        self.has_watermark
-            .load(Ordering::Relaxed)
-            .then(|| self.watermark_ms.load(Ordering::Relaxed))
-    }
-
-    pub fn late_rows(&self) -> u64 {
-        self.late_rows.load(Ordering::Relaxed)
-    }
-
-    pub fn window_state_bytes(&self) -> u64 {
-        self.window_state_bytes.load(Ordering::Relaxed)
-    }
-
-    pub fn sink_retries(&self) -> u64 {
-        self.sink_retries.load(Ordering::Relaxed)
-    }
-
-    pub fn epoch_p50_ms(&self) -> f64 {
-        self.epoch_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn epoch_p95_ms(&self) -> f64 {
-        self.epoch_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn end_to_end_p50_ms(&self) -> f64 {
-        self.e2e_p50_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn end_to_end_p95_ms(&self) -> f64 {
-        self.e2e_p95_micros.load(Ordering::Relaxed) as f64 / 1_000.0
-    }
-
-    pub fn resource_usage(&self, resource: crate::QueryResource) -> crate::ResourceUsage {
-        self.resources.usage(resource)
-    }
-
-    pub fn total_resource_usage(&self) -> crate::ResourceUsage {
-        self.resources.total_usage()
-    }
-
-    pub(crate) fn add_input_rows(&self, rows: usize) {
-        self.input_rows.fetch_add(rows as u64, Ordering::Relaxed);
-    }
-
-    pub(crate) fn add_decode_frame(&self) {
-        self.decode_frames.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn add_error_rows(&self, rows: usize) {
-        self.error_rows.fetch_add(rows as u64, Ordering::Relaxed);
-    }
-
-    pub(crate) fn record_inference(
-        &self,
-        rows: usize,
-        latency_micros: u64,
-        queue_wait_micros: u64,
-        service_micros: u64,
-    ) {
-        self.inference_rows
-            .fetch_add(rows as u64, Ordering::Relaxed);
-        self.inference_batches.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut histogram) = self.batch_histogram.lock() {
-            if histogram.is_empty() {
-                histogram.resize(MAX_BATCH_HISTOGRAM_BUCKET + 1, 0);
-            }
-            let bucket = rows.min(MAX_BATCH_HISTOGRAM_BUCKET);
-            histogram[bucket] = histogram[bucket].saturating_add(1);
-        }
-        record_percentiles(
-            &self.inference_latencies_micros,
-            &self.inference_p50_micros,
-            &self.inference_p95_micros,
-            latency_micros,
-        );
-        record_percentiles(
-            &self.model_queue_samples_micros,
-            &self.model_queue_p50_micros,
-            &self.model_queue_p95_micros,
-            queue_wait_micros,
-        );
-        record_percentiles(
-            &self.model_service_samples_micros,
-            &self.model_service_p50_micros,
-            &self.model_service_p95_micros,
-            service_micros,
-        );
-    }
-
-    pub(crate) fn update_source_progress(
-        &self,
-        progress: &crate::connectors::rtsp::SourceProgress,
-        observation_micros: u64,
-    ) {
-        self.sampled_frames
-            .store(progress.sampled_frames, Ordering::Relaxed);
-        if let (Some(first), Some(last)) = (
-            progress.sampled_first_event_time_ms,
-            progress.sampled_last_event_time_ms,
-        ) {
-            self.first_sampled_event_time_ms
-                .store(first, Ordering::Relaxed);
-            self.last_sampled_event_time_ms
-                .store(last, Ordering::Relaxed);
-            self.has_sampled_event_range.store(true, Ordering::Relaxed);
-        }
-        self.source_input_bytes
-            .store(progress.input_bytes, Ordering::Relaxed);
-        self.observation_micros
-            .fetch_max(observation_micros, Ordering::Relaxed);
-        self.source_gap_duration_ms
-            .store(progress.gap_duration_ms, Ordering::Relaxed);
-        if let Ok(mut ranges) = self.dropped_frame_ranges.lock() {
-            *ranges = progress.dropped_ranges.clone();
-        }
-    }
-
-    pub(crate) fn record_epoch(&self, epoch_micros: u64, end_to_end_micros: u64) {
-        record_percentiles(
-            &self.epoch_samples_micros,
-            &self.epoch_p50_micros,
-            &self.epoch_p95_micros,
-            epoch_micros,
-        );
-        self.record_end_to_end(end_to_end_micros);
-    }
-
-    pub(crate) fn record_end_to_end(&self, end_to_end_micros: u64) {
-        record_percentiles(
-            &self.e2e_samples_micros,
-            &self.e2e_p50_micros,
-            &self.e2e_p95_micros,
-            end_to_end_micros,
-        );
     }
 }
 
@@ -507,10 +182,8 @@ pub struct QueryHandle {
     graceful_stop: CancellationToken,
     active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     output_schema: SchemaRef,
-    metrics: Arc<QueryMetrics>,
     budget: QueryBudget,
     output_reservation: Arc<Mutex<Option<QueryReservation>>>,
-    execution_started_at: Arc<Mutex<Option<std::time::Instant>>>,
     collected: Arc<Mutex<Option<Vec<RecordBatch>>>>,
     media: Arc<MediaRuntime>,
     catalog: Arc<crate::catalog::CatalogStore>,
@@ -536,7 +209,6 @@ struct QueryResources {
     media: Arc<MediaRuntime>,
     catalog: Arc<crate::catalog::CatalogStore>,
     fail_on_error: Arc<AtomicBool>,
-    metrics: Arc<QueryMetrics>,
     budget: QueryBudget,
 }
 
@@ -547,14 +219,6 @@ impl Drop for ActiveQueryGuard {
         if let Ok(mut active) = self.0.lock() {
             *active = None;
         }
-    }
-}
-
-struct WindowStateMetricGuard(Arc<QueryMetrics>);
-
-impl Drop for WindowStateMetricGuard {
-    fn drop(&mut self) {
-        self.0.window_state_bytes.store(0, Ordering::Relaxed);
     }
 }
 
@@ -604,10 +268,8 @@ impl QueryHandle {
             graceful_stop: CancellationToken::new(),
             active_query: resources.active_query,
             output_schema,
-            metrics: resources.metrics,
             budget: resources.budget,
             output_reservation: Arc::new(Mutex::new(None)),
-            execution_started_at: Arc::new(Mutex::new(None)),
             collected: Arc::new(Mutex::new(None)),
             media: resources.media,
             catalog: resources.catalog,
@@ -633,11 +295,10 @@ impl QueryHandle {
                 stream,
             )));
         }
-        let execution_started_at = self.start_execution()?;
         self.set_active()?;
         let active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
         let input = if self.streaming.is_some() {
-            self.stream_rtsp(execution_started_at, reserve_output)?
+            self.stream_rtsp(reserve_output)?
         } else {
             self.stream_bounded(reserve_output)?
         };
@@ -665,7 +326,6 @@ impl QueryHandle {
         let output_schema = Arc::clone(&self.output_schema);
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
-        let metrics = Arc::clone(&self.metrics);
         let budget = self.budget.clone();
         let stream = async_stream::try_stream! {
             let mut input = input;
@@ -688,7 +348,6 @@ impl QueryHandle {
                 } else {
                     None
                 };
-                metrics.output_rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                 yield RecordBatch::try_new(
                     Arc::clone(&output_schema),
                     batch.columns().to_vec(),
@@ -701,11 +360,7 @@ impl QueryHandle {
         )))
     }
 
-    fn stream_rtsp(
-        &self,
-        query_started_at: std::time::Instant,
-        reserve_output: bool,
-    ) -> Result<SendableRecordBatchStream> {
+    fn stream_rtsp(&self, reserve_output: bool) -> Result<SendableRecordBatchStream> {
         let streaming = self
             .streaming
             .clone()
@@ -740,16 +395,11 @@ impl QueryHandle {
         let output_schema = Arc::clone(&self.output_schema);
         let stream_schema = Arc::clone(&output_schema);
         let cancellation = self.cancellation.clone();
-        let metrics = Arc::clone(&self.metrics);
         let budget = self.budget.clone();
-        let window_state_metric_guard = tumble_state
-            .as_ref()
-            .map(|_| WindowStateMetricGuard(Arc::clone(&metrics)));
         let catalog = Arc::clone(&self.catalog);
         let media = Arc::clone(&self.media);
         let fail_on_error = Arc::clone(&self.fail_on_error);
         let stream = async_stream::try_stream! {
-            let _window_state_metric_guard = window_state_metric_guard;
             'epochs: loop {
                 let next = tokio::select! {
                     _ = cancellation.cancelled() => Ok(None),
@@ -764,33 +414,6 @@ impl QueryHandle {
                     ))?;
                 }
                 let Some(epoch) = next else { break; };
-                let epoch_started = std::time::Instant::now();
-                let input_rows = epoch.batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-                metrics.add_input_rows(input_rows);
-                metrics.source_generation.store(
-                    epoch.source_progress.generation,
-                    Ordering::Relaxed,
-                );
-                metrics.decode_frames.store(
-                    epoch.source_progress.decoded_frames,
-                    Ordering::Relaxed,
-                );
-                metrics.source_reconnects.store(
-                    epoch.source_progress.reconnects,
-                    Ordering::Relaxed,
-                );
-                metrics.event_time_fallbacks.store(
-                    epoch.source_progress.event_time_fallbacks,
-                    Ordering::Relaxed,
-                );
-                metrics.source_dropped_frames.store(
-                    epoch.source_progress.dropped_frames,
-                    Ordering::Relaxed,
-                );
-                metrics.update_source_progress(
-                    &epoch.source_progress,
-                    query_started_at.elapsed().as_micros() as u64,
-                );
                 let dataframe = bind_stream_epoch(
                     template.clone(),
                     &stream_name,
@@ -806,11 +429,6 @@ impl QueryHandle {
                     let window_output = state
                         .apply_epoch(&batches, epoch.watermark_ms, epoch.epoch_id)
                         .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
-                    metrics.late_rows.fetch_add(window_output.late_rows, Ordering::Relaxed);
-                    metrics.window_state_bytes.store(
-                        window_output.state_bytes as u64,
-                        Ordering::Relaxed,
-                    );
                     match window_output.closed {
                         Some(batch) => {
                             let plan = tumble_plan.as_ref().ok_or_else(|| {
@@ -861,36 +479,18 @@ impl QueryHandle {
                         None
                     };
                     drop(materialized.reservations);
-                    metrics.output_rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                     yield RecordBatch::try_new(
                         Arc::clone(&output_schema),
                         batch.columns().to_vec(),
                     )?;
                     if fetch_remaining == Some(0) {
-                        if let Some(watermark_ms) = epoch.watermark_ms {
-                            metrics.watermark_ms.store(watermark_ms, Ordering::Relaxed);
-                            metrics.has_watermark.store(true, Ordering::Relaxed);
-                        }
-                        metrics.record_epoch(
-                            epoch_started.elapsed().as_micros() as u64,
-                            epoch.admitted_at.elapsed().as_micros() as u64,
-                        );
                         break 'epochs;
                     }
-                }
-                if let Some(watermark_ms) = epoch.watermark_ms {
-                    metrics.watermark_ms.store(watermark_ms, Ordering::Relaxed);
-                    metrics.has_watermark.store(true, Ordering::Relaxed);
                 }
                 tracing::debug!(
                     epoch_id = epoch.epoch_id,
                     watermark_ms = epoch.watermark_ms,
-                    sampled_frames = epoch.source_progress.sampled_frames,
                     "completed RTSP epoch"
-                );
-                metrics.record_epoch(
-                    epoch_started.elapsed().as_micros() as u64,
-                    epoch.admitted_at.elapsed().as_micros() as u64,
                 );
                 drop(epoch.frame_lease);
             }
@@ -935,16 +535,6 @@ impl QueryHandle {
         *self.output_reservation.lock().map_err(|_| {
             VqlError::new(ErrorCode::Internal, "query result reservation was poisoned")
         })? = Some(output_reservation);
-        if self.streaming.is_none() && self.metrics.input_rows() == 0 {
-            self.metrics.input_rows.store(
-                self.metrics.output_rows.load(Ordering::Relaxed),
-                Ordering::Relaxed,
-            );
-        }
-        if self.streaming.is_none() {
-            self.metrics
-                .record_end_to_end(self.execution_elapsed_micros()?);
-        }
         Ok(batches)
     }
 
@@ -961,10 +551,6 @@ impl QueryHandle {
         }
     }
 
-    pub fn metrics(&self) -> Arc<QueryMetrics> {
-        Arc::clone(&self.metrics)
-    }
-
     pub fn is_unbounded(&self) -> bool {
         self.streaming
             .as_ref()
@@ -976,7 +562,7 @@ impl QueryHandle {
         mut callback: impl FnMut(&RecordBatch) -> Result<()>,
     ) -> Result<()> {
         let mut stream = self.stream()?;
-        let result = self.runtime.block_on(async {
+        self.runtime.block_on(async {
             while let Some(batch) = stream.next().await {
                 match batch {
                     Ok(batch) => callback(&batch)?,
@@ -987,23 +573,7 @@ impl QueryHandle {
                 }
             }
             Ok(())
-        });
-        if result.is_ok() && self.streaming.is_none() {
-            self.metrics
-                .record_end_to_end(self.execution_elapsed_micros()?);
-        }
-        result
-    }
-
-    fn start_execution(&self) -> Result<std::time::Instant> {
-        let mut started_at = self.execution_started_at.lock().map_err(|_| {
-            VqlError::new(ErrorCode::Internal, "query execution timer was poisoned")
-        })?;
-        Ok(*started_at.get_or_insert_with(std::time::Instant::now))
-    }
-
-    fn execution_elapsed_micros(&self) -> Result<u64> {
-        Ok(self.start_execution()?.elapsed().as_micros() as u64)
+        })
     }
 
     fn set_active(&self) -> Result<()> {
@@ -1182,11 +752,7 @@ impl Session {
                 ));
             }
         }
-        let metrics = Arc::new(QueryMetrics::default());
-        let budget = QueryBudget::for_session(
-            Arc::clone(&self.memory_pool),
-            Arc::clone(&metrics.resources),
-        );
+        let budget = QueryBudget::for_session(Arc::clone(&self.memory_pool));
         let context = context_for_snapshot(
             &snapshot,
             Arc::clone(&self.engine.inner.catalog),
@@ -1194,7 +760,6 @@ impl Session {
             Arc::clone(&self.fail_on_error),
             self.python_udf_host.clone(),
             &budget,
-            Arc::clone(&metrics),
         )?;
         let cancellation = CancellationToken::new();
         let planned = self.engine.inner.runtime.block_on(plan_statement(
@@ -1205,7 +770,6 @@ impl Session {
             Arc::clone(&self.fail_on_error),
             cancellation.clone(),
             budget.clone(),
-            Arc::clone(&metrics),
         ))?;
         let streaming = planned.stream_name.as_ref().map(|name| {
             let table = snapshot
@@ -1232,7 +796,6 @@ impl Session {
                 media: Arc::clone(&self.engine.inner.media),
                 catalog: Arc::clone(&self.engine.inner.catalog),
                 fail_on_error: Arc::clone(&self.fail_on_error),
-                metrics,
                 budget,
             },
             streaming,
@@ -2003,37 +1566,12 @@ fn restamp_schema(schema: &SchemaRef) -> SchemaRef {
     ))
 }
 
-fn percentile(values: &[u64], percentile: f64) -> u64 {
-    let index = ((values.len() - 1) as f64 * percentile).ceil() as usize;
-    values[index]
-}
-
-fn record_percentiles(
-    samples: &Mutex<PercentileSamples>,
-    p50: &AtomicU64,
-    p95: &AtomicU64,
-    sample: u64,
-) {
-    if let Ok(mut samples) = samples.lock() {
-        if samples.values.len() < MAX_PERCENTILE_SAMPLES {
-            samples.values.push(sample);
-        } else {
-            let next = samples.next;
-            samples.values[next] = sample;
-            samples.next = (next + 1) % MAX_PERCENTILE_SAMPLES;
-        }
-        let mut sorted = samples.values.clone();
-        sorted.sort_unstable();
-        p50.store(percentile(&sorted, 0.50), Ordering::Relaxed);
-        p95.store(percentile(&sorted, 0.95), Ordering::Relaxed);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::EngineConfig;
     use arrow::array::{Array, Float64Array, Int64Array};
+    use datafusion::execution::memory_pool::MemoryPool;
     use image::{Rgb, RgbImage};
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
@@ -2086,33 +1624,6 @@ mod tests {
             QueryInterruptAction::ImmediateCancellationRequested
         );
         assert!(cancellation.is_cancelled());
-    }
-
-    #[test]
-    fn continuous_metric_samples_are_bounded_and_histogrammed() {
-        let metrics = QueryMetrics::default();
-        for sample in 0..(MAX_PERCENTILE_SAMPLES + 100) {
-            metrics.record_inference(3, sample as u64, sample as u64, sample as u64);
-            metrics.record_epoch(sample as u64, sample as u64);
-        }
-
-        assert_eq!(
-            metrics
-                .inference_latencies_micros
-                .lock()
-                .unwrap()
-                .values
-                .len(),
-            MAX_PERCENTILE_SAMPLES
-        );
-        assert_eq!(
-            metrics.epoch_samples_micros.lock().unwrap().values.len(),
-            MAX_PERCENTILE_SAMPLES
-        );
-        assert_eq!(
-            metrics.batch_histogram()[3],
-            (MAX_PERCENTILE_SAMPLES + 100) as u64
-        );
     }
 
     #[test]
@@ -2329,11 +1840,9 @@ mod tests {
         let session = engine.session().build().unwrap();
         let sql = format!("SELECT '{}' AS value", "x".repeat(1024));
         let statement = session.sql(&sql).unwrap();
-        let metrics = statement.metrics().unwrap();
 
         let error = statement.collect().unwrap_err();
         assert_eq!(error.code, ErrorCode::ResourceExhausted);
-        assert_eq!(metrics.total_resource_usage().current_bytes, 0);
     }
 
     #[test]
@@ -2346,25 +1855,6 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first.memory_pool, &cloned.memory_pool));
         assert!(!Arc::ptr_eq(&first.memory_pool, &second.memory_pool));
-    }
-
-    #[test]
-    fn query_execution_timer_starts_when_results_are_requested() {
-        let temp = tempdir().unwrap();
-        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let session = engine.session().build().unwrap();
-        let statement = session.sql("SELECT 1").unwrap();
-        let Statement::Query(query) = &statement else {
-            panic!("SELECT must produce a query");
-        };
-        assert!(query.execution_started_at.lock().unwrap().is_none());
-
-        let planned_at = std::time::Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        statement.collect().unwrap();
-
-        let started_at = query.execution_started_at.lock().unwrap().unwrap();
-        assert!(started_at.duration_since(planned_at) >= std::time::Duration::from_millis(15));
     }
 
     #[test]
@@ -2412,12 +1902,10 @@ mod tests {
         let limited_session = limited_engine.session().build().unwrap();
         limited_session.sql(&ddl).unwrap();
         let statement = limited_session.sql("SELECT uri FROM photos").unwrap();
-        let metrics = statement.metrics().unwrap();
 
         let error = statement.collect().unwrap_err();
 
         assert_eq!(error.code, ErrorCode::ResourceExhausted);
-        assert_eq!(metrics.total_resource_usage().current_bytes, 0);
     }
 
     #[test]
@@ -2426,57 +1914,16 @@ mod tests {
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
         let statement = session.sql("SELECT 'cached result' AS value").unwrap();
-        let metrics = statement.metrics().unwrap();
 
         statement.collect().unwrap();
-        assert!(
-            metrics
-                .resource_usage(crate::QueryResource::Arrow)
-                .current_bytes
-                > 0
-        );
+        assert!(session.memory_pool.reserved() > 0);
         drop(statement);
 
-        assert_eq!(metrics.total_resource_usage().current_bytes, 0);
-        assert!(
-            metrics
-                .resource_usage(crate::QueryResource::Arrow)
-                .peak_bytes
-                > 0
-        );
+        assert_eq!(session.memory_pool.reserved(), 0);
     }
 
     #[test]
-    fn bounded_source_metrics_count_rows_before_filtering() {
-        let temp = tempdir().unwrap();
-        let photos = temp.path().join("photos");
-        std::fs::create_dir(&photos).unwrap();
-        for (name, width) in [("small.png", 8), ("large.png", 16)] {
-            RgbImage::from_pixel(width, 4, Rgb([1, 2, 3]))
-                .save(photos.join(name))
-                .unwrap();
-        }
-        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let session = engine.session().build().unwrap();
-        session
-            .sql(&format!(
-                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
-                photos.display()
-            ))
-            .unwrap();
-
-        let statement = session
-            .sql("SELECT uri FROM photos WHERE width > 100")
-            .unwrap();
-        let batches = statement.collect().unwrap();
-
-        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
-        assert_eq!(statement.metrics().unwrap().input_rows(), 2);
-        assert_eq!(statement.metrics().unwrap().output_rows(), 0);
-    }
-
-    #[test]
-    fn concurrent_sessions_keep_query_metrics_isolated() {
+    fn concurrent_sessions_return_independent_results() {
         let temp = tempdir().unwrap();
         let one = temp.path().join("one");
         let three = temp.path().join("three");
@@ -2535,10 +1982,6 @@ mod tests {
                 3
             );
         });
-        assert_eq!(left.metrics().unwrap().input_rows(), 1);
-        assert_eq!(left.metrics().unwrap().output_rows(), 1);
-        assert_eq!(right.metrics().unwrap().input_rows(), 3);
-        assert_eq!(right.metrics().unwrap().output_rows(), 3);
     }
 
     #[test]
@@ -3060,26 +2503,6 @@ mod tests {
             .to_string();
         assert!(physical.contains("InferenceExec"));
         statement.collect().unwrap();
-        let metrics = statement.metrics().unwrap();
-        assert_eq!(metrics.inference_rows(), 1);
-        assert!(
-            metrics
-                .resource_usage(crate::QueryResource::Media)
-                .peak_bytes
-                > 0
-        );
-        assert!(
-            metrics
-                .resource_usage(crate::QueryResource::ModelQueue)
-                .peak_bytes
-                > 0
-        );
-        assert_eq!(
-            metrics
-                .resource_usage(crate::QueryResource::Media)
-                .current_bytes,
-            0
-        );
 
         let deduplicated = session
             .sql(
@@ -3101,7 +2524,6 @@ mod tests {
             1
         );
         deduplicated.collect().unwrap();
-        assert_eq!(deduplicated.metrics().unwrap().inference_rows(), 1);
 
         let Some((address, server)) = serve_triton_metadata_once() else {
             return;
@@ -3192,7 +2614,6 @@ mod tests {
         assert_eq!(error.code, ErrorCode::QueryCancelled);
         assert!(started.elapsed() < Duration::from_millis(400));
         server.join().unwrap();
-        assert_eq!(query.metrics().total_resource_usage().current_bytes, 0);
     }
 
     #[test]
@@ -3407,14 +2828,6 @@ mod tests {
             provider.0.lock().unwrap().as_slice(),
             ["secret://kafka/producer"]
         );
-        assert_eq!(
-            insert
-                .metrics()
-                .unwrap()
-                .total_resource_usage()
-                .current_bytes,
-            0
-        );
     }
 
     #[test]
@@ -3486,7 +2899,6 @@ mod tests {
             batches[0].column(0).is_null(0),
             "a row that fails inference must yield NULL"
         );
-        assert_eq!(query.metrics().unwrap().error_rows(), 1);
 
         session.sql("SET vql.on_error='fail'").unwrap();
         let error = session
@@ -3841,26 +3253,6 @@ mod tests {
             .unwrap();
         assert!(!encoded.is_null(0));
         assert!(buffer_ids.is_null(0));
-        let metrics = statement.metrics().unwrap();
-        assert!(metrics.decode_frames() > 0);
-        assert!(metrics.source_generation() > 0);
-        assert!(metrics.sampled_fps() > 0.0);
-        assert!(metrics.source_input_bytes() > 0);
-        assert!(metrics.epoch_p50_ms() >= 0.0);
-        assert!(metrics.end_to_end_p50_ms() >= metrics.epoch_p50_ms());
-        assert!(metrics.watermark_ms().is_some());
-        assert_eq!(
-            metrics
-                .resource_usage(crate::QueryResource::FrameBuffer)
-                .current_bytes,
-            0
-        );
-        assert!(
-            metrics
-                .resource_usage(crate::QueryResource::FrameBuffer)
-                .peak_bytes
-                > 0
-        );
     }
 
     #[cfg(feature = "ffmpeg-native")]
@@ -3931,11 +3323,6 @@ mod tests {
                 );
             }
         }
-        let metrics = statement.metrics().unwrap();
-        assert_eq!(metrics.output_rows(), 3);
-        assert_eq!(metrics.late_rows(), 0);
-        assert_eq!(metrics.window_state_bytes(), 0);
-        assert!(metrics.watermark_ms().is_some());
     }
 
     #[cfg(feature = "ffmpeg-native")]
@@ -4050,10 +3437,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rows, [(0, 1), (1, 1), (2, 1)]);
-        let metrics = statement.metrics().unwrap();
-        assert!(metrics.decode_frames() >= 3);
-        assert_eq!(metrics.inference_rows(), 3);
-        assert!(metrics.watermark_ms().is_some());
 
         let windowed = session
             .sql(
@@ -4097,6 +3480,5 @@ mod tests {
                 assert_eq!(averages.value(row), 1.0);
             }
         }
-        assert!(windowed.metrics().unwrap().inference_rows() > 0);
     }
 }

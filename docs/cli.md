@@ -6,7 +6,7 @@
 
 `vql-cli` owns clap command parsing, terminal input, SQL-script loading, result rendering, history, and process signals. It loads `EngineConfig`, constructs one embedded `Engine` and `Session`, and uses only public kernel APIs.
 
-It does not own SQL syntax, planning, Catalog semantics, query metrics, memory policy, model loading, or connector behavior. It does not embed Python, so a Python UDF encountered by the CLI fails with guidance to use the Python host.
+It does not own SQL syntax, planning, Catalog semantics, memory policy, model loading, or connector behavior. It does not embed Python, so a Python UDF encountered by the CLI fails with guidance to use the Python host.
 
 ## Command Surface
 
@@ -17,7 +17,7 @@ vql shell
 vql run <script.sql>
 ```
 
-SQL `EXPLAIN` is a SQL statement executed through either host path. It is not a CLI subcommand. Query metrics remain kernel and Python APIs rather than a CLI output mode.
+SQL `EXPLAIN` is a SQL statement executed through either host path. It is not a CLI subcommand.
 
 Engine settings are not CLI flags. `VQL_HOME` selects the instance and its strict `config.toml`; `VQL_LOG_LEVEL` may override the configured log level. In repository development, `cargo run -p vql-cli -- shell` and `cargo run -p vql-cli -- run <script.sql>` replace the installed executable.
 

@@ -88,13 +88,13 @@ A Model declaration stores its type, source, selected Runtime, and the complete 
 
 ### Resources and host capabilities
 
-Each Session owns one tracked memory budget; cloned handles share it, separately built Sessions do not. `resources.rs` splits it into named `QueryResource` consumers (`Arrow`, `Media`, `FrameBuffer`, `ModelTensor`, `ModelQueue`, `TritonPayload`, `WindowState`, `SinkBuffer`, `DeviceMemory`) so a new buffer must pick an existing class rather than allocate untracked. Exceeding the budget fails the requesting query with `RESOURCE_EXHAUSTED`; `TUMBLE` state has no spill.
+Each Session owns one memory budget; cloned handles share it, separately built Sessions do not. `resources.rs` uses named memory consumers so new buffers participate in the same enforced limit rather than allocate outside it. Exceeding the budget fails the requesting query with `RESOURCE_EXHAUSTED`; `TUMBLE` state has no spill.
 
 Optional host capabilities are injected, never discovered: `EngineConfig::with_secret_provider` for credentials and `SessionBuilder::with_python_udf_host` for Python UDFs. Kernel code must degrade with a clear error when a capability is absent.
 
 ### Error contract
 
-`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL:CODE] message`. Row-level failures (bad image, failed inference) produce NULL result columns and bump `QueryMetrics::error_rows`; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change.
+`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL:CODE] message`. Row-level failures (bad image, failed inference) produce NULL result columns; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change.
 
 ## Testing model
 

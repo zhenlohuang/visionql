@@ -35,7 +35,6 @@ use crate::models::{
 };
 use crate::planner::sink::SinkExtensionPlanner;
 use crate::resources::QueryBudget;
-use crate::session::QueryMetrics;
 
 #[derive(Clone)]
 struct InferenceNode {
@@ -51,7 +50,6 @@ struct InferenceNode {
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
-    metrics: Arc<QueryMetrics>,
 }
 
 impl InferenceNode {
@@ -68,7 +66,6 @@ impl InferenceNode {
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
         budget: QueryBudget,
-        metrics: Arc<QueryMetrics>,
     ) -> DataFusionResult<Self> {
         let result = DFSchema::from_unqualified_fields(
             Fields::from(vec![Arc::new(Field::new(
@@ -92,7 +89,6 @@ impl InferenceNode {
             fail_on_error,
             cancellation,
             budget,
-            metrics,
         })
     }
 
@@ -241,7 +237,6 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
             self.budget.clone(),
-            Arc::clone(&self.metrics),
         )
     }
 
@@ -304,7 +299,6 @@ pub(crate) fn extract_inference(
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
-    metrics: Arc<QueryMetrics>,
 ) -> crate::Result<LogicalPlan> {
     let mut volatile_id = 0_u64;
     plan.transform_up(|plan| {
@@ -315,7 +309,6 @@ pub(crate) fn extract_inference(
             Arc::clone(&fail_on_error),
             cancellation.clone(),
             budget.clone(),
-            Arc::clone(&metrics),
             &mut volatile_id,
         )
     })
@@ -331,7 +324,6 @@ fn rewrite_plan_node(
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
-    metrics: Arc<QueryMetrics>,
     volatile_id: &mut u64,
 ) -> DataFusionResult<Transformed<LogicalPlan>> {
     let mut inputs = plan
@@ -417,7 +409,6 @@ fn rewrite_plan_node(
                         Arc::clone(&fail_on_error),
                         cancellation.clone(),
                         budget.clone(),
-                        Arc::clone(&metrics),
                     )?),
                 }));
             }
@@ -631,7 +622,6 @@ impl ExtensionPlanner for InferenceExtensionPlanner {
             Arc::clone(&node.fail_on_error),
             node.cancellation.clone(),
             node.budget.clone(),
-            Arc::clone(&node.metrics),
         ))))
     }
 }
@@ -648,7 +638,6 @@ struct InferenceExec {
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
-    metrics: Arc<QueryMetrics>,
     properties: Arc<PlanProperties>,
 }
 
@@ -666,7 +655,6 @@ impl InferenceExec {
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
         budget: QueryBudget,
-        metrics: Arc<QueryMetrics>,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
@@ -686,7 +674,6 @@ impl InferenceExec {
             fail_on_error,
             cancellation,
             budget,
-            metrics,
             properties,
         }
     }
@@ -764,7 +751,6 @@ impl ExecutionPlan for InferenceExec {
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
             self.budget.clone(),
-            Arc::clone(&self.metrics),
         )))
     }
 
@@ -784,7 +770,6 @@ impl ExecutionPlan for InferenceExec {
         let fail_on_error = Arc::clone(&self.fail_on_error);
         let cancellation = self.cancellation.clone();
         let budget = self.budget.clone();
-        let metrics = Arc::clone(&self.metrics);
         let stream = async_stream::try_stream! {
             while let Some(batch) = input.next().await {
                 if cancellation.is_cancelled() {
@@ -809,7 +794,6 @@ impl ExecutionPlan for InferenceExec {
                         fail_on_error.load(Ordering::Relaxed),
                         cancellation.clone(),
                         &budget,
-                        Arc::clone(&metrics),
                     )
                     .await
                     .map_err(|error| DataFusionError::External(Box::new(error)))?;

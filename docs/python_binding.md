@@ -12,7 +12,7 @@
 - the in-process Python UDF host;
 - Python exceptions and notebook representation.
 
-It does not reimplement SQL planning, result schemas, cancellation, metrics, resource accounting, or model execution. DataFusion types do not appear in the public Python API.
+It does not reimplement SQL planning, result schemas, cancellation, resource accounting, or model execution. DataFusion types do not appear in the public Python API.
 
 The package and import name are `visionql`; the native module is `visionql._visionql`. The package re-exports `connect`, `Session`, `QueryHandle`, `__version__`, and the pure-Python `visionql.images` helper module.
 
@@ -29,7 +29,6 @@ handles = session.run_script("SELECT 1; SELECT 2;")
 
 table = handle.collect()
 text = handle.show(n=20)
-metrics = handle.metrics()
 handle.cancel()
 ```
 
@@ -53,16 +52,6 @@ Results use the Arrow C data interface through `arrow-pyarrow`; they are not cop
 
 Standard Arrow storage remains readable when PyArrow does not interpret VisionQL extension metadata. Process-local `IMAGE.buffer_id` and `IMAGE.buffer_slot` never cross this boundary. An `IMAGE` needed in Python carries encoded bytes and metadata.
 
-## Query Metrics
-
-`QueryHandle.metrics()` returns `None` when a statement has no query metrics. Otherwise it returns a dictionary. The [Kernel Design](./kernel.md#metrics) defines which counters and distributions exist and what they mean; the binding only decides how they are shaped in Python:
-
-- every scalar counter and distribution becomes one snake_case key with the kernel's own name, value, and unit;
-- `dropped_frame_ranges` becomes a list of dictionaries, with the drop reason as a lowercase string;
-- `resources` is a nested dictionary keyed by `arrow`, `media`, `frame_buffer`, `model_tensor`, `model_queue`, `triton_payload`, `window_state`, `sink_buffer`, and `device_memory`, each carrying `available`, `current_bytes`, and `peak_bytes`.
-
-The mapping adds no derived values and changes no units or lifecycle. `device_memory` reports `available = False` so a caller never reads an untracked zero as a measurement.
-
 ## Python UDF Host
 
 `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` stores a Python entry point in the Catalog. Resolution imports the module, verifies that the attribute is callable, and caches the callable in the Session's Python UDF host.
@@ -84,4 +73,4 @@ Python-owned API tests run after `maturin develop --locked`:
 python -m pytest -q vql-python/tests
 ```
 
-They protect PyArrow collection, schema preservation, metrics mapping, Session configuration overrides, notebook representation, vectorized Python UDFs, and encoded-image flow through a Python UDF. Shared SQL conformance and external-service scenarios remain in the [Testing Design](./testing.md).
+They protect PyArrow collection, schema preservation, Session configuration overrides, notebook representation, vectorized Python UDFs, and encoded-image flow through a Python UDF. Shared SQL conformance and external-service scenarios remain in the [Testing Design](./testing.md).

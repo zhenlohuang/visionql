@@ -18,7 +18,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::models::ModelRuntime;
 use crate::resources::QueryBudget;
-use crate::session::QueryMetrics;
 use crate::stream::TumblePlan;
 
 pub(crate) use session_state::{context_for_function_ddl, context_for_snapshot};
@@ -48,7 +47,6 @@ pub(crate) async fn plan_statement(
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
-    metrics: Arc<QueryMetrics>,
 ) -> crate::Result<PlannedStatement> {
     let original_sql = sql;
     let sql = normalize::normalize_query(original_sql, snapshot)?;
@@ -60,15 +58,8 @@ pub(crate) async fn plan_statement(
     } else {
         (plan, 0, None)
     };
-    let plan = inference::extract_inference(
-        plan,
-        snapshot,
-        models,
-        fail_on_error,
-        cancellation,
-        budget,
-        metrics,
-    )?;
+    let plan =
+        inference::extract_inference(plan, snapshot, models, fail_on_error, cancellation, budget)?;
     let plan = annotate_explain(plan, snapshot)?;
     let dataframe = DataFrame::new(state, plan);
     let tumble = if stream_name.is_some() {

@@ -388,7 +388,6 @@ fn decoded_image(frame: DecodedFrame) -> Result<image::DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::ResourceMetrics;
     use crate::types::{ImageRef, ImageRefBuilder};
     use image::ImageFormat;
     use tempfile::tempdir;
@@ -419,8 +418,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let catalog = Arc::new(CatalogStore::open(&temp.path().join("catalog.db")).unwrap());
         let media = Arc::new(MediaRuntime::new());
-        let metrics = Arc::new(ResourceMetrics::default());
-        let budget = QueryBudget::new(64 * 64 * 4 - 1, Arc::clone(&metrics));
+        let budget = QueryBudget::new(64 * 64 * 4 - 1);
+        let probe = budget.clone();
 
         let error = materialize_encoded_images(
             Arc::clone(&catalog),
@@ -433,17 +432,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(error.code, ErrorCode::ResourceExhausted);
-        assert_eq!(metrics.total_usage().current_bytes, 0);
+        assert!(
+            probe
+                .reserve(crate::QueryResource::Arrow, 64 * 64 * 4 - 1)
+                .is_ok()
+        );
 
-        let metrics = Arc::new(ResourceMetrics::default());
-        let budget = QueryBudget::new(1024 * 1024, Arc::clone(&metrics));
+        let budget = QueryBudget::new(1024 * 1024);
+        let probe = budget.clone();
         let materialized =
             materialize_encoded_images(catalog, media, &encoded_image(64, 64), true, Some(budget))
                 .unwrap();
         assert_eq!(materialized.array.len(), 1);
-        assert!(metrics.usage(crate::QueryResource::Media).peak_bytes > 0);
-        assert!(metrics.usage(crate::QueryResource::Arrow).current_bytes > 0);
+        assert!(
+            probe
+                .reserve(crate::QueryResource::Arrow, 1024 * 1024)
+                .is_err()
+        );
         drop(materialized);
-        assert_eq!(metrics.total_usage().current_bytes, 0);
+        assert!(
+            probe
+                .reserve(crate::QueryResource::Arrow, 1024 * 1024)
+                .is_ok()
+        );
     }
 }

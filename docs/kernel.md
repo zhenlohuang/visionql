@@ -4,7 +4,7 @@
 
 ## Kernel Boundary
 
-`vql-kernel` exposes `Engine`, `Session`, configuration, statements, query results, cancellation, metrics, and host-injection traits. It owns no process signals, terminal behavior, PyO3 objects, network listeners, or global singleton state.
+`vql-kernel` exposes `Engine`, `Session`, configuration, statements, query results, cancellation, and host-injection traits. It owns no process signals, terminal behavior, PyO3 objects, network listeners, or global singleton state.
 
 The host supplies `EngineConfig`, a secret provider, and an optional Python UDF host. The kernel owns the SQL entry point and all semantics below it.
 
@@ -109,14 +109,12 @@ Streaming input enters the engine as short micro-batches. The RTSP source closes
 struct StreamEpoch {
     epoch_id: u64,
     batches: Vec<RecordBatch>,
-    source_progress: SourceProgress,
     watermark_ms: Option<i64>,
     frame_lease: Option<FrameBufferLease>,
-    admitted_at: Instant,
 }
 ```
 
-Event time is UTC milliseconds throughout, so the watermark is a plain `i64`. `admitted_at` exists only to attribute end-to-end epoch latency in query metrics.
+Event time is UTC milliseconds throughout, so the watermark is a plain `i64`.
 
 `batches` may be empty. None of the other fields is encoded as a hidden row, so a Filter that removes every row still cannot stall source progress, watermarks, or frame-buffer reclamation.
 
@@ -682,16 +680,16 @@ Service-owned batching bypasses the VisionQL batching queue. Each session instea
 
 NULL domain inputs produce NULL results. A row-level preprocessing or post-processing error follows `vql.on_error`: NULL by default or query failure in strict mode. A Runtime failure affecting a whole batch is attributed to every affected row before the same policy is applied. Cancelled queued requests are skipped, submission and response waits stop promptly, and late results are ignored. Service-owned calls receive the caller's cancellation token; the current batched embedded backend call is allowed to finish before its buffers are released.
 
-All preprocessing tensors, encoded request payloads, Runtime queues, and post-processing buffers reserve memory through the engine pool. Prompt and payload size limits are checked before allocation. Query metrics record inference rows and batches, actual batch distribution, queue or service wait, inference latency, row failures, and current and peak resource reservations. Runtime identity and batching ownership remain plan annotations rather than metric fields. Device-memory reservation counters remain zero until a Runtime supplies allocator telemetry; hosts present that state as unavailable rather than as a measured zero.
+All preprocessing tensors, encoded request payloads, Runtime queues, and post-processing buffers reserve memory through the engine pool. Prompt and payload size limits are checked before allocation. Runtime identity and batching ownership remain plan annotations.
 
 
 ---
 
-## Resources, Performance, and Observability
+## Resources and Performance
 
 ### Unified Resource Budget
 
-Each Session receives one tracked host-memory budget, set by `kernel.session.memory_limit` in `$VQL_HOME/config.toml` and defaulting to 512 MiB. Every query, asynchronous task, and retained result owned by that Session shares its DataFusion `MemoryPool` capacity; cloned Session handles share the same pool, while separately built Sessions receive independent pools. Query metrics retain per-query attribution. The limit covers these resources:
+Each Session receives one host-memory budget, set by `kernel.session.memory_limit` in `$VQL_HOME/config.toml` and defaulting to 512 MiB. Every query, asynchronous task, and retained result owned by that Session shares its DataFusion `MemoryPool` capacity; cloned Session handles share the same pool, while separately built Sessions receive independent pools. The limit covers these resources:
 
 | Resource | Behavior at the limit |
 |---|---|
@@ -701,8 +699,6 @@ Each Session receives one tracked host-memory budget, set by `kernel.session.mem
 | Tensor buffers and inference queues | Bounded queues; submitters await capacity |
 | `TUMBLE` state | No spill; fail with guidance to reduce group-key cardinality or shorten the window |
 | Table-write buffers | Apply backpressure; fail after timeout according to query policy |
-
-Device memory is tracked separately when a Runtime can report it. Hosts expose an explicit unavailable state for Runtimes that provide no device allocator telemetry; they must not present an estimated zero as a measured value.
 
 The Session limit is not an Engine-wide or process-RSS limit. Catalog internals, on-disk model cache contents, third-party allocations outside the reservation system, and aggregate memory across separately built Sessions are outside it. When a reservation would exceed the limit, the requesting query fails with `RESOURCE_EXHAUSTED`; existing queries retain their reservations, and every reservation is released with its owning asynchronous work or result handle.
 
@@ -719,22 +715,11 @@ The PRD does not set hardware-specific throughput or latency targets. Capacity d
 
 A benchmark records the measured rates, window latency, and frame-drop rate together with its complete workload and hardware configuration. Thresholds belong to benchmark plans and release evidence, not to the product requirements contract.
 
-### Metrics
-
-The `QueryMetrics` surface exposes:
-
-- query: input/output rows, epoch and end-to-end P50/P95 latency, error rows, late rows, current window-state bytes, and Table-write retries;
-- media: decoded and sampled frame counts, sampled fps, input bytes and bitrate, dropped frames and ranges by reason, reconnect and generation counts, gap duration, and the latest watermark;
-- model: inference rows and batches, actual batch distribution, inference P50/P95, and queue or service-wait P50/P95;
-- resources: current and peak bytes for Arrow, media, frame-buffer, tensor, model-queue, Triton-payload, window-state, sink-buffer, and device-memory reservations. A host exposing device memory must mark the telemetry unavailable until its Runtime supplies allocator data; the Python binding provides that availability field.
-
-Embedded mode exposes metrics through the kernel `QueryHandle`; the Python binding maps the same values to a dictionary. Tracing records execution diagnostics but is not a second complete metrics API. Correlation uses source names, epoch IDs, resolved Model specifications, and stable error codes; it does not define a durable query identity. `query_id` and Manifest-backed job identity belong to the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md).
-
 ### Error Classes
 
 | Class | Example | Default behavior |
 |---|---|---|
-| Row data error | Corrupt frame, one failed inference | Write NULL, increment metrics, continue |
+| Row data error | Corrupt frame, one failed inference | Write NULL and continue |
 | Query semantic error | Type mismatch, unbounded sort, unavailable feature | Fail planning before starting runtime work |
 | Resource error | Memory/device exhaustion, excessive state | Fail query and release every lease |
 | External-system error | RTSP disconnect, Kafka unavailable | Retry by connector policy; eventually fail or remain Disconnected |

@@ -89,7 +89,7 @@ Every media, inference, window, and table-write buffer is bounded and charged to
 
 ### Row isolation and Arrow interoperability
 
-A row-level decode or inference failure preserves the input row and writes NULL to the affected result unless strict mode is enabled. Stable codes and query metrics expose the failure without requiring error-string matching.
+A row-level decode or inference failure preserves the input row and writes NULL to the affected result unless strict mode is enabled. Stable codes expose hard failures without requiring error-string matching.
 
 Multimodal values use standard Arrow storage with extension metadata. An unaware Arrow client can still read the storage type, while process-local frame references never cross a language, process, persistence, or network boundary.
 
@@ -159,7 +159,7 @@ Boundary rules:
 | One logical plan with bounded or epoch execution | Preserves shared SQL semantics without forcing control messages through `RecordBatch`. |
 | Epoch-scoped frame leases | Frame lifetime does not depend on whether rows survive filtering. |
 | Standard Arrow storage for multimodal values | Preserves ecosystem readability while keeping process-local state private. |
-| Explicit inference nodes | Enables type checking, deduplication, batching, cancellation, and metrics. |
+| Explicit inference nodes | Enables type checking, deduplication, batching, and cancellation. |
 | One immutable definition snapshot per planned statement | Prevents concurrent DDL from changing a running result. |
 | SQLite behind `CatalogBackend` | Preserves zero-service startup without coupling the domain to one backend. |
 | In-memory allowlisted `TUMBLE` state | Gives attached execution bounded state without defining a recovery ABI. |
@@ -172,7 +172,7 @@ Boundary rules:
 | [Kernel](./kernel.md) | Planning, streaming, types, providers, inference, resources, and security |
 | [Catalog](./catalog.md) | Namespaces, definitions, provider capabilities, snapshots, backend, and UC API |
 | [CLI](./cli.md) | `shell` and `run`, terminal behavior, rendering, and signals |
-| [Python binding](./python_binding.md) | PyO3 API, PyArrow results, metrics, and Python UDF execution |
+| [Python binding](./python_binding.md) | PyO3 API, PyArrow results, and Python UDF execution |
 | [Testing](./testing.md) | Test ownership, SQL conformance, fixtures, and external-service scenarios |
 
 ## References

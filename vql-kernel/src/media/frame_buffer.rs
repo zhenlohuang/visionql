@@ -123,8 +123,7 @@ mod tests {
     #[test]
     fn lease_controls_buffer_lifetime() {
         let registry = FrameBufferRegistry::new();
-        let metrics = Arc::new(crate::resources::ResourceMetrics::default());
-        let budget = crate::resources::QueryBudget::new(1024, metrics);
+        let budget = crate::resources::QueryBudget::new(1024);
         let (buffer_id, lease) = registry
             .register(
                 vec![DecodedFrame {

@@ -44,7 +44,6 @@ pub(crate) struct ImagesTableProvider {
     recursive: bool,
     schema: SchemaRef,
     metrics: Arc<ImagesScanMetrics>,
-    query_metrics: Option<Arc<crate::session::QueryMetrics>>,
 }
 
 impl ImagesTableProvider {
@@ -69,13 +68,7 @@ impl ImagesTableProvider {
             recursive,
             schema: images_schema(),
             metrics: Arc::new(ImagesScanMetrics::default()),
-            query_metrics: None,
         })
-    }
-
-    pub(crate) fn with_query_metrics(mut self, metrics: Arc<crate::session::QueryMetrics>) -> Self {
-        self.query_metrics = Some(metrics);
-        self
     }
 
     #[cfg(test)]
@@ -109,7 +102,6 @@ impl TableProvider for ImagesTableProvider {
             projection.cloned(),
             limit,
             Arc::clone(&self.metrics),
-            self.query_metrics.clone(),
         )))
     }
 }
@@ -122,12 +114,10 @@ struct ImagesExec {
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
     metrics: Arc<ImagesScanMetrics>,
-    query_metrics: Option<Arc<crate::session::QueryMetrics>>,
     properties: Arc<PlanProperties>,
 }
 
 impl ImagesExec {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         root: PathBuf,
         table_revision: i64,
@@ -136,7 +126,6 @@ impl ImagesExec {
         projection: Option<Vec<usize>>,
         limit: Option<usize>,
         metrics: Arc<ImagesScanMetrics>,
-        query_metrics: Option<Arc<crate::session::QueryMetrics>>,
     ) -> Self {
         let schema = projected_schema(&source_schema, projection.as_deref());
         let properties = Arc::new(PlanProperties::new(
@@ -153,7 +142,6 @@ impl ImagesExec {
             projection,
             limit,
             metrics,
-            query_metrics,
             properties,
         }
     }
@@ -246,7 +234,6 @@ impl ExecutionPlan for ImagesExec {
         let projection = self.projection.clone();
         let limit = self.limit;
         let metrics = Arc::clone(&self.metrics);
-        let query_metrics = self.query_metrics.clone();
         let stream_schema = Arc::clone(&output_schema);
 
         let stream = async_stream::try_stream! {
@@ -266,9 +253,6 @@ impl ExecutionPlan for ImagesExec {
                 objects.truncate(limit);
             }
             if objects.is_empty() {
-                if let Some(metrics) = &query_metrics {
-                    metrics.add_input_rows(0);
-                }
                 yield build_batch(
                     &root,
                     table_revision,
@@ -280,9 +264,6 @@ impl ExecutionPlan for ImagesExec {
                 )?;
             }
             for chunk in objects.chunks(BATCH_SIZE) {
-                if let Some(metrics) = &query_metrics {
-                    metrics.add_input_rows(chunk.len());
-                }
                 yield build_batch(
                     &root,
                     table_revision,

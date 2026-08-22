@@ -140,7 +140,7 @@ STOP QUERY '<query_id>';
 
 `query_id` is a server-generated UUID string. `SUBMIT QUERY` provides the durable job name, which is unique among the owner's non-terminal jobs. Attached queries have `name=NULL, lifecycle=attached`; durable jobs have `lifecycle=persistent`. Names are only for display and filtering and cannot replace IDs in state changes.
 
-Query metrics do not have a system-SQL channel. In addition to the [embedded kernel metrics](../kernel.md#metrics), v0.2 exposes a Prometheus endpoint with labels such as `query_id`, plus checkpoint duration and size, last successful epoch, and recovery count. This matches the PRD §3.8 cost panel. Metric names may evolve before v1.0 but must follow Prometheus naming and unit-suffix conventions; clients must not guess units from arbitrary strings.
+The v0.2 service exposes operational metrics through a Prometheus endpoint with labels such as `query_id`, plus checkpoint duration and size, last successful epoch, and recovery count. This matches the PRD §3.8 cost panel. Metric names may evolve before v1.0 but must follow Prometheus naming and unit-suffix conventions; clients must not guess units from arbitrary strings.
 
 ### Query Manifest and Recovery ABI
 

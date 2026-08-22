@@ -41,7 +41,6 @@ pub(crate) struct VideosTableProvider {
     start_time_ms: Option<i64>,
     schema: SchemaRef,
     media: Arc<MediaRuntime>,
-    query_metrics: Option<Arc<crate::session::QueryMetrics>>,
 }
 
 impl VideosTableProvider {
@@ -78,13 +77,7 @@ impl VideosTableProvider {
             start_time_ms,
             schema: videos_schema(start_time_ms.is_none()),
             media,
-            query_metrics: None,
         })
-    }
-
-    pub(crate) fn with_query_metrics(mut self, metrics: Arc<crate::session::QueryMetrics>) -> Self {
-        self.query_metrics = Some(metrics);
-        self
     }
 }
 
@@ -135,7 +128,6 @@ impl TableProvider for VideosTableProvider {
             limit,
             range,
             Arc::clone(&self.media),
-            self.query_metrics.clone(),
         )))
     }
 }
@@ -151,7 +143,6 @@ struct VideosExec {
     limit: Option<usize>,
     range: TimeRange,
     media: Arc<MediaRuntime>,
-    query_metrics: Option<Arc<crate::session::QueryMetrics>>,
     properties: Arc<PlanProperties>,
 }
 
@@ -168,7 +159,6 @@ impl VideosExec {
         limit: Option<usize>,
         range: TimeRange,
         media: Arc<MediaRuntime>,
-        query_metrics: Option<Arc<crate::session::QueryMetrics>>,
     ) -> Self {
         let output_schema = projected_schema(&source_schema, projection.as_deref());
         let properties = Arc::new(PlanProperties::new(
@@ -188,7 +178,6 @@ impl VideosExec {
             limit,
             range,
             media,
-            query_metrics,
             properties,
         }
     }
@@ -286,7 +275,6 @@ impl ExecutionPlan for VideosExec {
         let limit = self.limit;
         let range = self.range;
         let media = Arc::clone(&self.media);
-        let query_metrics = self.query_metrics.clone();
 
         let stream = async_stream::try_stream! {
             let store = LocalFileSystem::new_with_prefix(&root)
@@ -333,9 +321,6 @@ impl ExecutionPlan for VideosExec {
                 }
             }
             if rows.is_empty() {
-                if let Some(metrics) = &query_metrics {
-                    metrics.add_input_rows(0);
-                }
                 yield build_batch(
                     table_revision,
                     start_time_ms,
@@ -346,9 +331,6 @@ impl ExecutionPlan for VideosExec {
                 )?;
             }
             for chunk in rows.chunks(BATCH_SIZE) {
-                if let Some(metrics) = &query_metrics {
-                    metrics.add_input_rows(chunk.len());
-                }
                 yield build_batch(
                     table_revision,
                     start_time_ms,

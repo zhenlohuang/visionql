@@ -19,7 +19,6 @@ use crate::media::MediaRuntime;
 use crate::models::image_detection;
 use crate::planner::inference::VqlQueryPlanner;
 use crate::resources::QueryBudget;
-use crate::session::QueryMetrics;
 use crate::{ErrorCode, Result, VqlError};
 use std::sync::atomic::AtomicBool;
 
@@ -30,7 +29,6 @@ pub(crate) fn context_for_snapshot(
     fail_on_error: Arc<AtomicBool>,
     python_udf_host: Option<PythonUdfHostRef>,
     budget: &QueryBudget,
-    metrics: Arc<QueryMetrics>,
 ) -> Result<SessionContext> {
     let runtime_env = Arc::new(
         RuntimeEnvBuilder::new()
@@ -52,7 +50,7 @@ pub(crate) fn context_for_snapshot(
         python_udf_host,
         Some(budget.clone()),
     )?;
-    register_tables(&context, snapshot, media, metrics)?;
+    register_tables(&context, snapshot, media)?;
     Ok(context)
 }
 
@@ -120,7 +118,6 @@ fn register_tables(
     context: &SessionContext,
     snapshot: &DefinitionSnapshot,
     media: Arc<MediaRuntime>,
-    metrics: Arc<QueryMetrics>,
 ) -> Result<()> {
     for (name, table) in snapshot.tables() {
         match &table.definition.provider {
@@ -128,8 +125,7 @@ fn register_tables(
                 location,
                 recursive,
             } => {
-                let provider = ImagesTableProvider::try_new(location, table.revision, *recursive)?
-                    .with_query_metrics(Arc::clone(&metrics));
+                let provider = ImagesTableProvider::try_new(location, table.revision, *recursive)?;
                 if provider.schema().as_ref() != table.schema.as_ref() {
                     return Err(VqlError::new(
                         ErrorCode::Catalog,
@@ -151,8 +147,7 @@ fn register_tables(
                     *fps,
                     *start_time_ms,
                     Arc::clone(&media),
-                )?
-                .with_query_metrics(Arc::clone(&metrics));
+                )?;
                 if provider.schema().as_ref() != table.schema.as_ref() {
                     return Err(VqlError::new(
                         ErrorCode::Catalog,

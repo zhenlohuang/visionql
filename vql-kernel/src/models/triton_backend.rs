@@ -575,16 +575,13 @@ mod tests {
     }
 
     fn query_budget() -> QueryBudget {
-        QueryBudget::new(
-            16 * 1024 * 1024,
-            Arc::new(crate::resources::ResourceMetrics::default()),
-        )
+        QueryBudget::new(16 * 1024 * 1024)
     }
 
     #[test]
     fn triton_payload_limit_fails_before_buffer_growth() {
-        let metrics = Arc::new(crate::resources::ResourceMetrics::default());
-        let budget = QueryBudget::new(1, Arc::clone(&metrics));
+        let budget = QueryBudget::new(1);
+        let probe = budget.clone();
         let mut reservations = Vec::new();
 
         let error =
@@ -592,7 +589,11 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::ResourceExhausted);
         assert!(reservations.is_empty());
-        assert_eq!(metrics.total_usage().current_bytes, 0);
+        assert!(
+            probe
+                .reserve(crate::QueryResource::TritonPayload, 1)
+                .is_ok()
+        );
     }
 
     #[tokio::test]

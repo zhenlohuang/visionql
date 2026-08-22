@@ -20,7 +20,7 @@ Set `VQL_HOME="$PWD/data/.vql"` for reproducible local state. Default runtime se
 
 ## Coding Style & Naming Conventions
 
-Use rustfmt defaults (four-space indentation). Follow Rust conventions: `snake_case` for modules, functions, and test names; `PascalCase` for types and traits; `SCREAMING_SNAKE_CASE` for constants. Keep public errors, configuration fields, environment variables, paths, and SQL syntax stable unless the change intentionally revises the contract. The CLI surface is only `shell` and `run`: keep `EXPLAIN` as SQL, keep engine settings out of CLI flags, and keep standalone `\q` behavior aligned between the Reedline and stdin shell loops. Query metrics remain kernel/Python APIs, not a CLI output mode. Do not commit `target/`, `.venv/`, downloaded datasets, model artifacts, local catalogs, or generated native extensions.
+Use rustfmt defaults (four-space indentation). Follow Rust conventions: `snake_case` for modules, functions, and test names; `PascalCase` for types and traits; `SCREAMING_SNAKE_CASE` for constants. Keep public errors, configuration fields, environment variables, paths, and SQL syntax stable unless the change intentionally revises the contract. The CLI surface is only `shell` and `run`: keep `EXPLAIN` as SQL, keep engine settings out of CLI flags, and keep standalone `\q` behavior aligned between the Reedline and stdin shell loops. Do not commit `target/`, `.venv/`, downloaded datasets, model artifacts, local catalogs, or generated native extensions.
 
 ## Documentation Guidelines
 

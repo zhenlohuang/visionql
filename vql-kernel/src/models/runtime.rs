@@ -245,18 +245,10 @@ impl ModelRuntime {
         fail_on_error: bool,
         cancel: CancellationToken,
         budget: &QueryBudget,
-        metrics: Arc<crate::session::QueryMetrics>,
     ) -> Result<ArrayRef> {
         let mut decoded = Vec::new();
         let mut positions = Vec::new();
         let mut reservations = Vec::new();
-        let buffer_ids = images
-            .column(8)
-            .as_any()
-            .downcast_ref::<arrow::array::UInt64Array>()
-            .ok_or_else(|| {
-                VqlError::new(ErrorCode::Internal, "IMAGE buffer_id field is invalid")
-            })?;
         for row in 0..images.len() {
             if images.is_null(row) {
                 continue;
@@ -270,9 +262,6 @@ impl ModelRuntime {
             };
             match decoded_image {
                 Ok((image, reservation)) => {
-                    if !model.source.starts_with("mock://") && buffer_ids.is_null(row) {
-                        metrics.add_decode_frame();
-                    }
                     positions.push(row);
                     decoded.push(image);
                     reservations.push(reservation);
@@ -280,9 +269,7 @@ impl ModelRuntime {
                 Err(error) if fail_on_error || error.code == ErrorCode::ResourceExhausted => {
                     return Err(error);
                 }
-                Err(_) => {
-                    metrics.add_error_rows(1);
-                }
+                Err(_) => {}
             }
         }
         if decoded.is_empty() {
@@ -293,7 +280,6 @@ impl ModelRuntime {
                 invocation,
             );
         }
-        let count = decoded.len();
         let queue_bytes = decoded
             .capacity()
             .saturating_mul(std::mem::size_of::<image::DynamicImage>());
@@ -302,13 +288,7 @@ impl ModelRuntime {
         let reservations = InferenceReservations::new(reservations);
         let scheduler = self.scheduler(model).await?;
         let result = scheduler
-            .infer_with_metrics(
-                decoded,
-                cancel,
-                budget.clone(),
-                Arc::clone(&metrics),
-                reservations,
-            )
+            .infer(decoded, cancel, budget.clone(), reservations)
             .await;
         match result {
             Ok(results) => {
@@ -317,15 +297,12 @@ impl ModelRuntime {
                 Ok(output)
             }
             Err(error) if fail_on_error || error.code == ErrorCode::ResourceExhausted => Err(error),
-            Err(_) => {
-                metrics.add_error_rows(count);
-                filter_and_scatter_detections(
-                    &mock_detection_output("object", 0),
-                    &[],
-                    images.len(),
-                    invocation,
-                )
-            }
+            Err(_) => filter_and_scatter_detections(
+                &mock_detection_output("object", 0),
+                &[],
+                images.len(),
+                invocation,
+            ),
         }
     }
 }

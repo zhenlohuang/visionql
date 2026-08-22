@@ -178,74 +178,12 @@ impl ExecutionPlan for UnboundRtspExec {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SourceProgress {
-    pub(crate) generation: u64,
-    pub(crate) decoded_frames: u64,
-    pub(crate) sampled_frames: u64,
-    pub(crate) reconnects: u64,
-    pub(crate) event_time_fallbacks: u64,
-    pub(crate) dropped_frames: u64,
-    pub(crate) sampled_first_event_time_ms: Option<i64>,
-    pub(crate) sampled_last_event_time_ms: Option<i64>,
-    pub(crate) input_bytes: u64,
-    pub(crate) gap_duration_ms: u64,
-    pub(crate) dropped_ranges: Vec<crate::DroppedFrameRange>,
-}
-
-const MAX_DROPPED_RANGES: usize = 128;
-
-impl SourceProgress {
-    fn record_drop(
-        &mut self,
-        reason: crate::FrameDropReason,
-        count: u64,
-        first_event_time_ms: Option<i64>,
-        last_event_time_ms: Option<i64>,
-    ) {
-        if let Some(previous) = self.dropped_ranges.last_mut()
-            && previous.reason == reason
-        {
-            previous.count = previous.count.saturating_add(count);
-            previous.first_event_time_ms = previous.first_event_time_ms.or(first_event_time_ms);
-            previous.last_event_time_ms = last_event_time_ms.or(previous.last_event_time_ms);
-            return;
-        }
-        if self.dropped_ranges.len() >= MAX_DROPPED_RANGES
-            && let Some(previous) = self
-                .dropped_ranges
-                .iter_mut()
-                .find(|range| range.reason == reason)
-        {
-            previous.count = previous.count.saturating_add(count);
-            previous.first_event_time_ms = match (previous.first_event_time_ms, first_event_time_ms)
-            {
-                (Some(previous), Some(current)) => Some(previous.min(current)),
-                (previous, current) => previous.or(current),
-            };
-            previous.last_event_time_ms = match (previous.last_event_time_ms, last_event_time_ms) {
-                (Some(previous), Some(current)) => Some(previous.max(current)),
-                (previous, current) => previous.or(current),
-            };
-            return;
-        }
-        self.dropped_ranges.push(crate::DroppedFrameRange {
-            reason,
-            count,
-            first_event_time_ms,
-            last_event_time_ms,
-        });
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct StreamEpoch {
     pub(crate) epoch_id: u64,
     pub(crate) batches: Vec<RecordBatch>,
-    pub(crate) source_progress: SourceProgress,
     pub(crate) watermark_ms: Option<i64>,
     pub(crate) frame_lease: Option<FrameBufferLease>,
-    pub(crate) admitted_at: std::time::Instant,
 }
 
 pub(crate) struct RtspEpochReceiver {
@@ -326,7 +264,6 @@ struct EpochBuilder {
     epoch_id: u64,
     epoch_start_ms: Option<i64>,
     frames: Vec<SampledFrame>,
-    progress: SourceProgress,
     max_seen_event_time_ms: Option<i64>,
     watermark_ms: Option<i64>,
     budget: QueryBudget,
@@ -341,7 +278,6 @@ impl EpochBuilder {
             epoch_id: 0,
             epoch_start_ms: None,
             frames: Vec::new(),
-            progress: SourceProgress::default(),
             max_seen_event_time_ms: None,
             watermark_ms: None,
             budget,
@@ -365,11 +301,6 @@ impl EpochBuilder {
     }
 
     fn push(&mut self, event_time_ms: i64, frame_id: u64, frame: DecodedFrame) {
-        self.progress.sampled_frames = self.progress.sampled_frames.saturating_add(1);
-        self.progress
-            .sampled_first_event_time_ms
-            .get_or_insert(event_time_ms);
-        self.progress.sampled_last_event_time_ms = Some(event_time_ms);
         let reservation = loop {
             match self
                 .budget
@@ -378,13 +309,6 @@ impl EpochBuilder {
                 Ok(reservation) => break reservation,
                 Err(_) if !self.frames.is_empty() => {
                     let dropped = self.frames.remove(0);
-                    self.progress.dropped_frames = self.progress.dropped_frames.saturating_add(1);
-                    self.progress.record_drop(
-                        crate::FrameDropReason::ResourceBudget,
-                        1,
-                        Some(dropped.event_time_ms),
-                        Some(dropped.event_time_ms),
-                    );
                     tracing::warn!(
                         stream = %self.definition.name,
                         reason = "resource_budget",
@@ -395,13 +319,6 @@ impl EpochBuilder {
                     );
                 }
                 Err(error) => {
-                    self.progress.dropped_frames = self.progress.dropped_frames.saturating_add(1);
-                    self.progress.record_drop(
-                        crate::FrameDropReason::ResourceBudget,
-                        1,
-                        Some(event_time_ms),
-                        Some(event_time_ms),
-                    );
                     tracing::warn!(
                         stream = %self.definition.name,
                         reason = "resource_budget",
@@ -464,10 +381,8 @@ impl EpochBuilder {
         let epoch = StreamEpoch {
             epoch_id: self.epoch_id,
             batches: vec![batch],
-            source_progress: self.progress.clone(),
             watermark_ms: self.watermark_ms,
             frame_lease,
-            admitted_at: std::time::Instant::now(),
         };
         self.epoch_id = self.epoch_id.saturating_add(1);
         self.epoch_start_ms = None;
@@ -480,14 +395,7 @@ impl EpochBuilder {
         let last_event_time_ms = self.frames.last().map(|frame| frame.event_time_ms);
         self.frames.clear();
         self.epoch_start_ms = None;
-        self.progress.dropped_frames = self.progress.dropped_frames.saturating_add(count);
         if count > 0 {
-            self.progress.record_drop(
-                crate::FrameDropReason::SourceOverrun,
-                count,
-                first_event_time_ms,
-                last_event_time_ms,
-            );
             tracing::warn!(
                 stream = %self.definition.name,
                 reason = "source_overrun",
@@ -631,7 +539,6 @@ fn run_native_source(
     let mut backoff_seconds = 1_u64;
 
     while !cancellation.is_cancelled() {
-        builder.progress.generation = builder.progress.generation.saturating_add(1);
         let mut options = ffmpeg::Dictionary::new();
         if definition.endpoint.starts_with("rtsp://") {
             options.set(
@@ -651,11 +558,6 @@ fn run_native_source(
                     error = %error,
                     "RTSP connection failed; retrying"
                 );
-                builder.progress.reconnects = builder.progress.reconnects.saturating_add(1);
-                builder.progress.gap_duration_ms = builder
-                    .progress
-                    .gap_duration_ms
-                    .saturating_add(backoff_seconds.saturating_mul(1_000));
                 if !sleep_with_cancel(backoff_seconds, cancellation) {
                     break;
                 }
@@ -687,10 +589,6 @@ fn run_native_source(
             if stream.index() != stream_index {
                 continue;
             }
-            builder.progress.input_bytes = builder
-                .progress
-                .input_bytes
-                .saturating_add(packet.size() as u64);
             if let Err(error) = decoder.send_packet(&packet) {
                 if fail_on_error.load(Ordering::Relaxed) {
                     return Err(ffmpeg_error(error));
@@ -709,14 +607,8 @@ fn run_native_source(
                 let pts_ms = decoded.timestamp().map(|timestamp| {
                     (timestamp as f64 * f64::from(time_base) * 1_000.0).round() as i64
                 });
-                let (event_time_ms, fell_back) =
+                let (event_time_ms, _fell_back) =
                     generation_clock.event_time(pts_ms, ingest_ms, builder.watermark_ms);
-                if fell_back {
-                    builder.progress.generation = builder.progress.generation.saturating_add(1);
-                    builder.progress.event_time_fallbacks =
-                        builder.progress.event_time_fallbacks.saturating_add(1);
-                }
-                builder.progress.decoded_frames = builder.progress.decoded_frames.saturating_add(1);
                 builder.observe_event_time(event_time_ms);
                 if sampler.should_sample(event_time_ms) {
                     let frame =
@@ -727,14 +619,6 @@ fn run_native_source(
                             }
                             Err(error) => {
                                 builder.media.record_decode_error();
-                                builder.progress.dropped_frames =
-                                    builder.progress.dropped_frames.saturating_add(1);
-                                builder.progress.record_drop(
-                                    crate::FrameDropReason::DecodeError,
-                                    1,
-                                    Some(event_time_ms),
-                                    Some(event_time_ms),
-                                );
                                 tracing::warn!(
                                     stream = %definition.name,
                                     error = %error,
@@ -767,11 +651,6 @@ fn run_native_source(
         {
             return Ok(());
         }
-        builder.progress.reconnects = builder.progress.reconnects.saturating_add(1);
-        builder.progress.gap_duration_ms = builder
-            .progress
-            .gap_duration_ms
-            .saturating_add(backoff_seconds.saturating_mul(1_000));
         tracing::warn!(
             stream = %definition.name,
             decode_error = disconnected,
@@ -1006,10 +885,7 @@ mod tests {
     use arrow::array::{Array, StructArray, UInt32Array, UInt64Array};
 
     fn query_budget(limit: usize) -> QueryBudget {
-        QueryBudget::new(
-            limit,
-            Arc::new(crate::resources::ResourceMetrics::default()),
-        )
+        QueryBudget::new(limit)
     }
 
     #[test]
@@ -1069,7 +945,6 @@ mod tests {
         builder.drop_pending_frames();
 
         assert!(builder.frames.is_empty());
-        assert_eq!(builder.progress.dropped_frames, 1);
         assert_eq!(builder.watermark_ms, Some(8_000));
     }
 
@@ -1099,39 +974,6 @@ mod tests {
         }
         assert_eq!(builder.frames.len(), 1);
         assert_eq!(builder.frames[0].frame_id, 2);
-        assert_eq!(builder.progress.dropped_frames, 1);
-        assert_eq!(
-            builder.progress.dropped_ranges,
-            [crate::DroppedFrameRange {
-                reason: crate::FrameDropReason::ResourceBudget,
-                count: 1,
-                first_event_time_ms: Some(10_000),
-                last_event_time_ms: Some(10_000),
-            }]
-        );
-    }
-
-    #[test]
-    fn structured_drop_ranges_have_a_fixed_upper_bound() {
-        let mut progress = SourceProgress::default();
-        for index in 0..(MAX_DROPPED_RANGES + 10) {
-            let reason = if index % 2 == 0 {
-                crate::FrameDropReason::ResourceBudget
-            } else {
-                crate::FrameDropReason::DecodeError
-            };
-            progress.record_drop(reason, 1, Some(index as i64), Some(index as i64));
-        }
-
-        assert_eq!(progress.dropped_ranges.len(), MAX_DROPPED_RANGES);
-        assert_eq!(
-            progress
-                .dropped_ranges
-                .iter()
-                .map(|range| range.count)
-                .sum::<u64>(),
-            (MAX_DROPPED_RANGES + 10) as u64
-        );
     }
 
     #[test]

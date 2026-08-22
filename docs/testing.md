@@ -17,7 +17,7 @@ vql-testing system scenarios
 └── public VQL + real data/model + external services from Docker Compose
 
 Python binding tests
-└── PyO3/PyArrow API, Python UDF host, and Python-visible metrics
+└── PyO3/PyArrow API and Python UDF host
 ```
 
 Ownership rules:

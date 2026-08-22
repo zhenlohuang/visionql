@@ -541,10 +541,7 @@ mod tests {
     };
 
     fn query_budget() -> QueryBudget {
-        QueryBudget::new(
-            1024 * 1024,
-            Arc::new(crate::resources::ResourceMetrics::default()),
-        )
+        QueryBudget::new(1024 * 1024)
     }
 
     fn kafka_config(buffer_capacity: usize) -> KafkaTableConfig {
