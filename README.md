@@ -205,28 +205,47 @@ Python-hosted UDFs receive and return Arrow arrays in batches. They require the 
 ## CLI
 
 ```text
-vql [--catalog PATH] [--query-memory-limit-bytes BYTES] shell
-vql [--catalog PATH] [--query-memory-limit-bytes BYTES] run <script.sql>
+vql shell
+vql run <script.sql>
 ```
 
-SQL `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Sink placement without opening sources or probing models and services. Run it through the shell or a SQL script like any other statement. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG` to a `tracing` filter such as `info` or `vql_kernel=debug` when diagnosing execution.
+SQL `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Sink placement without opening sources or probing models and services. Run it through the shell or a SQL script like any other statement. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG_LEVEL=debug` when diagnosing execution.
 
 In `vql shell`, enter `\q` on its own line or press Ctrl-D to exit. Ctrl-C clears pending input at the prompt; during an unbounded query, the first Ctrl-C requests a graceful stop and the second cancels immediately.
 
 ## Runtime state
 
-VisionQL keeps local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The Catalog makes table, model, and function definitions reusable across sessions; planning takes one immutable definition snapshot so later DDL cannot change a running query.
+VisionQL keeps configuration and local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The optional `$VQL_HOME/config.toml` is loaded by the CLI and Python host; missing settings use the defaults below. The Catalog makes table, model, and function definitions reusable across sessions; planning takes one immutable definition snapshot so later DDL cannot change a running query.
+
+```toml
+version = 1
+
+[log]
+level = "info"
+
+[catalog]
+backend = "embedded"
+
+[catalog.embedded]
+path = "catalog/vql.db"
+
+[kernel.session]
+memory_limit = "512 MiB"
+```
+
+Relative paths are resolved from `VQL_HOME`. Configuration is strict: an unsupported version, backend, field, log level, or memory unit stops startup instead of being ignored.
 
 | State or setting | Default and behavior |
 |---|---|
-| Catalog | `$VQL_HOME/catalog/vql.db`; override with `VQL_CATALOG` or `--catalog PATH` |
+| Configuration | `$VQL_HOME/config.toml`; optional, schema `version = 1` |
+| Catalog | Embedded backend at `$VQL_HOME/catalog/vql.db`; Python and Rust hosts may explicitly override the path |
 | Shell history | `$VQL_HOME/history` |
 | Model cache | `$VQL_HOME/cache/models/`; local `file://` models stay at their source path |
-| Per-query memory | 512 MiB shared by DataFusion, media, model, window, and Sink reservations; override with `VQL_QUERY_MEMORY_LIMIT_BYTES`, `--query-memory-limit-bytes`, or Python `connect(query_memory_limit_bytes=...)` |
+| Session memory | 512 MiB shared by every query and retained result in one Session; Python may override it with `connect(session_memory_limit_bytes=...)` |
 | `HF_TOKEN` | Authenticates private `hf://` downloads |
-| `VQL_LOG` | Configures Rust tracing; default is off |
+| `VQL_LOG_LEVEL` | Overrides `log.level`; accepts `error`, `warn`, `info`, `debug`, or `trace` |
 
-A catalog override changes only the SQLite path; shell history and the model cache remain under the same `VQL_HOME`.
+An explicit host-side Catalog override changes only the embedded Catalog path; configuration, shell history, and the model cache remain under the same `VQL_HOME`.
 
 ## Architecture
 

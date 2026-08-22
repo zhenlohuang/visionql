@@ -168,16 +168,17 @@ impl PyQueryHandle {
 }
 
 #[pyfunction]
-#[pyo3(signature = (catalog=None, query_memory_limit_bytes=None))]
+#[pyo3(signature = (catalog=None, session_memory_limit_bytes=None))]
 fn connect(
     catalog: Option<PathBuf>,
-    query_memory_limit_bytes: Option<usize>,
+    session_memory_limit_bytes: Option<usize>,
 ) -> PyResult<PySession> {
-    let mut config = catalog
-        .map(|path| EngineConfig::default().with_catalog_path(path))
-        .unwrap_or_default();
-    if let Some(limit) = query_memory_limit_bytes {
-        config = config.with_query_memory_limit_bytes(limit);
+    let mut config = EngineConfig::load().map_err(py_error)?;
+    if let Some(path) = catalog {
+        config = config.with_catalog_path(path);
+    }
+    if let Some(limit) = session_memory_limit_bytes {
+        config = config.with_session_memory_limit_bytes(limit);
     }
     let engine = Engine::new(config).map_err(py_error)?;
     let host = Arc::new(PyArrowUdfHost::default());

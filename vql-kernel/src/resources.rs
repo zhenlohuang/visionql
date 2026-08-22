@@ -124,23 +124,75 @@ impl ResourceMetrics {
 }
 
 #[derive(Debug)]
-struct QueryMemoryPool {
+pub(crate) struct SessionMemoryPool {
     inner: GreedyMemoryPool,
+    limit: usize,
+}
+
+impl SessionMemoryPool {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            inner: GreedyMemoryPool::new(limit),
+            limit,
+        }
+    }
+
+    fn limit(&self) -> usize {
+        self.limit
+    }
+}
+
+impl Display for SessionMemoryPool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "vql-session({})", self.inner)
+    }
+}
+
+impl MemoryPool for SessionMemoryPool {
+    fn name(&self) -> &str {
+        "vql-session"
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.inner.shrink(reservation, shrink);
+    }
+
+    fn try_grow(
+        &self,
+        reservation: &MemoryReservation,
+        additional: usize,
+    ) -> datafusion::common::Result<()> {
+        self.inner.try_grow(reservation, additional)
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        MemoryLimit::Finite(self.limit)
+    }
+}
+
+#[derive(Debug)]
+struct QueryMemoryPool {
+    session: Arc<SessionMemoryPool>,
     metrics: Arc<ResourceMetrics>,
 }
 
 impl QueryMemoryPool {
-    fn new(limit: usize, metrics: Arc<ResourceMetrics>) -> Self {
-        Self {
-            inner: GreedyMemoryPool::new(limit),
-            metrics,
-        }
+    fn new(session: Arc<SessionMemoryPool>, metrics: Arc<ResourceMetrics>) -> Self {
+        Self { session, metrics }
     }
 }
 
 impl Display for QueryMemoryPool {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "vql-query({})", self.inner)
+        write!(formatter, "vql-query({})", self.session)
     }
 }
 
@@ -150,7 +202,7 @@ impl MemoryPool for QueryMemoryPool {
     }
 
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
-        self.inner.grow(reservation, additional);
+        self.session.grow(reservation, additional);
         self.metrics.grow(
             QueryResource::from_consumer(reservation.consumer()),
             additional,
@@ -158,7 +210,7 @@ impl MemoryPool for QueryMemoryPool {
     }
 
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
-        self.inner.shrink(reservation, shrink);
+        self.session.shrink(reservation, shrink);
         self.metrics
             .shrink(QueryResource::from_consumer(reservation.consumer()), shrink);
     }
@@ -168,7 +220,7 @@ impl MemoryPool for QueryMemoryPool {
         reservation: &MemoryReservation,
         additional: usize,
     ) -> datafusion::common::Result<()> {
-        self.inner.try_grow(reservation, additional)?;
+        self.session.try_grow(reservation, additional)?;
         self.metrics.grow(
             QueryResource::from_consumer(reservation.consumer()),
             additional,
@@ -177,24 +229,41 @@ impl MemoryPool for QueryMemoryPool {
     }
 
     fn reserved(&self) -> usize {
-        self.inner.reserved()
+        self.session.reserved()
     }
 
     fn memory_limit(&self) -> MemoryLimit {
-        self.inner.memory_limit()
+        self.session.memory_limit()
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct QueryBudget {
     limit: usize,
+    session: Arc<SessionMemoryPool>,
     pool: Arc<dyn MemoryPool>,
 }
 
 impl QueryBudget {
+    #[cfg(test)]
     pub(crate) fn new(limit: usize, metrics: Arc<ResourceMetrics>) -> Self {
-        let pool: Arc<dyn MemoryPool> = Arc::new(QueryMemoryPool::new(limit, Arc::clone(&metrics)));
-        Self { limit, pool }
+        Self::for_session(Arc::new(SessionMemoryPool::new(limit)), metrics)
+    }
+
+    pub(crate) fn for_session(
+        session: Arc<SessionMemoryPool>,
+        metrics: Arc<ResourceMetrics>,
+    ) -> Self {
+        let limit = session.limit();
+        let pool: Arc<dyn MemoryPool> = Arc::new(QueryMemoryPool::new(
+            Arc::clone(&session),
+            Arc::clone(&metrics),
+        ));
+        Self {
+            limit,
+            session,
+            pool,
+        }
     }
 
     pub(crate) fn memory_pool(&self) -> Arc<dyn MemoryPool> {
@@ -215,8 +284,9 @@ impl QueryBudget {
             VqlError::new(
                 ErrorCode::ResourceExhausted,
                 format!(
-                    "query memory budget of {} bytes cannot reserve {bytes} bytes for {}",
+                    "session memory limit of {} bytes exceeded: {} bytes reserved; cannot reserve {bytes} bytes for {}",
                     self.limit,
+                    self.session.reserved(),
                     resource.consumer_name()
                 ),
             )
@@ -226,6 +296,7 @@ impl QueryBudget {
             reservation,
             resource,
             limit: self.limit,
+            session: Arc::clone(&self.session),
         })
     }
 }
@@ -235,6 +306,7 @@ pub(crate) struct QueryReservation {
     reservation: MemoryReservation,
     resource: QueryResource,
     limit: usize,
+    session: Arc<SessionMemoryPool>,
 }
 
 impl QueryReservation {
@@ -247,7 +319,7 @@ impl QueryReservation {
             VqlError::new(
                 ErrorCode::ResourceExhausted,
                 format!(
-                    "query memory reservation for {} exceeds platform limits",
+                    "session memory reservation for {} exceeds platform limits",
                     self.resource.consumer_name()
                 ),
             )
@@ -260,8 +332,9 @@ impl QueryReservation {
             VqlError::new(
                 ErrorCode::ResourceExhausted,
                 format!(
-                    "query memory budget of {} bytes cannot reserve {size} bytes for {}",
+                    "session memory limit of {} bytes exceeded: {} bytes reserved; cannot resize reservation to {size} bytes for {}",
                     self.limit,
+                    self.session.reserved(),
                     self.resource.consumer_name()
                 ),
             )
@@ -300,5 +373,33 @@ mod tests {
                 peak_bytes: 60,
             }
         );
+    }
+
+    #[test]
+    fn query_views_share_one_session_limit_but_keep_separate_metrics() {
+        let session = Arc::new(SessionMemoryPool::new(100));
+        let first_metrics = Arc::new(ResourceMetrics::default());
+        let second_metrics = Arc::new(ResourceMetrics::default());
+        let first = QueryBudget::for_session(Arc::clone(&session), Arc::clone(&first_metrics));
+        let second = QueryBudget::for_session(Arc::clone(&session), Arc::clone(&second_metrics));
+
+        let frames = first.reserve(QueryResource::FrameBuffer, 60).unwrap();
+        let tensor = second.reserve(QueryResource::ModelTensor, 40).unwrap();
+
+        assert_eq!(session.reserved(), 100);
+        assert_eq!(first_metrics.total_usage().current_bytes, 60);
+        assert_eq!(second_metrics.total_usage().current_bytes, 40);
+        assert_eq!(
+            second
+                .reserve(QueryResource::SinkBuffer, 1)
+                .unwrap_err()
+                .code,
+            ErrorCode::ResourceExhausted
+        );
+
+        drop(frames);
+        assert_eq!(session.reserved(), 40);
+        drop(tensor);
+        assert_eq!(session.reserved(), 0);
     }
 }

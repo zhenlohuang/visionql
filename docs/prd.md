@@ -477,7 +477,7 @@ VisionQL is a query and processing engine, not a complete vertical application.
 - One RTSP source with event time, watermarks, reconnect handling, and best-effort delivery; `TUMBLE` uses a bounded allowlist of `COUNT/SUM/AVG/MIN/MAX` over persistable scalar types.
 - Console Sink for foreground debugging and Kafka Sink for continuous output. Parquet and Lance arrive together in v0.3.
 - Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. Batch and streaming queries run in the foreground and stay attached to the client. The chainable DataFrame API arrives in v0.2.
-- Catalog, shell history, and cache live under `VQL_HOME` (default `$HOME/.vql`). The SQLite Catalog is exactly `$VQL_HOME/catalog/vql.db`. Repository development uses `VQL_HOME=./data/.vql`; datasets live separately under `./data/datasets/`.
+- Configuration, Catalog, shell history, and cache live under `VQL_HOME` (default `$HOME/.vql`). The embedded Catalog backend is currently backed by SQLite at exactly `$VQL_HOME/catalog/vql.db`; `$VQL_HOME/config.toml` selects its backend settings and the Session memory limit. Repository development uses `VQL_HOME=./data/.vql`; datasets live separately under `./data/datasets/`.
 - Explicit frame-sampling pushdown as the first optimizer feature.
 
 RTSP remains non-replayable and best-effort; outages and drops appear as gaps. Scenario B uses recorded-video batch output as the trusted reference for the streaming result, but both paths are required before v0.1 is complete.

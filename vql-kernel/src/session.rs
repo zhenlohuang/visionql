@@ -25,7 +25,7 @@ use crate::planner::{
     SinkTarget, bind_stream_epoch, bind_tumble_output, context_for_function_ddl,
     context_for_snapshot, normalize_function_ddl, plan_statement, wrap_sink,
 };
-use crate::resources::{QueryBudget, QueryReservation, ResourceMetrics};
+use crate::resources::{QueryBudget, QueryReservation, ResourceMetrics, SessionMemoryPool};
 use crate::sql::{
     CreateModel, CreateStream, CreateTable, ShowKind, VqlStatement, parse_statement, render_create,
 };
@@ -53,11 +53,15 @@ impl SessionBuilder {
 
     pub fn build(self) -> Result<Session> {
         self.engine.inner.catalog.snapshot()?;
+        let memory_pool = Arc::new(SessionMemoryPool::new(
+            self.engine.inner.config.session_memory_limit_bytes(),
+        ));
         Ok(Session {
             engine: self.engine,
             active_query: Arc::new(Mutex::new(None)),
             fail_on_error: Arc::new(AtomicBool::new(false)),
             python_udf_host: self.python_udf_host,
+            memory_pool,
         })
     }
 }
@@ -68,6 +72,7 @@ pub struct Session {
     active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     fail_on_error: Arc<AtomicBool>,
     python_udf_host: Option<PythonUdfHostRef>,
+    memory_pool: Arc<SessionMemoryPool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1181,8 +1186,8 @@ impl Session {
             }
         }
         let metrics = Arc::new(QueryMetrics::default());
-        let budget = QueryBudget::new(
-            self.engine.inner.config.query_memory_limit_bytes(),
+        let budget = QueryBudget::for_session(
+            Arc::clone(&self.memory_pool),
             Arc::clone(&metrics.resources),
         );
         let context = context_for_snapshot(
@@ -2343,10 +2348,10 @@ mod tests {
     }
 
     #[test]
-    fn query_budget_failure_releases_every_reservation() {
+    fn session_memory_failure_releases_every_reservation() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(
-            EngineConfig::new(temp.path().join("catalog.db")).with_query_memory_limit_bytes(128),
+            EngineConfig::new(temp.path().join("catalog.db")).with_session_memory_limit_bytes(128),
         )
         .unwrap();
         let session = engine.session().build().unwrap();
@@ -2357,6 +2362,18 @@ mod tests {
         let error = statement.collect().unwrap_err();
         assert_eq!(error.code, ErrorCode::ResourceExhausted);
         assert_eq!(metrics.total_resource_usage().current_bytes, 0);
+    }
+
+    #[test]
+    fn cloned_session_handles_share_memory_but_new_sessions_do_not() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let first = engine.session().build().unwrap();
+        let cloned = first.clone();
+        let second = engine.session().build().unwrap();
+
+        assert!(Arc::ptr_eq(&first.memory_pool, &cloned.memory_pool));
+        assert!(!Arc::ptr_eq(&first.memory_pool, &second.memory_pool));
     }
 
     #[test]
@@ -2379,7 +2396,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_enforces_budget_across_multiple_output_batches() {
+    fn collect_enforces_session_limit_across_multiple_output_batches() {
         let temp = tempdir().unwrap();
         let photos = temp.path().join("photos");
         std::fs::create_dir(&photos).unwrap();
@@ -2417,7 +2434,7 @@ mod tests {
 
         let limited_engine = Engine::new(
             EngineConfig::new(temp.path().join("limited.db"))
-                .with_query_memory_limit_bytes(total - 1),
+                .with_session_memory_limit_bytes(total - 1),
         )
         .unwrap();
         let limited_session = limited_engine.session().build().unwrap();

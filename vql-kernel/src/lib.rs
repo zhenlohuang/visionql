@@ -17,7 +17,7 @@ mod stream;
 mod test_util;
 mod types;
 
-pub use config::EngineConfig;
+pub use config::{EngineConfig, LogLevel};
 pub use engine::Engine;
 pub use error::{ErrorCode, Result, VqlError};
 pub use python::{PyUdfHandle, PythonUdfHost, PythonUdfHostRef};

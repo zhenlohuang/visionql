@@ -10,14 +10,6 @@ use vql_kernel::{Engine, EngineConfig, Result};
 #[derive(Debug, Parser)]
 #[command(name = "vql", version, about = "Local visual data SQL")]
 struct Cli {
-    /// Override the SQLite catalog path without changing VQL_HOME.
-    #[arg(long, global = true, env = "VQL_CATALOG")]
-    catalog: Option<PathBuf>,
-
-    /// Override the per-query host-memory budget in bytes.
-    #[arg(long, global = true, env = "VQL_QUERY_MEMORY_LIMIT_BYTES")]
-    query_memory_limit_bytes: Option<usize>,
-
     #[command(subcommand)]
     command: Command,
 }
@@ -38,16 +30,10 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let filter = EnvFilter::try_from_env("VQL_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     let cli = Cli::parse();
-    let mut config = cli
-        .catalog
-        .map(|path| EngineConfig::default().with_catalog_path(path))
-        .unwrap_or_default();
-    if let Some(limit) = cli.query_memory_limit_bytes {
-        config = config.with_query_memory_limit_bytes(limit);
-    }
+    let config = EngineConfig::load()?;
+    let filter = EnvFilter::new(config.log_level().as_str());
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     let engine = Engine::new(config)?;
     let session = engine.session().build()?;
     match cli.command {
@@ -70,5 +56,13 @@ mod tests {
     #[test]
     fn metrics_is_not_a_cli_option() {
         assert!(Cli::try_parse_from(["vql", "--metrics", "shell"]).is_err());
+    }
+
+    #[test]
+    fn engine_settings_are_not_cli_options() {
+        assert!(Cli::try_parse_from(["vql", "--catalog", "catalog.db", "shell"]).is_err());
+        assert!(
+            Cli::try_parse_from(["vql", "--query-memory-limit-bytes", "1024", "shell"]).is_err()
+        );
     }
 }

@@ -616,7 +616,7 @@ fn window_state_limit_error(limit: usize) -> VqlError {
     VqlError::new(
         ErrorCode::ResourceExhausted,
         format!(
-            "streaming TUMBLE state exceeded the {limit}-byte query memory budget; reduce group-key cardinality or shorten the window"
+            "streaming TUMBLE state exceeded the {limit}-byte session memory limit; reduce group-key cardinality or shorten the window"
         ),
     )
 }
@@ -969,7 +969,7 @@ mod tests {
 
         let error = state.apply_epoch(&projected, None, 0).unwrap_err();
         assert_eq!(error.code, ErrorCode::ResourceExhausted);
-        assert!(error.message.contains("1-byte query memory budget"));
+        assert!(error.message.contains("1-byte session memory limit"));
     }
 
     fn assert_window(

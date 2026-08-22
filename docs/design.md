@@ -418,6 +418,7 @@ Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs 
 
 ```text
 $VQL_HOME/
+├── config.toml
 ├── catalog/
 │   └── vql.db
 ├── history
@@ -425,9 +426,9 @@ $VQL_HOME/
     └── models/
 ```
 
-`--catalog`, `VQL_CATALOG`, and Python `connect(catalog=...)` override only the SQLite file. History and cache remain under `VQL_HOME`. Datasets are not runtime state: repository examples use `./data/datasets/`, while every real table points to an arbitrary user-selected `LOCATION`.
+`config.toml` is optional and uses schema `version = 1`. It selects the `embedded` Catalog backend and its path, the default Session memory limit, and the process log level. Relative paths resolve from `VQL_HOME`; unknown versions, backends, sections, fields, levels, and memory units fail startup. `VQL_LOG_LEVEL` overrides only the configured log level. Explicit Rust or Python host configuration may override the embedded Catalog path or Session memory limit; history and cache remain under `VQL_HOME`. Datasets are not runtime state: repository examples use `./data/datasets/`, while every real table points to an arbitrary user-selected `LOCATION`.
 
-SQLite is the default Catalog, at exactly `$VQL_HOME/catalog/vql.db`.
+The `embedded` Catalog backend is currently backed by SQLite and defaults to exactly `$VQL_HOME/catalog/vql.db`. A future backend receives its own `[catalog.<backend>]` table rather than overloading embedded settings.
 
 | Object | Stored definition |
 |---|---|
@@ -861,7 +862,7 @@ The chainable DataFrame API is a v0.2 feature. It must lower to the same DataFus
 | `vql shell` | Multiline SQL, history, and Catalog browsing; `\q` or Ctrl-D exits; an unbounded SELECT prints continuously; first Ctrl-C requests graceful stop and the second cancels immediately |
 | `vql run job.sql` | Run statements in order; an unbounded statement must be last and remains attached; first Ctrl-C requests graceful stop and the second cancels immediately |
 
-The executable is `vql`. SQL `EXPLAIN` is executed through the shell or a script rather than a dedicated CLI subcommand. `--query-memory-limit-bytes` (or `VQL_QUERY_MEMORY_LIMIT_BYTES`) sets the per-query budget. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
+The executable is `vql`. SQL `EXPLAIN` is executed through the shell or a script rather than a dedicated CLI subcommand. `vql` has no Catalog or memory-tuning flags; `VQL_HOME` selects the instance configuration. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
 
 ---
 
@@ -869,7 +870,7 @@ The executable is `vql`. SQL `EXPLAIN` is executed through the shell or a script
 
 ### 12.1 Unified Resource Budget
 
-Each query receives one memory budget. DataFusion `MemoryPool` reservations or equivalent VisionQL reservations account for all of these resources:
+Each Session receives one tracked host-memory budget. Every query, asynchronous task, and retained result owned by that Session shares its DataFusion `MemoryPool` capacity; cloned Session handles share the same pool, while separately built Sessions receive independent pools. Query metrics retain per-query attribution. The limit covers these resources:
 
 | Resource | Behavior at the limit |
 |---|---|
@@ -881,6 +882,8 @@ Each query receives one memory budget. DataFusion `MemoryPool` reservations or e
 | Sink buffers | Apply backpressure; fail after timeout according to query policy |
 
 Device memory is tracked separately when a Runtime can report it. Hosts expose an explicit unavailable state for Runtimes that provide no device allocator telemetry; they must not present an estimated zero as a measured value.
+
+The Session limit is not an Engine-wide or process-RSS limit. Catalog internals, on-disk model cache contents, third-party allocations outside the reservation system, and aggregate memory across separately built Sessions are outside it. When a reservation would exceed the limit, the requesting query fails with `RESOURCE_EXHAUSTED`; existing queries retain their reservations, and every reservation is released with its owning asynchronous work or result handle.
 
 ### 12.2 Performance Measurement
 
@@ -987,7 +990,7 @@ Boundary rules:
 | ADR-006 | Extract type-owned inference calls into explicit `Inference` nodes | Enables asynchronous batching, deduplication, later cascades/caches, and cost measurement |
 | ADR-007 | Build one immutable definition snapshot per planned query | Prevents DDL from silently changing a running result without adding a durable Manifest subsystem to embedded v0.1 |
 | ADR-008 | Delivery follows source replayability; RTSP is best-effort | Makes no guarantee that the physical source cannot satisfy |
-| ADR-009 | SQLite Catalog; runtime bytes stay outside it | Preserves zero-dependency startup with transactions and migration support |
+| ADR-009 | Embedded Catalog backed by SQLite; runtime bytes stay outside it | Preserves zero-dependency startup with transactions and migration support while retaining a backend boundary |
 | ADR-011 | Rebind each epoch into the DataFusion logical template and build a fresh physical tree | Reuses DataFusion planning while preventing channel, state, and cancellation leakage without a custom plan-template API |
 | ADR-012 | Keep allowlisted normalized TUMBLE state in memory | Attached v0.1 needs bounded state but not a checkpoint format or restart-recovery ABI |
 | ADR-013 | Model `TYPE` owns the inference interface; user Functions reuse DataFusion's SQL/Python extension path | Keeps inference optimizer-visible and avoids duplicate ownership of model signatures and parameters |

@@ -37,7 +37,7 @@ cd vql-python && maturin develop --locked && cd ..
 python -m pytest -q vql-python/tests
 ```
 
-Toolchain is pinned to Rust 1.91.1 by `rust-toolchain.toml` (workspace MSRV is 1.88). `pre-commit install` wires fmt+clippy to pre-commit and the workspace test suite to pre-push. `VQL_LOG` (e.g. `vql_kernel=debug`) turns on tracing.
+Toolchain is pinned to Rust 1.91.1 by `rust-toolchain.toml` (workspace MSRV is 1.88). `pre-commit install` wires fmt+clippy to pre-commit and the workspace test suite to pre-push. `VQL_LOG_LEVEL=debug` enables debug tracing.
 
 ## Architecture
 

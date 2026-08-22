@@ -4,6 +4,7 @@ import types
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import pytest
 import visionql
 
 
@@ -59,3 +60,12 @@ def test_image_filtering_python_udf_then_model(tmp_path):
         "FROM photos WHERE quality(img => image) >= 0"
     ).collect()
     assert table.column("people").to_pylist() == [1]
+
+
+def test_session_memory_limit_override(tmp_path):
+    session = visionql.connect(
+        tmp_path / "catalog.db", session_memory_limit_bytes=128
+    )
+
+    with pytest.raises(RuntimeError, match="session memory limit"):
+        session.sql(f"SELECT '{'x' * 1024}' AS value").collect()
