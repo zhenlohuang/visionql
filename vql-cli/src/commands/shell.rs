@@ -6,7 +6,7 @@ use vql_kernel::{
     ErrorCode, Result, Session, VqlError, ends_with_statement_terminator, split_statements,
 };
 
-pub(crate) fn run(session: Session, history_path: &Path, show_metrics: bool) -> Result<()> {
+pub(crate) fn run(session: Session, history_path: &Path) -> Result<()> {
     super::install_interrupt_handler(session.clone())?;
 
     println!(
@@ -16,7 +16,7 @@ pub(crate) fn run(session: Session, history_path: &Path, show_metrics: bool) -> 
     if !std::io::stdin().is_terminal()
         || std::env::var("TERM").is_ok_and(|term| term.eq_ignore_ascii_case("dumb"))
     {
-        return run_basic(&session, show_metrics);
+        return run_basic(&session);
     }
 
     let history =
@@ -42,7 +42,7 @@ pub(crate) fn run(session: Session, history_path: &Path, show_metrics: bool) -> 
                 }
                 let statements = split_statements(&pending)?;
                 pending.clear();
-                execute(&session, statements, show_metrics)?;
+                execute(&session, statements)?;
             }
             Ok(Signal::CtrlC) => {
                 pending.clear();
@@ -61,7 +61,7 @@ pub(crate) fn run(session: Session, history_path: &Path, show_metrics: bool) -> 
     Ok(())
 }
 
-fn run_basic(session: &Session, show_metrics: bool) -> Result<()> {
+fn run_basic(session: &Session) -> Result<()> {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut pending = String::new();
@@ -79,7 +79,7 @@ fn run_basic(session: &Session, show_metrics: bool) -> Result<()> {
         if ends_with_statement_terminator(&pending)? {
             let statements = split_statements(&pending)?;
             pending.clear();
-            execute(session, statements, show_metrics)?;
+            execute(session, statements)?;
         }
     }
     if !pending.trim().is_empty() {
@@ -95,7 +95,7 @@ fn is_quit_command(line: &str) -> bool {
     line.trim() == r"\q"
 }
 
-fn execute(session: &Session, statements: Vec<String>, show_metrics: bool) -> Result<()> {
+fn execute(session: &Session, statements: Vec<String>) -> Result<()> {
     for sql in statements {
         let result = session.sql(&sql).and_then(|statement| {
             if statement.is_unbounded() {
@@ -105,9 +105,6 @@ fn execute(session: &Session, statements: Vec<String>, show_metrics: bool) -> Re
             } else {
                 super::super::render::print_batches(&statement.collect()?)
             }?;
-            if show_metrics {
-                super::print_metrics(&statement);
-            }
             Ok(())
         });
         match result {

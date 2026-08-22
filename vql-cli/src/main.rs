@@ -14,10 +14,6 @@ struct Cli {
     #[arg(long, global = true, env = "VQL_CATALOG")]
     catalog: Option<PathBuf>,
 
-    /// Print query metrics after execution.
-    #[arg(long, global = true, env = "VQL_METRICS")]
-    metrics: bool,
-
     /// Override the per-query host-memory budget in bytes.
     #[arg(long, global = true, env = "VQL_QUERY_MEMORY_LIMIT_BYTES")]
     query_memory_limit_bytes: Option<usize>,
@@ -55,10 +51,8 @@ fn run() -> Result<()> {
     let engine = Engine::new(config)?;
     let session = engine.session().build()?;
     match cli.command {
-        Command::Shell => {
-            commands::shell::run(session, engine.config().history_path(), cli.metrics)
-        }
-        Command::Run { script } => commands::run_file(&session, &script, cli.metrics),
+        Command::Shell => commands::shell::run(session, engine.config().history_path()),
+        Command::Run { script } => commands::run_file(&session, &script),
     }
 }
 
@@ -71,5 +65,10 @@ mod tests {
     #[test]
     fn explain_is_not_a_cli_subcommand() {
         assert!(Cli::try_parse_from(["vql", "explain", "SELECT 1"]).is_err());
+    }
+
+    #[test]
+    fn metrics_is_not_a_cli_option() {
+        assert!(Cli::try_parse_from(["vql", "--metrics", "shell"]).is_err());
     }
 }

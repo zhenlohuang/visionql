@@ -861,7 +861,7 @@ The chainable DataFrame API is a v0.2 feature. It must lower to the same DataFus
 | `vql shell` | Multiline SQL, history, and Catalog browsing; `\q` or Ctrl-D exits; an unbounded SELECT prints continuously; first Ctrl-C requests graceful stop and the second cancels immediately |
 | `vql run job.sql` | Run statements in order; an unbounded statement must be last and remains attached; first Ctrl-C requests graceful stop and the second cancels immediately |
 
-The executable is `vql`. SQL `EXPLAIN` is executed through the shell or a script rather than a dedicated CLI subcommand. `--query-memory-limit-bytes` (or `VQL_QUERY_MEMORY_LIMIT_BYTES`) sets the per-query budget, and `--metrics` writes one structured JSON metrics object after each query. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
+The executable is `vql`. SQL `EXPLAIN` is executed through the shell or a script rather than a dedicated CLI subcommand. `--query-memory-limit-bytes` (or `VQL_QUERY_MEMORY_LIMIT_BYTES`) sets the per-query budget. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
 
 ---
 
@@ -904,7 +904,7 @@ At minimum, expose:
 - model: Runtime kind/protocol, batching owner, queue depth or remote concurrency, wait time, batch distribution, inference count, stage P50/P95, and device memory where available;
 - resources: current and peak value for every reservation.
 
-Embedded mode exposes metrics through results, foreground output, and tracing logs. v0.1 correlation uses source names, epoch IDs, resolved Model specifications, and stable error codes; it does not define a durable query identity. The v0.2 service adds `query_id` and Manifest-backed job identity.
+Embedded mode exposes metrics through query results and tracing logs. v0.1 correlation uses source names, epoch IDs, resolved Model specifications, and stable error codes; it does not define a durable query identity. The v0.2 service adds `query_id` and Manifest-backed job identity.
 
 ### 12.4 Error Classes
 
