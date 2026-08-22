@@ -13,7 +13,7 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 - [x] Extend queries with SQL functions and in-process Python UDFs.
 - [x] Analyze recorded video and live RTSP streams with the same SQL, including event time, watermarks, `TUMBLE` windows, and reconnects.
 - [x] Send results to the console or Kafka with bounded backpressure.
-- [x] Use VisionQL from the SQL shell, `vql run`, or Python through `sess.sql()` and Arrow.
+- [x] Explore interactively in the SQL shell with multiline input, history, and `\q` exit; run scripts with `vql run`; or use Python through `sess.sql()` and Arrow.
 - [x] Reduce media processing with column, frame-sampling, and time-predicate pushdown.
 
 ## v0.2 — Service and Workbench 📋

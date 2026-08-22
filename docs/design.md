@@ -858,7 +858,7 @@ The chainable DataFrame API is a v0.2 feature. It must lower to the same DataFus
 
 | Command | Contract |
 |---|---|
-| `vql shell` | Multiline SQL, history, and Catalog browsing; an unbounded SELECT prints continuously; first Ctrl-C requests graceful stop and the second cancels immediately |
+| `vql shell` | Multiline SQL, history, and Catalog browsing; `\q` or Ctrl-D exits; an unbounded SELECT prints continuously; first Ctrl-C requests graceful stop and the second cancels immediately |
 | `vql run job.sql` | Run statements in order; an unbounded statement must be last and remains attached; first Ctrl-C requests graceful stop and the second cancels immediately |
 
 The executable is `vql`. SQL `EXPLAIN` is executed through the shell or a script rather than a dedicated CLI subcommand. `--query-memory-limit-bytes` (or `VQL_QUERY_MEMORY_LIMIT_BYTES`) sets the per-query budget, and `--metrics` writes one structured JSON metrics object after each query. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.

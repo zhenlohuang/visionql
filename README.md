@@ -211,6 +211,8 @@ vql [--catalog PATH] [--query-memory-limit-bytes BYTES] [--metrics] run <script.
 
 `--metrics` writes one structured JSON metrics object per query. SQL `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Sink placement without opening sources or probing models and services. Run it through the shell or a SQL script like any other statement. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG` to a `tracing` filter such as `info` or `vql_kernel=debug` when diagnosing execution.
 
+In `vql shell`, enter `\q` on its own line or press Ctrl-D to exit. Ctrl-C clears pending input at the prompt; during an unbounded query, the first Ctrl-C requests a graceful stop and the second cancels immediately.
+
 ## Runtime state
 
 VisionQL keeps local state under `VQL_HOME`, which defaults to `$HOME/.vql`. The Catalog makes table, model, and function definitions reusable across sessions; planning takes one immutable definition snapshot so later DDL cannot change a running query.

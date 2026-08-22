@@ -10,7 +10,7 @@ pub(crate) fn run(session: Session, history_path: &Path, show_metrics: bool) -> 
     super::install_interrupt_handler(session.clone())?;
 
     println!(
-        "VisionQL v{} — terminate statements with ';'",
+        "VisionQL v{} — terminate statements with ';'; use \\q or Ctrl-D to exit",
         env!("CARGO_PKG_VERSION")
     );
     if !std::io::stdin().is_terminal()
@@ -32,6 +32,9 @@ pub(crate) fn run(session: Session, history_path: &Path, show_metrics: bool) -> 
     loop {
         match editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
+                if is_quit_command(&line) {
+                    break;
+                }
                 pending.push_str(&line);
                 pending.push('\n');
                 if !ends_with_statement_terminator(&pending)? {
@@ -69,6 +72,9 @@ fn run_basic(session: &Session, show_metrics: bool) -> Result<()> {
         if input.read_line(&mut line)? == 0 {
             break;
         }
+        if is_quit_command(&line) {
+            return Ok(());
+        }
         pending.push_str(&line);
         if ends_with_statement_terminator(&pending)? {
             let statements = split_statements(&pending)?;
@@ -83,6 +89,10 @@ fn run_basic(session: &Session, show_metrics: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn is_quit_command(line: &str) -> bool {
+    line.trim() == r"\q"
 }
 
 fn execute(session: &Session, statements: Vec<String>, show_metrics: bool) -> Result<()> {
@@ -106,4 +116,17 @@ fn execute(session: &Session, statements: Vec<String>, show_metrics: bool) -> Re
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_quit_command;
+
+    #[test]
+    fn quit_command_is_a_standalone_line_without_a_terminator() {
+        assert!(is_quit_command(r"\q"));
+        assert!(is_quit_command("  \\q  \n"));
+        assert!(!is_quit_command(r"\q;"));
+        assert!(!is_quit_command(r"SELECT '\q';"));
+    }
 }

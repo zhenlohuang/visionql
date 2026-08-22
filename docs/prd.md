@@ -405,7 +405,7 @@ One deployment form cannot serve all three well. VisionQL therefore uses **one e
 | Embedded `visionql` | pip package embedded in-process, similar to DuckDB | Notebook exploration, batch jobs, CI regression, and foreground streaming during development | v0.1 (MVP) |
 | Service `vqld` | Single-node daemon built by `vql-server`; Catalog, model runtime, and streaming runtime live in one binary | Long-running streams, durable jobs and recovery, shared clients, Workbench, and BI access | v0.2 |
 
-The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`. The pip package and Python import remain `visionql`.
+The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`. In the interactive shell, `\q` or Ctrl-D exits. The pip package and Python import remain `visionql`.
 
 **Lifecycle and protocol contracts:**
 
