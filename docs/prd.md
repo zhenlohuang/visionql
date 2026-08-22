@@ -387,7 +387,7 @@ counts.write.kafka("broker:9092", topic="people-count").start()
 )
 ```
 
-The APIs can be mixed: `sess.sql(...)` returns a DataFrame.
+In the v0.2 target API, SQL and chainable expressions can be mixed because `sess.sql(...)` returns a DataFrame. The v0.1 synchronous API continues to return a `QueryHandle`.
 
 ### 3.5 Product Forms and Deployment
 
@@ -416,7 +416,7 @@ The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`.
 
 ### 3.6 Execution Requirements
 
-The implementation details live in [System Design](./design.md), but the following constraints are required for the product experience above:
+The implementation details live in the [High-Level Design](./high_level_design.md) and its component designs, but the following constraints are required for the product experience above:
 
 1. **Optimizer:** in the initial scope, push only user-declared fps/time ranges and decoding, plus query-local common-expression elimination for deterministic typed inference calls.
 2. **Frame path:** decoded frames are large. `IMAGE` should remain a reference or compressed value through most of the plan, with decoding deferred until inference or persistence.
@@ -549,12 +549,3 @@ The first users will be two or three design partners working with the team on on
 | `SUBMIT QUERY name AS INSERT INTO ...` | Operations | Create a durable Table-write job explicitly in v0.2; CLI entry point is `vql submit job.sql`; ordinary unbounded SQL stays attached |
 | `SHOW/DESCRIBE QUERY / PAUSE / RESUME / STOP` | Operations | Inspect and manage durable queries |
 | `EXPLAIN` | Operations | Show the query plan |
-
-## Changelog
-
-| Date | Change |
-|---|---|
-| 2026-08-16 | Split fast `CREATE MODEL` declaration from slow `RESOLVE MODEL`, moved Runtime selection to `USING`, scoped `WITH` to the selected Runtime, made service Runtimes own pre/post-processing, and removed hardware-specific performance targets from the PRD |
-| 2026-08-15 | Merged embedded batch and streaming into v0.1 and renumbered later releases |
-| 2026-08-10 | Defined type-owned inference calls, namespaced Runtime and processor options, and DataFusion-backed SQL/Python Functions |
-| 2026-08-07 | Initial product design |

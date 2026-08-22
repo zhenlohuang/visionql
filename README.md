@@ -25,7 +25,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL today—and a chainable DataFrame API planned for v0.2—users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
-> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, and Kafka output are implemented. Attached continuous-query foreground execution remains in progress; `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
+> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output are implemented. `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
 
 ## Why VisionQL
 
@@ -115,7 +115,7 @@ FROM sample_images;
 `USING` selects the Runtime, and `WITH` is interpreted only by that Runtime. `CREATE MODEL` is a fast local declaration: it does not download an artifact or contact a service. `RESOLVE MODEL` performs the potentially slow download, cache installation, checksum verification, or service metadata validation. Queries reject a Model that has not been resolved.
 
 Use `SHOW MODELS` to inspect each declaration's `UNRESOLVED` or `RESOLVED` status.
-`SHOW CREATE TABLE|STREAM|MODEL|FUNCTION|SINK <name>` returns sanitized canonical DDL that can be parsed and executed again; credential references are redacted.
+`SHOW CREATE TABLE|MODEL|FUNCTION <name>` returns sanitized canonical DDL that can be parsed and executed again; credential references are redacted.
 
 ### Model sources
 
@@ -137,7 +137,7 @@ RESOLVE MODEL production_detector;
 
 The Runtime registry is intentionally explicit. `ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER` are the v0.1 paths; `TRANSFORMERS`, `VLLM`, `SGLANG`, and `LLAMA_CPP` remain roadmap-gated. Embedded ONNX execution derives its VisionQL-owned pre/post-processing pipeline from `WITH.input` and `WITH.output`. A Triton service instead owns the complete preprocessing, inference, and postprocessing path: VisionQL sends encoded images and accepts only the canonical typed detection result, never service-specific raw tensors.
 
-Set `HF_TOKEN` when resolving a private Hugging Face bundle. Credentials are provided through secret configuration and never persisted in visible Model DDL.
+Set `HF_TOKEN` when resolving a private Hugging Face bundle. The resolver reads it from the process environment only during `RESOLVE MODEL`; it is never persisted in the Catalog or visible Model DDL.
 
 ### RTSP streaming
 
@@ -262,7 +262,7 @@ flowchart LR
     ARROW --> HOSTS
 ```
 
-The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. The separate `vql-catalog` crate owns catalog domains, definition snapshots, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface. SQL resolves unqualified names in `vql.default`. See the [Catalog design](docs/catalog.md) and [system design](docs/design.md).
+The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. The separate `vql-catalog` crate owns catalog domains, definition snapshots, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface. SQL resolves unqualified names in `vql.default`. See the [High-Level Design](docs/high_level_design.md) and focused component designs below.
 
 ## Documentation
 
@@ -270,11 +270,14 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 |---|---|
 | [Examples](examples/README.md) | End-to-end SQL, Python, and notebook workflows |
 | [Product requirements](docs/prd.md) | Product value, public semantics, and version scope |
-| [System design](docs/design.md) | Engine architecture, contracts, and extension boundaries |
-| [Catalog design](docs/catalog.md) | Unity Catalog API boundary, namespaces, providers, and backends |
+| [High-level design](docs/high_level_design.md) | System boundaries, data paths, invariants, and dependency direction |
+| [Kernel design](docs/kernel.md) | Planning, streaming, media, inference, resources, and security |
+| [Catalog design](docs/catalog.md) | Namespaces, definitions, snapshots, providers, backends, and UC API |
+| [CLI design](docs/cli.md) | Shell, script execution, rendering, and signal behavior |
+| [Python binding design](docs/python_binding.md) | PyO3 API, PyArrow results, metrics, and Python UDFs |
+| [Testing design](docs/testing.md) | Test ownership, sqllogictest cases, fixtures, and Compose services |
 | [Roadmap](ROADMAP.md) | Delivered and planned capabilities by version |
 | [Proposals](docs/proposals/README.md) | Focused designs for later features |
-| [Integration tests](vql-testing/README.md) | Sqllogictest cases, fixtures, and Compose services |
 | [Datasets](data/datasets/README.md) / [models](data/models/README.md) | Sample provenance and ONNX export contract |
 | [Contributing](CONTRIBUTING.md) | Development workflow, tests, and pull request expectations |
 | [Security](SECURITY.md) | Supported versions and private vulnerability reporting |
@@ -317,7 +320,7 @@ pre-commit run --hook-stage pre-push --all-files
 ```
 
 The real-model mixed-size batch scenario reads `data/models/yolo26n.onnx` directly. It runs when
-the integration fixtures are available and otherwise reports a skip:
+the integration fixtures are available and otherwise reports an ignored test:
 
 ```bash
 VQL_TEST_CASE=scenarios/mixed_size_images \

@@ -16,7 +16,6 @@ cargo test --workspace --locked           # the three CI gates
 
 cargo run -q -p vql-cli -- shell
 cargo run -p vql-cli -- run examples/sql/video_people_count.sql
-cargo run -p vql-cli -- explain "SELECT 1"
 ```
 
 Tests:
@@ -61,13 +60,13 @@ Five crates: `vql-catalog` (catalog domains, snapshots, backend ports, SQLite, a
 
 ### Catalog
 
-`vql-catalog` owns the append-only revision log and SQLite backend: `revisions` rows are immutable, `objects` rows point at a `head_revision`, and `DROP` writes a tombstone revision. Schemas are stored as Arrow IPC. Every DDL commits one object in a transaction. Planning takes a `DefinitionSnapshot` once and pins it for the whole query, so concurrent DDL cannot change a running query's meaning. SQL defaults to `vql.default`; all relation endpoints are Tables distinguished by provider capabilities. Models and functions retain separate namespaces. Unquoted identifiers lowercase.
+`vql-catalog` owns the append-only revision log and SQLite backend: `revisions` rows are immutable, `objects` rows point at a `head_revision`, and `DROP` writes a tombstone revision. Schemas are stored as Arrow IPC. Every DDL commits one object in a transaction. Planning takes a `DefinitionSnapshot` once and pins it for the whole query, so concurrent DDL cannot change a running query's meaning. SQL defaults to `vql.default`; all relation endpoints are Tables distinguished by provider capabilities. Models and functions retain separate namespaces. Catalog object names are case-insensitive and normalize to lowercase, including quoted names.
 
 ### Media and models
 
 `MediaRuntime` prefers the `ffmpeg-native` decoder (default cargo feature, needs FFmpeg 8 dev libraries) and silently falls back to the `ffmpeg`/`ffprobe` subprocess decoder; `video_available()` gates `USING VIDEOS`. Video tables expand to frame rows inside the scan operator using the table's `OPTIONS (fps = ...)`, sampled by PTS.
 
-A Model stores a typed `RuntimeSpec`, `PreProcessor` spec, and `PostProcessor` spec. `runtime.*` selects and binds execution; processor-specific values live only in complete `pre_processor.options` and `post_processor.options` objects. Unknown fields and unsupported combinations fail before Catalog commit. Invocation-only values such as `classes` and `min_confidence` belong to `IMAGE_DETECTION`, not the Model. Sources resolve through `models/resolver.rs`; the runtime opens a local/cached ONNX artifact or binds a Triton KServe V2 endpoint. `mock://` remains an internal test backend.
+A Model declaration stores its type, source, selected Runtime, and the complete Runtime-owned `WITH` option map. `USING` is the only public Runtime selector; there are no public `runtime.*`, `pre_processor.*`, or `post_processor.*` namespaces. Resolution derives internal processor specifications for embedded ONNX execution or stores a service protocol binding for Triton. Unknown fields and unsupported combinations fail before Catalog commit. Invocation-only values such as `classes` and `min_confidence` belong to `IMAGE_DETECTION`, not the Model. Sources resolve through `models/resolver.rs`; the runtime opens a local/cached ONNX artifact or binds a Triton KServe V2 endpoint. `mock://` remains an internal test backend.
 
 ### Error contract
 
@@ -83,10 +82,10 @@ Rust unit tests live beside their modules and cover everything a synthetic fixtu
 
 Every `.slt` file gets a fresh embedded Engine, catalog, and temporary `VQL_HOME`. It can use `${IMAGES_LOCATION}`, `${VIDEOS_LOCATION}`, and `${MODEL}` after `control substitution on`. Keep one behavior per file and do not add teardown unless teardown is the behavior. Sqllogictest does not carry field names or nullability, so exact metadata contracts stay in focused kernel owner tests.
 
-The fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`; affected tests are ignored when they are absent, and `VQL_INTEGRATION_TEST=1` turns that into a failure. The root `docker-compose.yaml` provides optional external services through profiles. `scripts/run-integration-tests.sh` starts an isolated `rtsp` project and runs the strict suite. See `vql-testing/README.md`.
+The fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`; affected tests are ignored when they are absent, and `VQL_INTEGRATION_TEST=1` turns that into a failure. The root `docker-compose.yaml` provides optional external services through profiles. `scripts/run-integration-tests.sh` starts isolated dependencies and runs the strict suite. See `docs/testing.md`.
 
 `cargo test --workspace` therefore stays green on a fresh clone and in CI, which runs no fixture downloads or real external-service E2E.
 
 ## Docs
 
-`docs/design.md` is the authoritative HLD (in Chinese) and goes well beyond what v0.1 implements — treat unimplemented sections as design intent, and `ROADMAP.md` as the source of truth for what version a capability belongs to. `docs/proposals/` holds designs for later features. When a public contract (SQL syntax, error code, CLI flag, env var, catalog default, Python API) changes, update README, `docs/prd.md`, `docs/design.md`, and `ROADMAP.md` together.
+`docs/high_level_design.md` is the authoritative system boundary. Detailed v0.1 contracts live in `docs/{kernel,catalog,cli,python_binding,testing}.md`; `ROADMAP.md` remains the source of truth for version scope, and `docs/proposals/` holds later-feature designs. When a public contract changes, update the README, PRD, Roadmap, HLD, and owning component design together.

@@ -7,7 +7,7 @@ updated_at: 2026-08-16
 
 # Workbench
 
-This proposal derives Workbench from [VisionQL PRD](../prd.md) §3.8, [System Design](../design.md), and the [vqld Service proposal](./2026-08-06-vqld-service.md). Workbench is the multimodal SQL client shipped with the v0.2 `vqld` service. It runs queries, previews results, and operates continuous queries without owning business data or depending on private engine interfaces.
+This proposal derives Workbench from [VisionQL PRD](../prd.md) §3.8, the [High-Level Design](../high_level_design.md), and the [vqld Service proposal](./2026-08-06-vqld-service.md). Workbench is the multimodal SQL client shipped with the v0.2 `vqld` service. It runs queries, previews results, and operates continuous queries without owning business data or depending on private engine interfaces.
 
 ## 1. Product Positioning and Scope
 

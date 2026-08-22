@@ -1,6 +1,6 @@
 # VisionQL Proposals
 
-This directory contains focused designs for VisionQL features that can be developed and delivered independently but are not yet part of the current scope in [design.md](../design.md). The complete design for active work—including provider Tables, the model runtime, RTSP, Kafka writes, and windows—remains in `design.md`. Product requirements are defined in [prd.md](../prd.md).
+This directory contains focused designs for capabilities outside the current scope in the [High-Level Design](../high_level_design.md). Active v0.1 contracts live in the HLD and the `kernel`, `catalog`, `cli`, `python_binding`, and `testing` component designs. Product requirements are defined in [prd.md](../prd.md).
 
 ## Index
 
@@ -13,7 +13,7 @@ This directory contains focused designs for VisionQL features that can be develo
 
 ## Planned but Not Yet Proposed
 
-- Out-of-process Python UDF worker for v0.2. The in-process Arrow batch ABI is defined in [design.md](../design.md) §7.4; create a proposal when the worker work begins.
+- Out-of-process Python UDF worker for v0.2. The in-process Arrow batch ABI is defined in the [Python Binding Design](../python_binding.md#python-udf-host); create a proposal when the worker work begins.
 - Items under “Future Directions” in the [Roadmap](../../ROADMAP.md). Create a proposal only after an item is scheduled.
 
 ## Conventions
@@ -22,6 +22,6 @@ This directory contains focused designs for VisionQL features that can be develo
 - **Template:** Start new proposals from [template.md](./template.md).
 - **Language:** Proposal documents, titles, metadata keys, and index entries are written in English.
 - **Front matter:** Include only `created_at`, `status`, `target_version`, and `updated_at`.
-- **Status:** `draft` → `accepted` → `implemented`; use `superseded` when another proposal replaces it and link the replacement in the document body. When a feature enters the current scope of `design.md`, merge its content there and remove the proposal without renaming any remaining files.
-- **System-design boundary:** If a change affects a global v0.1 invariant—such as payload states or the epoch contract—revise and review [design.md](../design.md) first. Durable Query Manifests and public protocol versions belong to their versioned proposals.
+- **Status:** `draft` → `accepted` → `implemented`; use `superseded` when another proposal replaces it and link the replacement in the document body. When a feature enters current scope, merge its contract into the HLD and owning component design, then remove the proposal without renaming other files.
+- **System-design boundary:** If a change affects a global v0.1 invariant—such as payload states or the epoch contract—revise and review the [High-Level Design](../high_level_design.md) first. Durable Query Manifests and public protocol versions belong to their versioned proposals.
 - **Index maintenance:** This README is the only proposal index. Update the table whenever a proposal is added, renamed, or removed.

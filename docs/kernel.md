@@ -1,159 +1,22 @@
-# VisionQL v0.1 System Design
+# VisionQL v0.1 Kernel Design
 
-> This document turns the [VisionQL PRD](./prd.md) v0.1 scope into an implementable system architecture. It covers planning and execution, multimodal types, data ingress and egress, model serving, resource management, and security constraints.
->
-> **Document map:** [prd.md](./prd.md) (product scope and requirements) → this document (current system design) → [proposals/](./proposals/README.md) (designs for later capabilities).
+> This document defines the `vql-kernel` planning and execution contracts. System boundaries are defined by the [High-Level Design](./high_level_design.md); Catalog persistence, host behavior, and verification policy are defined by their dedicated design documents.
 
----
+## Kernel Boundary
 
-## 1. Scope
+`vql-kernel` exposes `Engine`, `Session`, configuration, statements, query results, cancellation, metrics, and host-injection traits. It owns no process signals, terminal behavior, PyO3 objects, network listeners, or global singleton state.
 
-### 1.1 Design Goals
+The host supplies `EngineConfig`, a secret provider, and an optional Python UDF host. The kernel owns the SQL entry point and all semantics below it.
 
-The architecture must satisfy five goals:
+## Logical Planning and Physical Compilation
 
-1. Bounded and unbounded inputs share SQL, Catalog, type, and DataFusion logical-plan semantics.
-2. `IMAGE` can move through a columnar plan without repeatedly copying decoded pixels.
-3. A model call is an optimizer-visible and schedulable plan node.
-4. Filtering, asynchronous inference, and row-level failure cannot lose event-time progress, window state, or source progress.
-5. The kernel makes no assumptions about its host process and can be embedded by both CLI and Python.
-
-### 1.2 Covered Capabilities
-
-This document is the v0.1 design baseline. It covers local image and video directory tables, RTSP and Kafka provider tables, SQL model inference, `TUMBLE`, and CLI and Python hosts. The [Catalog design](./catalog.md), [PRD](./prd.md), and [Roadmap](../ROADMAP.md) define the public boundaries and delivery order.
-
-Syntax that belongs to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, name the target release or state that it is unscheduled, and avoid creating an unusable Catalog object. Section 7.1 defines statement-level behavior.
-
-### 1.3 Technical Non-Goals
-
-The product non-goals are in PRD Section 4. This design also excludes the following:
-
-- modifying or forking the DataFusion kernel;
-- building a general SQL engine, video storage format, or model-serving platform;
-- forcing batch and streaming to share physical operators—they share language, types, Catalog, and logical plans instead;
-- cross-query decode sharing, model-result caching, state checkpoints, durable job recovery, and multi-user security boundaries within the scope implemented here.
-
-### 1.4 Terminology
-
-| Term | Definition |
-|---|---|
-| Bounded query | A query whose input eventually ends and can be evaluated fully by an ordinary DataFusion physical plan |
-| Continuous query | A long-running query with at least one unbounded source |
-| Epoch | A short interval of source output represented by RecordBatches plus the matching watermark, source progress, and resource lease |
-| Data fragment | A bounded DataFusion plan executed for one epoch; it contains no watermark or progress messages |
-| Job coordinator | The streaming runtime component that sequences epochs, window state, and writable-table acknowledgements |
-| Media reference | Logical coordinates for an image or video frame; it contains no decoded pixels |
-| Frame buffer | A buffer of decoded frames valid only within one process and one epoch |
-| Query definition snapshot | The immutable Catalog definitions and resolved execution specifications captured while a query is planned; it is process-local in v0.1 |
-
----
-
-## 2. Requirements Derived from the PRD
-
-| ID | Product promise | Architectural consequence |
-|---|---|---|
-| G1 | Batch and streaming share SQL semantics | Build one DataFusion `LogicalPlan`; keep stream and window metadata beside it, then choose ordinary bounded execution or attached epoch orchestration after streamability analysis. |
-| G2 | The product works after `pip install`, with no service | The kernel cannot listen on a port or require an external metadata service. Local state uses SQLite, and CLI and Python embed the same kernel. |
-| G3 | Model calls are optimizable | A type-owned built-in inference call is resolved against a constant Model name and extracted into an explicit `Inference` node; it never runs as an opaque row-at-a-time UDF. |
-| G4 | Large images do not bounce between operators as pixel copies | `IMAGE` carries a reference by default. Pixels exist only in a bounded frame buffer, tensor buffer, or explicit IPC/persistence boundary. |
-| G5 | Streaming has event time and honest delivery semantics | Watermarks, source offsets, and frame leases live in the epoch control plane, not in rows that a Filter could discard. |
-| G6 | One bad row does not stop a query by default | Decode or inference failure keeps the input row, writes NULL to the affected result, and records a structured error metric. Strict mode fails the query. |
-| G7 | Results remain consumable by the Arrow ecosystem | Multimodal values use standard Arrow storage types with extension metadata. Process-local memory never crosses a process boundary, and clients that do not recognize the extension can still read its storage type. |
-| G8 | Future features do not distort the mainline | Model types, PreProcessors, Runtimes, PostProcessors, table providers, and logical nodes extend through narrow traits or registries. Unsupported features fail explicitly. |
-
-Three implementation rules follow:
-
-1. Reduce work before optimizing individual operations: column pruning, time pruning, explicit sampling, inference deduplication, batch inference, then hardware specialization.
-2. Media, inference, window, and table-write buffers are bounded and charged to the query budget. An unbounded queue is a correctness defect.
-3. Reject parameters the implementation does not consume; never preserve them silently.
-
----
-
-## 3. Architecture
-
-### 3.1 Layers
-
-```mermaid
-flowchart TB
-    subgraph HOSTS["Hosts"]
-        PY["Python library"]
-        CLI["vql shell / run"]
-    end
-
-    subgraph CORE["Engine kernel"]
-        ENTRY["Engine / Session API"]
-        SQL["VQL parsing and semantic analysis"]
-        CAT["Catalog and definition snapshots"]
-        PLAN["DataFusion LogicalPlan + VQL planning"]
-        PHYS["DataFusion physical planning"]
-    end
-
-    subgraph EXECUTION["Execution"]
-        DF["Bounded DataFusion execution"]
-        COORD["Streaming job coordinator"]
-        STATE["TUMBLE state"]
-    end
-
-    subgraph RUNTIME["Runtime services"]
-        MEDIA["Media read / decode / frame buffer"]
-        MODELS["Model load / batching / inference"]
-        CONNECTORS["Table provider connectors"]
-        BUDGET["Memory and resource budgets"]
-        METRICS["Metrics and structured logs"]
-    end
-
-    PY --> ENTRY
-    CLI --> ENTRY
-    ENTRY --> SQL
-    SQL <--> CAT
-    SQL --> PLAN
-    PLAN --> PHYS --> DF
-    PLAN --> COORD
-    COORD --> DF
-    COORD --> STATE
-    DF --> MEDIA & MODELS & CONNECTORS
-    COORD --> CONNECTORS
-    MEDIA & MODELS & CONNECTORS & STATE --> BUDGET
-    MEDIA & MODELS & CONNECTORS & COORD --> METRICS
-```
-
-### 3.2 Component Boundaries
-
-| Component | Owns | Does not own |
-|---|---|---|
-| `Engine` / `Session` | Assembly of Catalog, planner, runtimes, and configuration; SQL entry point and result handles | Signals, ports, user authentication |
-| VQL front end | Script splitting, VQL DDL parsing, syntax normalization, unified logical-plan construction | I/O other than executing DDL |
-| Catalog | Transactional persistence of current definitions, internal generations, schemas, and resolved Model specifications | Video bytes, model weights, plaintext credentials, or durable jobs |
-| Planner | Definition snapshots, type checks, DataFusion logical planning, typed inference extraction, streamability checks, and `TumblePlan` extraction | GPU placement or model loading |
-| DataFusion physical planner | Lowering a bounded logical plan, including VisionQL extension nodes, to an `ExecutionPlan` | Watermarks, source progress, or restart recovery |
-| Job coordinator | Driving epochs in order; advancing control state; cancellation; writable-table acknowledgement | Interpreting SQL expressions |
-| Media runtime | Probe, read, decode, sample, frame buffer, and encode | Model preprocessing or post-processing |
-| Model runtime | Artifact resolution, PreProcessor/Runtime/PostProcessor registries, sessions, bounded scheduling, and inference | SQL semantics or Catalog authorization |
-| Connectors | Reading image, video, and RTSP tables; writing Kafka tables | Rewriting query plans |
-
-### 3.3 Batch and Streaming Paths
-
-| Stage | Bounded query | Continuous query |
-|---|---|---|
-| Parse and analyze | VQL AST, definition snapshot, and DataFusion `LogicalPlan` | Same |
-| Optimize | Column pruning, predicate pushdown, inference extraction, and explicit sampling pushdown | Same, plus streamability validation |
-| Compile | One complete DataFusion physical plan | Retain the logical template and stream metadata; for each epoch, rebind the stream scan to a bounded `MemTable` and build a fresh physical plan |
-| Control data | No watermark; completion follows end of input | Coordinator carries control data across epoch boundaries, outside RecordBatch |
-| Termination | All partitions are exhausted | User cancellation or an unrecoverable error |
-
-`ExecutionPlan::execute` yields only `RecordBatch`; native DataFusion operators have no channel for a watermark or source progress. VisionQL therefore reuses DataFusion's SQL, optimizer, and bounded executor while keeping the streaming control plane in its own coordinator.
-
----
-
-## 4. Logical Planning and Physical Compilation
-
-### 4.1 DataFusion Logical Plan and VQL Metadata
+### DataFusion Logical Plan and VQL Metadata
 
 Standard relational work uses DataFusion `LogicalPlan` nodes. VisionQL adds an extension node only when model inference or a provider-specific table write cannot be represented faithfully by a standard node.
 
 | Extension node | Logical behavior | Physical implementation |
 |---|---|---|
-| `Inference` | Append a model result column to an input relation | `InferenceExec` (Section 10) |
+| `Inference` | Append a model result column to an input relation | [`InferenceExec`](#inferenceexec-scheduling-and-failure) |
 | `SinkWrite` | Internal write node for a writable Catalog Table | `SinkExec` or streaming Kafka writer |
 
 A video table expands into frames inside the `USING VIDEOS` scan at the fps declared by the table. It is not a separate logical node or table-valued function.
@@ -170,7 +33,7 @@ PlannedStatement {
 }
 ```
 
-### 4.2 Planning Pipeline
+### Planning Pipeline
 
 ```text
 SQL
@@ -187,7 +50,7 @@ SQL
 
 Planning reads only the Catalog and lightweight metadata. Object listing, model download, service metadata validation, video probing, and network connection never happen implicitly during planning: model materialization belongs exclusively to `RESOLVE MODEL`, while ordinary execution opens only the already-resolved binding. `EXPLAIN` and completion cannot trigger expensive I/O.
 
-### 4.3 Immutable Query Definition Snapshot
+### Immutable Query Definition Snapshot
 
 Planning opens one Catalog transaction and constructs a `DefinitionSnapshot` containing the current Tables, Models, and Functions in `vql.default`. RTSP and Kafka definitions are Tables with provider capabilities. A query-specific DataFusion session is populated from that snapshot. Resolved Model specifications are copied into `Inference` nodes, while selected provider configurations are copied into the attached result handle or internal write target.
 
@@ -195,7 +58,7 @@ The planned `DataFrame` and those copied specifications are the v0.1 execution s
 
 The durable, serializable Query Manifest required by submitted jobs and restart recovery belongs to the [v0.2 `vqld` proposal](./proposals/2026-08-06-vqld-service.md). It is not a prerequisite for foreground embedded execution.
 
-### 4.4 Allowlist for Unbounded Plans
+### Allowlist for Unbounded Plans
 
 VisionQL validates unbounded plans against an allowlist instead of assuming an arbitrary DataFusion plan can run forever.
 
@@ -218,15 +81,15 @@ Rejected shapes:
 | `OVER` analytic window | No bounded-state rule exists | Use a time-window aggregate |
 | Aggregate or UDAF outside the streaming allowlist | Bounded memory and media lifetime cannot be guaranteed | Choose a supported aggregate or batch execution |
 
-Section 5.4 defines the aggregate and type allowlist. A validation error must identify the first unsupported node or aggregate, point to its SQL fragment, and offer a viable rewrite; a raw DataFusion error is not sufficient.
+[`TUMBLE` State](#tumble-state) defines the aggregate and type allowlist. A validation error must identify the first unsupported node or aggregate, point to its SQL fragment, and offer a viable rewrite; a raw DataFusion error is not sufficient.
 
 ---
 
-## 5. Epoch-Based Streaming
+## Epoch-Based Streaming
 
-### 5.1 Why Epochs
+### Why Epochs
 
-Streaming input enters the engine as short micro-batches. The default epoch duration is 100–250 ms and can adapt to the input rate. An epoch carries data and control state separately:
+Streaming input enters the engine as short micro-batches. The v0.1 RTSP source closes an epoch when its event-time span reaches 200 ms or it contains 64 sampled rows, whichever happens first. An epoch carries data and control state separately:
 
 ```rust
 struct StreamEpoch {
@@ -240,7 +103,7 @@ struct StreamEpoch {
 
 `batches` may be empty. None of the other fields is encoded as a hidden row, so a Filter that removes every row still cannot stall source progress, watermarks, or frame-buffer reclamation.
 
-### 5.2 Epoch Execution Order
+### Epoch Execution Order
 
 ```mermaid
 sequenceDiagram
@@ -280,7 +143,7 @@ The coordinator retains the planned DataFusion logical template, not a compiled 
 
 Stateful window data and the epoch control plane remain outside DataFusion. No `EpochPlanTemplate`, `EpochInputExec`, `reset_state`, or physical-plan reuse API is required in v0.1.
 
-### 5.3 Backpressure and Frame Loss
+### Backpressure and Frame Loss
 
 Backpressure travels upstream from `Table writer → state → data fragment → source buffer`. Every buffer has a hard capacity.
 
@@ -289,7 +152,7 @@ Backpressure travels upstream from `Table writer → state → data fragment →
 - Once a row enters an epoch, overload cannot discard it silently. Exhausting the budget fails the query.
 - Downstream bounded queues propagate backpressure rather than inventing additional drop policies.
 
-### 5.4 `TUMBLE` State
+### `TUMBLE` State
 
 In streaming mode, `TumbleState` stores process-local scalar and Arrow-compatible state rather than retaining DataFusion `Accumulator` instances:
 
@@ -298,11 +161,11 @@ key = (window_start, group_key)
 value = aggregate_states
 ```
 
-- Windows are `[start, end)`. Time is UTC nanoseconds anchored at the Unix epoch.
+- Windows are `[start, end)`. Time is UTC milliseconds anchored at the Unix epoch.
 - The interval is a positive fixed duration; calendar intervals are unsupported. Event time on an unbounded query must be a non-null TIMESTAMP. A nullable column must be filtered first.
 - The extracted `TumblePlan` defines aggregate inputs and output expressions. An accumulator is temporary: merge the previous process-local state, process one epoch, call `state()`, and discard it.
 - Advance the watermark after data processing. Emit and delete a window when `window_end <= watermark`.
-- Rows where `event_time < current_watermark` are dropped and increment `late_rows_total`. `allowed_lateness` is not supported.
+- Rows where `event_time < current_watermark` are dropped and increment the query's `late_rows` counter. `allowed_lateness` is not supported.
 - Stopping a query does not emit windows that have not closed.
 - State and group keys cannot contain `buffer_id` or `buffer_slot`. Convert media to a persistent locator or encoded value first. `IMAGE` and `VIDEO` are rejected by default in window state.
 - Batch mode lowers `TUMBLE` to time bucketing and ordinary aggregation. Differential batch/stream tests cover NULL, grouping, overflow, and final values for each allowlisted aggregate.
@@ -316,15 +179,15 @@ The streaming aggregate allowlist is:
 
 ---
 
-## 6. Multimodal Types and Media Lifetime
+## Multimodal Types and Media Lifetime
 
-### 6.1 Arrow Representation
+### Arrow Representation
 
 VQL logical types use standard Arrow storage and field metadata.
 
 | VQL type | Arrow storage type | Contract |
 |---|---|---|
-| `IMAGE` | `Struct`, defined in Section 6.2 | `ARROW:extension:name=visionql.image` |
+| `IMAGE` | `Struct`, defined in [Three `IMAGE` Payload Forms](#three-image-payload-forms) | `ARROW:extension:name=visionql.image` |
 | `VIDEO` | `Struct<uri, locator, duration_ns, fps, width, height, codec>` | `uri` is display-only; `locator` is used for reauthorized reads; a full video is never inlined |
 | `BOX2D` | `Struct<x: Float32, y: Float32, w: Float32, h: Float32>` | Top-left origin and normalized `[0,1]` coordinates |
 | `POINT2D` | `Struct<x: Float32, y: Float32>` | Internal logical type for spatial functions |
@@ -334,7 +197,7 @@ VQL logical types use standard Arrow storage and field metadata.
 
 Every `IMAGE` field carries `ARROW:extension:name=visionql.image` and `ARROW:extension:metadata={"version":1}`. An unaware client still sees a standard Arrow Struct.
 
-### 6.2 Three `IMAGE` Payload Forms
+### Three `IMAGE` Payload Forms
 
 ```text
 IMAGE storage := Struct {
@@ -365,7 +228,7 @@ Invariants:
 4. A live RTSP frame is not replayable and has no durable `locator`. Encode or persist it before later retrieval.
 5. Field metadata distinguishes original encoded bytes from thumbnail bytes.
 
-### 6.3 Epoch Frame Buffer
+### Epoch Frame Buffer
 
 Sampled RTSP frames enter the current epoch's `FrameBuffer`; the RecordBatch carries only the slot. The coordinator releases `FrameBufferLease` only after the data fragment, state handling, and egress encoding have all completed.
 
@@ -378,7 +241,7 @@ The lease is independent of row survival:
 
 Batch video normally fuses read, decode, and preprocessing inside `InferenceExec`. A short-lived frame buffer is needed only when several pixel consumers share one frame.
 
-### 6.4 NULL and Row-Level Failure
+### NULL and Row-Level Failure
 
 - Decode failure leaves the media reference and metadata intact, but any pixel-dependent result is NULL.
 - Inference failure makes the model result NULL while preserving input columns.
@@ -386,9 +249,9 @@ Batch video normally fuses read, decode, and preprocessing inside `InferenceExec
 
 ---
 
-## 7. SQL, Catalog, Models, and Functions
+## SQL, Models, and Functions
 
-### 7.1 Parser Boundary
+### Parser Boundary
 
 VQL reuses the sqlparser-rs tokenizer and DataFusion SQL AST, with a dedicated parser only for VisionQL extensions:
 
@@ -398,54 +261,21 @@ VQL reuses the sqlparser-rs tokenizer and DataFusion SQL AST, with a dedicated p
 4. Normalize constructs such as `.center`, `TUMBLE`, and typed inference markers at the AST or logical-plan layer.
 5. Pass normalized relational expressions to the DataFusion planner interface.
 
-Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs golden tests. Unquoted identifiers fold to lowercase, double-quoted identifiers preserve case, and string literals use single quotes.
+Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs golden tests. Catalog object names in VQL extension statements are case-insensitive and normalize to lowercase even when quoted. Other relational identifiers follow DataFusion SQL rules: unquoted identifiers fold to lowercase, double-quoted identifiers preserve case, and string literals use single quotes.
 
 | Statement | Behavior |
 |---|---|
-| `CREATE TABLE ... USING IMAGES/VIDEOS/RTSP` | Create a readable provider table (Sections 8.2–8.3) |
-| `CREATE TABLE ... USING KAFKA` | Create a writable Kafka table (Section 8.4) |
+| `CREATE TABLE ... USING IMAGES/VIDEOS/RTSP` | Create a readable provider table as defined by [Table Providers](#table-providers) |
+| `CREATE TABLE ... USING KAFKA` | Create a writable Kafka table as defined by [Kafka Table](#kafka-table) |
 | `CREATE MODEL ... TYPE ... FROM ... USING ... WITH (...)` | Store one unresolved typed Model declaration without network I/O |
 | `RESOLVE MODEL <name>` | Download/cache an artifact or validate a service and persist its resolved execution contract |
 | `CREATE FUNCTION ... RETURN <expression>` | Create a DataFusion-backed SQL expression function |
 | `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` | Create a batched Python function; executable only from a Python host |
 
-`DROP`, `SHOW`, `DESCRIBE`, and `SHOW CREATE` use the same VQL DDL path. `SHOW CREATE` must be sanitized and parseable. Statements outside Section 1.2 fail without registering placeholders.
+`DROP`, `SHOW`, `DESCRIBE`, and `SHOW CREATE` use the same VQL DDL path. `SHOW CREATE` must be sanitized and parseable. Statements outside the [v0.1 scope](./high_level_design.md#scope) fail without registering placeholders.
 
-### 7.2 Catalog Objects and Local State
 
-`VQL_HOME` is the only default local root for embedded and CLI operation. Resolution order is: an explicit host-supplied `EngineConfig`, a non-empty `VQL_HOME`, then `$HOME/.vql`. Only when `HOME` is unavailable does it fall back to `.vql` in the current directory. Repository development uses `VQL_HOME=./data/.vql` so tests and examples cannot pollute user state.
-
-```text
-$VQL_HOME/
-├── config.toml
-├── catalog/
-│   └── vql.db
-├── history
-└── cache/
-    └── models/
-```
-
-`config.toml` is optional and uses configuration schema `version = 1`. It selects the `sqlite` Catalog backend and its path, the default Session memory limit, and the process log level. Relative paths resolve from `VQL_HOME`; unknown versions, backends, sections, fields, levels, and memory units fail startup. `VQL_LOG_LEVEL` overrides only the configured log level. Explicit Rust or Python host configuration may override the SQLite path or Session memory limit; history and cache remain under `VQL_HOME`.
-
-`vql-catalog` owns the catalog domain and backend port. SQLite is the current implementation and defaults to exactly `$VQL_HOME/catalog/vql.db`; MySQL and PostgreSQL can implement the same `CatalogBackend` port later. SQL uses `vql.default` implicitly, while the UC-compatible API uses fully qualified identities. See [catalog.md](./catalog.md).
-
-| Object | Stored definition |
-|---|---|
-| Table | Provider, capabilities, location or sanitized endpoint, options, Arrow schema, internal revision, credential reference |
-| Model | Type, raw `FROM` location, selected Runtime and Runtime-scoped `WITH` options; optional resolved source/hash, execution mode, canonical schemas, and determinism |
-| Function | DataFusion signature, normalized SQL expression or Python entry point, volatility, implementation digest |
-
-Catalog constraints:
-
-- Every DDL statement commits in one SQLite transaction. Model and Function definitions are independent Catalog objects.
-- Internal foreign keys and revisions support consistent snapshot reads but are never exposed as a public revision API.
-- A typed inference call is query syntax, not a Function object. Its constant Model name is resolved from the query definition snapshot.
-- All relation providers share the Table namespace. Model and Function each have their own namespace. Section 7.1 defines unquoted-name identity.
-- Schemas use Arrow IPC. Because v0.1 is unreleased, SQLite creates the current schema directly and has no legacy migration chain.
-- Passwords, tokens, S3 secrets, and signed URLs are never stored; only secret references are allowed.
-- `DROP` prevents new planning. Table generations referenced by media locators are retained; a newly attempted media read still reauthorizes against the current Catalog state.
-
-### 7.3 Typed Model Contract
+### Typed Model Contract
 
 A MODEL is one typed inference capability backed by an artifact bundle or endpoint. `TYPE` is the sole authority for its built-in SQL function, domain input, semantic arguments, and canonical Arrow result. There is no generic CV or LLM type.
 
@@ -499,7 +329,7 @@ Device selection, queue capacity, batch size, maximum wait, request concurrency,
 
 The declaration fingerprint includes Model type, raw source, selected Runtime, and Runtime-owned options. The resolved semantic fingerprint additionally includes resolved source/hash, execution mode, internal embedded processor specifications or service protocol binding, and determinism. Scheduler configuration does not enter semantic identity.
 
-### 7.4 User-defined Functions and DataFusion Reuse
+### User-defined Functions and DataFusion Reuse
 
 `CREATE FUNCTION` supports only genuine user-defined computation:
 
@@ -516,7 +346,7 @@ A Python UDF receives one `pyarrow.Array` per argument and returns an equal-leng
 
 Model inference does not use `FunctionFactory`, `ScalarUDF`, or `AsyncUDF`. A SQL expression function may wrap a typed inference call to provide a reusable name or constant-argument preset; after expansion, the call still becomes an explicit `Inference` node.
 
-### 7.5 Syntax Normalization
+### Syntax Normalization
 
 | VQL form | Normalized plan form |
 |---|---|
@@ -527,7 +357,7 @@ Model inference does not use `FunctionFactory`, `ScalarUDF`, or `AsyncUDF`. A SQ
 
 Inference-call parameters such as `classes` and `min_confidence` are owned by the Model type and filter elements within one detection result. They are not processor DDL options and are not converted into a row-level Filter that could discard the frame.
 
-### 7.6 Built-in Functions
+### Built-in Functions
 
 Typed-inference function names are reserved case-insensitively from v0.1, including Roadmap-gated markers; `CREATE FUNCTION` cannot redefine them.
 
@@ -545,11 +375,11 @@ VisionQL built-ins use SQL NULL propagation.
 
 ---
 
-## 8. Table Providers
+## Table Providers
 
 Data ingress and egress use narrow connector traits: readable providers scan Tables and writable providers accept rows.
 
-### 8.1 Minimum Schemas
+### Minimum Schemas
 
 | Source | Minimum columns |
 |---|---|
@@ -559,7 +389,7 @@ Data ingress and egress use narrow connector traits: readable providers scan Tab
 
 Unreadable optional metadata becomes NULL. `uri`, media values, and RTSP `ts/frame_id/source` are non-null. Provider options may append partition columns but cannot change the meaning of base columns.
 
-### 8.2 Image and Video Directory Tables
+### Image and Video Directory Tables
 
 `CREATE TABLE ... USING IMAGES/VIDEOS` registers a local directory as an external table. An image contributes one row; a video is expanded into frame rows inside the scan at the table's fps.
 
@@ -580,7 +410,7 @@ Video expansion rules:
 - The media runtime chooses sequential decode or sparse seek from sample ratio, GOP, and storage capability. Sparse-seek throughput is not a promise until validated by a PoC.
 - A metadata-only query creates frame coordinates but does not read pixels.
 
-### 8.3 RTSP Table
+### RTSP Table
 
 `CREATE TABLE ... USING RTSP OPTIONS (...)` creates one readable, unbounded Table. RTSP is non-replayable, so delivery is best-effort; frames lost to a crash, drop, or pause cannot be recovered. The UC boundary reports it as an `EXTERNAL` table with explicit VisionQL capability properties, not as a UC-managed `STREAMING_TABLE`.
 
@@ -600,7 +430,7 @@ Event time and reconnect behavior:
 - Reconnect with exponential backoff from 1s to 30s. Freeze the watermark during the outage; never invent progress from local wall time.
 - Reconnected ingest time preserves the real outage gap and may close windows without fabricating rows. The attached query keeps retrying until cancellation or an unrecoverable error; an outage alone does not emit the final open window.
 
-### 8.4 Kafka Table
+### Kafka Table
 
 Declare the destination independently from the query:
 
@@ -649,9 +479,9 @@ These rules are fixed by exact wire-format tests. The globally bounded in-flight
 
 ---
 
-## 9. Optimizer and `EXPLAIN`
+## Optimizer and `EXPLAIN`
 
-### 9.1 Rule Order
+### Rule Order
 
 | Order | Rule | Purpose |
 |---|---|---|
@@ -664,7 +494,7 @@ These rules are fixed by exact wire-format tests. The globally bounded in-flight
 
 Window size never implies a sample rate. User-declared fps is part of result semantics.
 
-### 9.2 Extracting Inference
+### Extracting Inference
 
 After expanding SQL expression functions, the planner scans Projection, Filter, and aggregate inputs for type-owned inference markers:
 
@@ -674,24 +504,24 @@ After expanding SQL expression functions, the planner scans Projection, Filter, 
 4. Evaluate a constant-domain-input inference call, such as a text query embedding, once as a query-init expression only under the same determinism rule.
 5. Never share raw Runtime output across different resolved processor contracts; only canonical, semantically identical inference results are shareable.
 
-### 9.3 `EXPLAIN`
+### `EXPLAIN`
 
-`EXPLAIN` shows at least:
+`EXPLAIN` shows:
 
-- query mode and the resolved definitions embedded in the plan;
-- logical plan plus batch plan or streaming job graph;
-- video time range, source fps, and expected sampled fps;
-- Model type and resolved source identity, Runtime kind/execution mode, embedded processor kinds when applicable, batching owner, input volume, volatility, and deduplication at each inference node;
-- whether decode is required and which `IMAGE` form is used;
-- stateful operators, watermark delay, delivery semantics, and unsupported items for streaming.
+- bounded or continuous query mode and the DataFusion logical and physical plans;
+- RTSP source fps, event-time mode, watermark delay, transport, and the epoch topology;
+- resolved Model identity, Runtime kind and protocol, embedded processor kinds when applicable, batching owner, volatility, and deduplication at each inference node;
+- whether decode is required and whether the inference input is a locator, encoded value, or frame-buffer reference;
+- `TUMBLE`, watermark, and Table-write topology when present;
+- the first unsupported continuous-plan node with a viable rewrite.
 
 It describes work; it does not invent uncalibrated GPU-time or cost estimates.
 
 ---
 
-## 10. Model Runtime and Inference
+## Model Runtime and Inference
 
-### 10.1 Compiled Pipeline and Interfaces
+### Compiled Pipeline and Interfaces
 
 Every resolved typed call selects one of two execution modes. Embedded Runtimes use the VisionQL-owned tensor pipeline:
 
@@ -771,7 +601,7 @@ models/
   triton_backend.rs           # typed KServe V2 service codec and metadata validation
 ```
 
-### 10.2 Runtime Registry and Batching Ownership
+### Runtime Registry and Batching Ownership
 
 A Runtime loads an artifact or binds a service endpoint. The Model `TYPE` fixes the semantic capability; the Runtime owns how that capability is executed.
 
@@ -786,7 +616,7 @@ ONNX Runtime validates graph input/output names, dtypes, and static dimensions a
 
 Each Runtime reports whether batching is VisionQL-owned or service-owned. VisionQL does not place a second dynamic-batching queue in front of Triton; it applies bounded concurrency, cancellation, and backpressure around service calls. Additional Runtime families require their own versioned proposal and are not part of this v0.1 design.
 
-### 10.3 ONNX Artifacts and Open-source Models
+### ONNX Artifacts and Open-source Models
 
 `FROM` preserves the Runtime's raw location. `ONNX_RUNTIME` accepts a local path, `file://` path, pinned `hf://owner/repository@revision[/artifact.onnx]`, or an HTTP(S) `.onnx` URL accompanied by `WITH.sha256`. `TRITON_INFERENCE_SERVER` accepts a plain absolute HTTP(S) service URL; there is no `endpoint://` wrapper. A resolver never guesses task or tensor semantics.
 
@@ -804,7 +634,7 @@ Integrating an embedded open-source model follows five steps:
 
 A familiar ONNX model family should need only Model DDL. A new reusable embedded tensor layout adds one narrow internal processor implementation and focused fixtures. A service Runtime instead owns all model-specific preprocessing and postprocessing and exposes the typed capability contract.
 
-### 10.4 `InferenceExec`, Scheduling, and Failure
+### `InferenceExec`, Scheduling, and Failure
 
 The physical operator evaluates only domain arguments into a temporary Arrow `RecordBatch`; the resolved Model and constant semantic arguments remain in its immutable spec:
 
@@ -826,41 +656,14 @@ Service-owned batching bypasses the VisionQL batching queue. Each session instea
 
 NULL domain inputs produce NULL results. A row-level preprocessing or post-processing error follows `vql.on_error`: NULL by default or query failure in strict mode. A Runtime failure affecting a whole batch is attributed to every affected row before the same policy is applied. Cancelled queued requests are skipped, submission and response waits stop promptly, and late results are ignored. Service-owned calls receive the caller's cancellation token; the current batched embedded backend call is allowed to finish before its buffers are released.
 
-All preprocessing tensors, encoded request payloads, Runtime queues, and post-processing buffers reserve memory through the engine pool. Prompt and payload size limits are checked before allocation. Metrics record batching owner, actual batch distribution, queue or service wait, preprocessing, inference, post-processing, cancellation, failures, and device utilization where available.
+All preprocessing tensors, encoded request payloads, Runtime queues, and post-processing buffers reserve memory through the engine pool. Prompt and payload size limits are checked before allocation. Query metrics record inference rows and batches, actual batch distribution, queue or service wait, inference latency, row failures, and current and peak resource reservations. Runtime identity and batching ownership remain plan annotations rather than metric fields. Device-memory reservation counters remain zero until a Runtime supplies allocator telemetry; hosts present that state as unavailable rather than as a measured zero.
+
 
 ---
 
-## 11. Hosts and Public Interfaces
+## Resources, Performance, and Observability
 
-### 11.1 A Host-Agnostic Kernel
-
-`vql-kernel` handles no process signals, port listeners, or global singleton state. The host supplies `EngineConfig`, a secret provider, and an optional Python UDF host, then owns lifecycle.
-
-| Host | Responsibilities |
-|---|---|
-| Python library | PyO3 bindings, `sess.sql()`, Arrow result exchange, in-process Python UDFs, rich notebook display |
-| CLI | Shell, script execution, and signal handling |
-
-### 11.2 Python Results
-
-`sess.sql()` returns a lazy result; `collect()` or `show()` starts execution. Results are converted through Arrow/PyArrow. `QueryHandle.metrics()` exposes the same query-local counters, latency distributions, structured drop ranges, and current/peak resource values as the kernel. `show()` renders only an `IMAGE` summary; notebook thumbnails require explicit encoding.
-
-The chainable DataFrame API is a v0.2 feature. It must lower to the same DataFusion logical-plan contracts and is specified outside this v0.1 implementation design.
-
-### 11.3 CLI
-
-| Command | Contract |
-|---|---|
-| `vql shell` | Multiline SQL, history, and Catalog browsing; `\q` or Ctrl-D exits; an unbounded SELECT prints continuously; first Ctrl-C requests graceful stop and the second cancels immediately |
-| `vql run job.sql` | Run statements in order; an unbounded statement must be last and remains attached; first Ctrl-C requests graceful stop and the second cancels immediately |
-
-The executable is `vql`. SQL `EXPLAIN` is executed through the shell or a script rather than a dedicated CLI subcommand. `vql` has no Catalog or memory-tuning flags; `VQL_HOME` selects the instance configuration. The pip package and Python import remain `visionql`. If the CLI encounters a Python UDF, it directs the user to a Python host instead of embedding an interpreter.
-
----
-
-## 12. Resources, Performance, and Observability
-
-### 12.1 Unified Resource Budget
+### Unified Resource Budget
 
 Each Session receives one tracked host-memory budget. Every query, asynchronous task, and retained result owned by that Session shares its DataFusion `MemoryPool` capacity; cloned Session handles share the same pool, while separately built Sessions receive independent pools. Query metrics retain per-query attribution. The limit covers these resources:
 
@@ -877,7 +680,7 @@ Device memory is tracked separately when a Runtime can report it. Hosts expose a
 
 The Session limit is not an Engine-wide or process-RSS limit. Catalog internals, on-disk model cache contents, third-party allocations outside the reservation system, and aggregate memory across separately built Sessions are outside it. When a reservation would exceed the limit, the requesting query fails with `RESOURCE_EXHAUSTED`; existing queries retain their reservations, and every reservation is released with its owning asynchronous work or result handle.
 
-### 12.2 Performance Measurement
+### Performance Measurement
 
 The PRD does not set hardware-specific throughput or latency targets. Capacity depends on the Model, Runtime, accelerator, codec, GOP, source transport, sampling policy, and query shape. Engineering benchmarks therefore report four rates separately:
 
@@ -890,18 +693,18 @@ The PRD does not set hardware-specific throughput or latency targets. Capacity d
 
 A benchmark records the measured rates, window latency, and frame-drop rate together with its complete workload and hardware configuration. Thresholds belong to benchmark plans and release evidence, not to the product requirements contract.
 
-### 12.3 Metrics
+### Metrics
 
-At minimum, expose:
+The v0.1 `QueryMetrics` surface exposes:
 
-- query: input/output rows, epoch latency, end-to-end latency, error rows, late rows, state memory, and table-write retries;
-- media: input bitrate, decode fps, sampled fps, dropped frames by reason, disconnect count, and gap duration;
-- model: Runtime kind/protocol, batching owner, queue depth or remote concurrency, wait time, batch distribution, inference count, stage P50/P95, and device memory where available;
-- resources: current and peak value for every reservation.
+- query: input/output rows, epoch and end-to-end P50/P95 latency, error rows, late rows, current window-state bytes, and Table-write retries;
+- media: decoded and sampled frame counts, sampled fps, input bytes and bitrate, dropped frames and ranges by reason, reconnect and generation counts, gap duration, and the latest watermark;
+- model: inference rows and batches, actual batch distribution, inference P50/P95, and queue or service-wait P50/P95;
+- resources: current and peak bytes for Arrow, media, frame-buffer, tensor, model-queue, Triton-payload, window-state, sink-buffer, and device-memory reservations. A host exposing device memory must mark the telemetry unavailable until its Runtime supplies allocator data; the Python binding provides this availability field in v0.1.
 
-Embedded mode exposes metrics through query results and tracing logs. v0.1 correlation uses source names, epoch IDs, resolved Model specifications, and stable error codes; it does not define a durable query identity. The v0.2 service adds `query_id` and Manifest-backed job identity.
+Embedded mode exposes metrics through the kernel `QueryHandle`; the Python binding maps the same values to a dictionary. Tracing records execution diagnostics but is not a second complete metrics API. v0.1 correlation uses source names, epoch IDs, resolved Model specifications, and stable error codes; it does not define a durable query identity. The v0.2 service adds `query_id` and Manifest-backed job identity.
 
-### 12.4 Error Classes
+### Error Classes
 
 | Class | Example | Default behavior |
 |---|---|---|
@@ -915,7 +718,7 @@ Stable codes are separate from prose messages. Clients react to codes, never err
 
 ---
 
-## 13. Security and Privacy
+## Security and Privacy
 
 - `vql-kernel` listens on no network port by default.
 - Outbound connections occur only for user-declared endpoint Models, Kafka, RTSP, and model download.
@@ -923,93 +726,13 @@ Stable codes are separate from prose messages. Clients react to codes, never err
 - Catalog output, logs, and `SHOW CREATE` sanitize URIs and secret references.
 - Execution uses the immutable definition snapshot and resolved specifications captured during planning; v0.1 does not persist an execution identity.
 
----
-
-## 14. Code Organization
-
-```text
-visionql/
-├── Cargo.toml                    # root workspace
-├── vql-catalog/                  # domain objects, snapshots, backend ports, SQLite, UC API
-├── vql-kernel/
-│   └── src/
-│       ├── catalog/              # re-exported catalog contracts used by the kernel
-│       ├── connectors/           # RTSP and Kafka table-provider runtimes
-│       ├── functions/            # built-ins and typed inference markers
-│       ├── media/                # FFmpeg, image codecs, FrameBuffer
-│       ├── models/               # processors, runtimes, scheduler
-│       ├── planner/              # logical extensions, inference extraction, physical planning
-│       ├── sql/                  # VQL parser and normalization
-│       ├── stream/               # StreamEpoch and process-local TUMBLE state
-│       ├── types/                # Arrow multimodal types
-│       ├── engine.rs             # shared engine services
-│       └── session.rs            # SQL routing and attached epoch orchestration
-├── vql-cli/                      # shell / run
-├── vql-python/                   # PyO3 and Python UDF host
-├── vql-testing/                  # shared SQL conformance and external-service tests
-└── docs/
-```
-
-The current root workspace contains exactly these five crates. `vql-server` and Workbench are future v0.2 components described by proposals, not directories in the v0.1 tree.
-
-```text
-vql-cli ─────┐
-vql-python ──┼──→ vql-kernel ──→ vql-catalog
-vql-testing ─┘
-```
-
-`vql-catalog` is independently consumable by the embedded engine and the future service. Its public API exposes catalog domains, snapshots, `CatalogBackend`, `CatalogStore`, and UC wire adapters. `vql-kernel` keeps execution-oriented modules crate-private and exposes only what a host needs: `Engine`, `Session`, configuration, results, and injection traits.
-
-Boundary rules:
-
-- `vql-kernel` cannot depend on PyO3, clap, or Flight.
-- `vql-catalog` cannot depend on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior. Backend implementations sit behind `CatalogBackend`; HTTP is feature-gated.
-- `vql-cli` owns clap, terminal behavior, and signals. `vql-python` owns PyO3 and the Python UDF host. `vql-testing` owns shared SQL conformance and external-service fixtures.
-- `planner` currently co-locates logical extension nodes, their physical planners, and their executors. `stream` owns `StreamEpoch` and `TumbleState`; `session` owns attached epoch orchestration.
-- Media, models, and connectors are assembled behind crate-private boundaries and cannot depend on CLI or Python hosts.
-- Breaking DataFusion changes stay behind kernel planning and session boundaries. DataFusion types cannot leak into public Python or CLI APIs.
-- The workspace pins tested DataFusion and Arrow versions. An upgrade must pass epoch scan rebinding, TUMBLE state, and Arrow wire-schema regression tests before changing the lockfile.
 
 ---
 
-## 15. Architecture Decisions
+## Related Designs
 
-| ADR | Decision | Rationale |
-|---|---|---|
-| ADR-001 | Rust + Arrow + DataFusion | Supports embedding, columnar execution, Python interoperability, and public extension points |
-| ADR-002 | One DataFusion logical plan, with ordinary bounded execution or attached epoch orchestration | Preserves user-facing batch/stream semantics without creating a parallel logical-plan type or forcing control data through RecordBatch-only operators |
-| ADR-003 | Epoch streaming with bounded DataFusion fragments | Filter cannot swallow watermark or source progress; asynchronous inference and release have a clear barrier |
-| ADR-004 | Standard Arrow storage for `IMAGE`, with reference, buffered, and encoded forms | Avoids pixel copies while preserving IPC and fallback readability |
-| ADR-005 | Release FrameBuffer as one epoch lease | Lifetime does not depend on surviving rows, so Filter cannot leak references |
-| ADR-006 | Extract type-owned inference calls into explicit `Inference` nodes | Enables asynchronous batching, deduplication, later cascades/caches, and cost measurement |
-| ADR-007 | Build one immutable definition snapshot per planned query | Prevents DDL from silently changing a running result without adding a durable Manifest subsystem to embedded v0.1 |
-| ADR-008 | Delivery follows source replayability; RTSP is best-effort | Makes no guarantee that the physical source cannot satisfy |
-| ADR-009 | Extract `vql-catalog`; use SQLite first behind `CatalogBackend`; runtime bytes stay outside it | Preserves zero-service startup and makes MySQL/PostgreSQL backends possible without coupling metadata to execution |
-| ADR-011 | Rebind each epoch into the DataFusion logical template and build a fresh physical tree | Reuses DataFusion planning while preventing channel, state, and cancellation leakage without a custom plan-template API |
-| ADR-012 | Keep allowlisted normalized TUMBLE state in memory | Attached v0.1 needs bounded state but not a checkpoint format or restart-recovery ABI |
-| ADR-013 | Model `TYPE` owns the inference interface; user Functions reuse DataFusion's SQL/Python extension path | Keeps inference optimizer-visible and avoids duplicate ownership of model signatures and parameters |
-
-ADR-010 and ADR-014 are reserved for public-protocol decisions in [proposals/](./proposals/README.md) and are not reused.
-
----
-
-## References
-
-- [Apache DataFusion: Custom Table Providers](https://datafusion.apache.org/library-user-guide/custom-table-providers.html)
-- [Apache DataFusion: ExecutionPlan API](https://docs.rs/datafusion/latest/datafusion/physical_plan/trait.ExecutionPlan.html)
-- [Apache DataFusion: Unbounded Data Sources](https://datafusion.apache.org/user-guide/sql/ddl.html#example-unbounded-data-sources)
-- [Apache DataFusion: Adding User-defined Functions](https://datafusion.apache.org/library-user-guide/functions/adding-udfs.html)
-- [Apache Arrow: Extension Types and Columnar Format](https://arrow.apache.org/docs/format/Columnar.html#extension-types)
-
----
-
-## Changelog
-
-| Date | Change |
-|---|---|
-| 2026-08-16 | Aligned v0.1 with the implemented DataFusion logical-plan and per-epoch rebinding path; made TUMBLE state process-local; moved durable Query Manifests and recovery ABI to the v0.2 service proposal; corrected capture-time, scheduler, local-provider, Python API, and workspace boundaries; removed the fixed PRD performance baseline and destination-policy requirement |
-| 2026-08-15 | Aligned the design baseline with the merged v0.1 batch-and-streaming scope |
-| 2026-08-10 | Specified the inference pipeline factory registry, typed per-kind options, Arrow fixed-shape runtime tensors, compiled-pipeline lifecycle, and async batching paths |
-| 2026-08-10 | Defined type-owned inference calls, immutable query definition snapshots, DataFusion-backed user Functions, and the PreProcessor/Runtime/PostProcessor pipeline |
-| 2026-08-08 | Defined `VQL_HOME`, downloaded-model caching, the separate dataset directory, and scenario-oriented examples; performance testing remains separate |
-| 2026-08-07 | Initial system design |
+- [High-Level Design](./high_level_design.md)
+- [Catalog Design](./catalog.md)
+- [CLI Design](./cli.md)
+- [Python Binding Design](./python_binding.md)
+- [Testing Design](./testing.md)

@@ -21,7 +21,7 @@ Use additional sections as needed.
 
 ## Relationship to the System Design
 
-State which invariants and extension points in [design.md](../design.md) this proposal follows. If implementation requires changing a system-wide invariant, revise and review `design.md` first, then update this proposal.
+State which invariants and extension points in the [High-Level Design](../high_level_design.md) and owning component design this proposal follows. If implementation changes a system-wide invariant, revise and review the HLD first, then update the affected component design and this proposal.
 
 ## Testing and Acceptance
 

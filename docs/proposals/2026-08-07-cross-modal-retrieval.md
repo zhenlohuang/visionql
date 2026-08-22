@@ -13,7 +13,7 @@ The v0.3 text-to-image retrieval feature registers separate `IMAGE_EMBEDDING(n)`
 
 ## Motivation and Scope
 
-This proposal covers the complete PRD §3.3.5 workflow: embed data, write it to Lance, and run `ORDER BY <-> LIMIT` Top-K queries. Its scope includes the `VECTOR` type, retrieval syntax, vector Top-K execution, HNSW indexes, and a readable/writable Lance Table provider. Physical execution for image and text embedding reuses the typed model pipeline in [design.md](../design.md) §10.
+This proposal covers the complete PRD §3.3.5 workflow: embed data, write it to Lance, and run `ORDER BY <-> LIMIT` Top-K queries. Its scope includes the `VECTOR` type, retrieval syntax, vector Top-K execution, HNSW indexes, and a readable/writable Lance Table provider. Physical execution for image and text embedding reuses the [Kernel model pipeline](../kernel.md#model-runtime-and-inference).
 
 ## Detailed Design
 
@@ -25,25 +25,25 @@ v0.3 normalizes `<->` to `L2_DISTANCE` and then executes a bounded Top-K. Withou
 
 - The Lance Table provider appends bounded results directly. Streaming queries combine multiple epochs by time or size before committing a new version, avoiding one small commit per epoch. `IMAGE` is stored as an encoded blob with logical-type metadata for embedding and evidence frames.
 - The Lance table provider supports projection pushdown, predicate pushdown, and statistics. Files written by VisionQL preserve logical-type metadata and restore `IMAGE`, `BOX2D`, and `VECTOR` on read, covering the complete write-then-search workflow.
-- The public writable-Table contract for registration, validation, cancellation, timeout, and bounded buffering is defined in [design.md](../design.md) §8.4.
+- The public writable-Table contract for registration, validation, cancellation, timeout, and bounded buffering is defined in [Kernel Table Providers](../kernel.md#table-providers).
 
 ### New Types, Syntax, and Functions
 
 | Addition | Definition | Existing contract it must preserve |
 |---|---|---|
-| `VECTOR(n)` | Arrow storage is `FixedSizeList<Float32, n>`; dimension is part of the type and is checked during planning | Logical types and extension metadata in [design.md](../design.md) §6.1 |
-| `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)` Model types | Fixed functions are `IMAGE_EMBEDDING('<model>', image)` and `TEXT_EMBEDDING('<model>', text)`; earlier versions reject registration | Typed Model contract and semantic fingerprints in [design.md](../design.md) §7.3 |
-| Vector-dimension resolution | Dimension `n` is structural Model-type data. Registration validates it against the resolved Runtime and PostProcessor contracts; planning derives the exact return type from the Model. | Query Manifest and pipeline validation in [design.md](../design.md) §4.3 and §10.1 |
-| `L2_DISTANCE(VECTOR(n), VECTOR(n)) -> FLOAT` and `<->` | Require equal dimensions during planning; normalize `<->` to `L2_DISTANCE` in the AST or logical plan | Normalization and built-in functions in [design.md](../design.md) §7.5–§7.6 |
-| `CREATE INDEX ... USING HNSW` | Earlier versions parse and return unsupported without registering an empty object | DDL and rejection behavior in [design.md](../design.md) §7.1 |
-| Vector Top-K and ANN rewrite | Defined above | Rule ordering and truthful `EXPLAIN` in [design.md](../design.md) §9 |
-| Constant-argument embedding, such as `TEXT_EMBEDDING('clip_text', '...')` | Execute once as a query-init expression when determinism requirements are met | [design.md](../design.md) §9.2 item 4 |
-| Reused `Inference` node | Extract `IMAGE_EMBEDDING` and `TEXT_EMBEDDING` into the same type-generic `Inference` node | [design.md](../design.md) §4.1, §9.2, and §10 |
+| `VECTOR(n)` | Arrow storage is `FixedSizeList<Float32, n>`; dimension is part of the type and is checked during planning | [Arrow representation](../kernel.md#arrow-representation) |
+| `IMAGE_EMBEDDING(n)` / `TEXT_EMBEDDING(n)` Model types | Fixed functions are `IMAGE_EMBEDDING('<model>', image)` and `TEXT_EMBEDDING('<model>', text)`; earlier versions reject registration | [Typed Model contract](../kernel.md#typed-model-contract) |
+| Vector-dimension resolution | Dimension `n` is structural Model-type data. Registration validates it against the resolved Runtime and PostProcessor contracts; planning derives the exact return type from the Model. | [Immutable query definition snapshot](../kernel.md#immutable-query-definition-snapshot) and [compiled pipeline](../kernel.md#compiled-pipeline-and-interfaces) |
+| `L2_DISTANCE(VECTOR(n), VECTOR(n)) -> FLOAT` and `<->` | Require equal dimensions during planning; normalize `<->` to `L2_DISTANCE` in the AST or logical plan | [Syntax normalization](../kernel.md#syntax-normalization) and [built-in functions](../kernel.md#built-in-functions) |
+| `CREATE INDEX ... USING HNSW` | Earlier versions parse and return unsupported without registering an empty object | [Parser boundary](../kernel.md#parser-boundary) |
+| Vector Top-K and ANN rewrite | Defined above | [Optimizer and `EXPLAIN`](../kernel.md#optimizer-and-explain) |
+| Constant-argument embedding, such as `TEXT_EMBEDDING('clip_text', '...')` | Execute once as a query-init expression when determinism requirements are met | [Extracting inference](../kernel.md#extracting-inference) |
+| Reused `Inference` node | Extract `IMAGE_EMBEDDING` and `TEXT_EMBEDDING` into the same type-generic `Inference` node | [Logical planning](../kernel.md#datafusion-logical-plan-and-vql-metadata), [inference extraction](../kernel.md#extracting-inference), and [model runtime](../kernel.md#model-runtime-and-inference) |
 
 ## Relationship to the System Design
 
-- New types, syntax, and optimizer behavior use the existing registries. Implementation adds the `VECTOR` logical type, the two embedding Model types and fixed functions, compatible processor registrations, the HNSW implementation, and a Lance connector; it does not change the streaming coordinator boundary in [design.md](../design.md) §2.
-- Embedding scheduling reuses the Runtime registry and batching path in [design.md](../design.md) §10. The first supported local bundle path is the isolated `transformers` Runtime.
+- New types, syntax, and optimizer behavior use the existing registries. Implementation adds the `VECTOR` logical type, the two embedding Model types and fixed functions, compatible processor registrations, the HNSW implementation, and a Lance connector; it does not change the streaming coordinator boundary in the [High-Level Design](../high_level_design.md#core-invariants).
+- Embedding scheduling reuses the [Runtime registry and batching path](../kernel.md#runtime-registry-and-batching-ownership). The first supported local bundle path is the isolated `transformers` Runtime.
 
 ## Testing and Acceptance
 

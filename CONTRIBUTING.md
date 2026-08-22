@@ -94,7 +94,7 @@ SELECT COUNT(*) > 0 AS found FROM ...;
 true
 ```
 
-Cases are grouped under `ddl/`, `functions/`, and `scenarios/`. Keep one behavior per file and return stable values that can be compared exactly. Every file receives an isolated temporary catalog, so do not add cleanup SQL unless cleanup is the behavior under test. Read `vql-testing/README.md` before adding a case.
+Cases are grouped under `ddl/`, `functions/`, and `scenarios/`. Keep one behavior per file and return stable values that can be compared exactly. Every file receives an isolated temporary catalog, so do not add cleanup SQL unless cleanup is the behavior under test. Read the [Testing Design](docs/testing.md) before adding a case.
 
 If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
 
@@ -130,7 +130,7 @@ The pre-commit hooks run repository hygiene, formatting, and Clippy checks. The 
 Keep pull requests focused and make the user-visible intent easy to review:
 
 - Add focused tests for behavior changes and regression fixes.
-- Update the README, PRD, system design, and Roadmap together when a public contract or version boundary changes.
+- Update the README, PRD, Roadmap, HLD, and owning component design together when a public contract or version boundary changes.
 - Preserve stable error codes, literal paths, CLI flags, environment variables, and catalog defaults unless the change explicitly revises that contract.
 - Keep generated native extensions, local runtime state, downloaded datasets, model artifacts, and build output out of Git.
 - Run `git diff --check` and the relevant checks above.

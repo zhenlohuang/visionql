@@ -1,29 +1,39 @@
-# vql-testing
+# VisionQL Testing Design
 
-`vql-testing` owns shared SQL conformance and cross-component system tests. It is the common test
-layer for the embedded kernel today and for future `vql-cli` and `vql-server` adapters. Product
-crates should keep their own integration tests small and limited to contracts they own.
+> This document defines test ownership, shared SQL conformance, fixtures, and external-service system scenarios. Component boundaries come from the [High-Level Design](./high_level_design.md).
+
+Tests live with the narrowest component that can prove the contract. Product crates own local invariants; `vql-testing` owns shared SQL behavior and cross-component system scenarios. A higher test layer must not replace a cheaper owner test for an exact schema, error code, parser rule, or host API.
 
 ## Test layers
 
 ```text
-vql-kernel unit and owner tests
-└── synthetic fixtures, mock:// models, exact Rust-level schemas
+crate unit and owner tests
+└── synthetic fixtures, mock:// models, exact schemas and public API contracts
 
 vql-testing SQL conformance
 └── sqllogictest cases executed through an embedded Engine adapter
 
 vql-testing system scenarios
 └── public VQL + real data/model + external services from Docker Compose
+
+Python binding tests
+└── PyO3/PyArrow API, Python UDF host, and Python-visible metrics
 ```
 
-The default workspace suite never requires Docker or downloaded fixtures. A missing fixture or
-external dependency is reported as an ignored test. `VQL_INTEGRATION_TEST=1` turns it into a
-failure for explicitly provisioned runs.
+Ownership rules:
+
+- Rust unit tests stay beside the module that owns the invariant.
+- Crate integration tests cover public crate contracts using synthetic inputs or `mock://` models.
+- Exact Arrow field names, types, nullability, and stable error codes remain in owner tests because sqllogictest cannot express them.
+- CLI command and terminal contracts live in `vql-cli`; Python API contracts live in `vql-python/tests`.
+- One-purpose `.slt` cases cover SQL behavior visible across components.
+- Real data, real models, RTSP, Kafka, and process-boundary behavior belong to explicit system scenarios.
+
+The default workspace suite never requires Docker or downloaded fixtures. A missing real fixture or external dependency is reported as an ignored test. `VQL_INTEGRATION_TEST=1` turns a missing prerequisite into a failure for explicitly provisioned runs.
 
 ## SQL conformance
 
-Cases use [`sqllogictest-rs`](https://github.com/risinglightdb/sqllogictest-rs) and live under:
+Cases use [`sqllogictest-rs`](https://github.com/risinglightdb/sqllogictest-rs) and live under [`vql-testing/tests/cases`](../vql-testing/tests/cases):
 
 ```text
 tests/cases/
