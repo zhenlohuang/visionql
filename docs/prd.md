@@ -194,7 +194,15 @@ A **MODEL is a versioned callable**. A capability `TYPE` expands into a persiste
 |---|---|---|---|
 | `OBJECT_DETECTION` | `model(IMAGE [, classes => CONST ARRAY<STRING>, min_confidence => CONST FLOAT])` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | v0.1 |
 
-`VQL_*` is reserved case-insensitively for release-managed convenience functions. v0.1 defines only `VQL_CLASSIFY` and `VQL_EXTRACT`; Models use their own names directly.
+`VQL_*` is reserved case-insensitively for release-managed convenience functions. Models use their own names directly. The v0.1 functions are named by task rather than modality and keep one return schema across their input overloads:
+
+| Function | Task contract | v0.1 execution |
+|---|---|---|
+| `VQL_CLASSIFY(input, categories [, output_mode => ..., min_score => ...])` | Whole-input judgment returning `ARRAY<STRUCT<label, score>>`; `single` is a forced choice and `multi` applies a score threshold | IMAGE through release-managed YOLO26n classification; STRING is typed but unavailable |
+| `VQL_EXTRACT(input, fields)` | Ordered named-field extraction whose constant `MAP<STRING, STRUCT<question, list>>` request derives a typed STRUCT result; every answer may carry `LOCATOR` provenance | IMAGE and STRING are typed but unavailable |
+| `VQL_DETECT(input [, classes => ..., min_score => ...])` | Instance discovery returning `ARRAY<STRUCT<label, score, locator LOCATOR>>` | IMAGE through release-managed YOLO26n detection |
+
+`LOCATOR` is `STRUCT<char_span STRUCT<start INT, end INT>, box BOX2D>` with nullable members. Text spans use zero-based Unicode code-point offsets with an exclusive end. IMAGE task results use pixel boxes with a top-left origin. Every task score is in `[0, 1]`, sorted descending, and comparable only within one call.
 
 These are capability types rather than broad framework labels such as CV or LLM. The same physical bundle may be registered under multiple compatible types—for example, separate CLIP image- and text-embedding Models—while cache and session reuse remain internal optimizations.
 
@@ -440,7 +448,7 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 - `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)`, `TENSOR(dtype, dims...)`, nested types, and `UNNEST`. `VECTOR` and `TENSOR` serve generic Model boundaries; embedding presets, vector distance search, and persisted vector columns wait for v0.3.
 - Image and video directory tables. Video is expanded by the table's declared fps.
-- `OBJECT_DETECTION` capability Models, generic ONNX signatures, named immutable versions, and direct `<model>(...)` calls. `VQL_CLASSIFY` and `VQL_EXTRACT` provide the complete v0.1 release-managed AI function surface: IMAGE execution uses installed YOLO26n ImageNet classification and COCO detection artifacts respectively, while STRING and BINARY overloads return `FEATURE_NOT_AVAILABLE`. Local `ONNX_RUNTIME` uses VisionQL-owned processors, while remote `TRITON_INFERENCE_SERVER` owns its complete pre/post-processing pipeline behind the same canonical typed result. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
+- `OBJECT_DETECTION` capability Models, generic ONNX signatures, named immutable versions, and direct `<model>(...)` calls. `VQL_CLASSIFY`, `VQL_EXTRACT`, and `VQL_DETECT` provide the complete task-shaped v0.1 AI function surface. Installed YOLO26n ImageNet classification and COCO detection artifacts execute the IMAGE classify/detect overloads; field extraction and STRING overloads return `FEATURE_NOT_AVAILABLE`. Local `ONNX_RUNTIME` uses VisionQL-owned processors, while remote `TRITON_INFERENCE_SERVER` owns its complete pre/post-processing pipeline behind the same canonical typed result. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
 - One RTSP provider table with event time, watermarks, reconnect handling, and best-effort delivery; `TUMBLE` uses a bounded allowlist of `COUNT/SUM/AVG/MIN/MAX` over persistable scalar types.
 - Foreground SELECT results return directly; Kafka is a writable provider table for continuous output. Parquet and Lance arrive together in v0.3.
 - Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. Batch and streaming queries run in the foreground and stay attached to the client. The chainable DataFrame API arrives in v0.2.

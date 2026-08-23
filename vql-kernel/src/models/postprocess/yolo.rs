@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Float32Array, Float32Builder, ListArray, ListBuilder, StringArray,
-    StringBuilder, StructArray, StructBuilder,
+    Array, ArrayRef, Float32Array, Float32Builder, Int32Array, ListArray, ListBuilder, StringArray,
+    StringBuilder, StructArray, StructBuilder, new_null_array,
 };
+use arrow::buffer::NullBuffer;
 use arrow::datatypes::DataType;
 use serde::Deserialize;
 
@@ -11,9 +12,9 @@ use super::super::pipeline::{
     ImageTransform, PostProcessor, PreProcessContext, RuntimeResponseBatch, TensorContract,
 };
 use super::super::registry::{PostProcessorFactory, deserialize_processor_options, invalid_option};
-use super::super::{BoundInferenceParams, detection_fields};
+use super::super::{BoundInferenceParams, detection_fields, task_detection_fields};
 use crate::catalog::{ModelType, ProcessorSpec};
-use crate::types::box2d_field;
+use crate::types::{box2d_field, locator_field};
 use crate::{ErrorCode, Result, VqlError};
 
 const SUPPORTED_TYPES: &[ModelType] = &[ModelType::ObjectDetection];
@@ -362,7 +363,7 @@ pub(in crate::models) fn filter_and_scatter_detections(
         let detections = read_detection_row(input, source_row)?
             .into_iter()
             .filter(|detection| {
-                detection.confidence >= invocation.min_confidence
+                detection.confidence >= invocation.min_score
                     && invocation
                         .classes
                         .as_ref()
@@ -372,6 +373,105 @@ pub(in crate::models) fn filter_and_scatter_detections(
         rows[target_row] = Some(detections);
     }
     Ok(build_detection_array(rows, total_rows))
+}
+
+pub(crate) fn task_detection_output(input: &ArrayRef, images: &StructArray) -> Result<ArrayRef> {
+    let input = input.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+        VqlError::new(
+            ErrorCode::Internal,
+            "OBJECT_DETECTION pipeline returned a non-detection Arrow array",
+        )
+    })?;
+    let values = input
+        .values()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| VqlError::new(ErrorCode::Internal, "detection item is not a struct"))?;
+    let widths = images
+        .column(6)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or_else(|| VqlError::new(ErrorCode::Internal, "IMAGE width is not INT"))?;
+    let heights = images
+        .column(7)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or_else(|| VqlError::new(ErrorCode::Internal, "IMAGE height is not INT"))?;
+    let canonical_boxes = values
+        .column(2)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| VqlError::new(ErrorCode::Internal, "detection box is not BOX2D"))?;
+    let canonical_coordinates = (0..4)
+        .map(|index| {
+            canonical_boxes
+                .column(index)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| VqlError::new(ErrorCode::Internal, "BOX2D coordinate is not FLOAT"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut coordinates: [Vec<f32>; 4] = std::array::from_fn(|_| Vec::with_capacity(values.len()));
+    let mut localized = Vec::with_capacity(values.len());
+    for row in 0..input.len() {
+        let dimensions = (!images.is_null(row)
+            && !widths.is_null(row)
+            && !heights.is_null(row)
+            && widths.value(row) > 0
+            && heights.value(row) > 0)
+            .then(|| (widths.value(row) as f32, heights.value(row) as f32));
+        let start = input.value_offsets()[row] as usize;
+        let end = input.value_offsets()[row + 1] as usize;
+        for index in start..end {
+            let (width, height) = dimensions.unwrap_or((0.0, 0.0));
+            coordinates[0].push(canonical_coordinates[0].value(index) * width);
+            coordinates[1].push(canonical_coordinates[1].value(index) * height);
+            coordinates[2].push(canonical_coordinates[2].value(index) * width);
+            coordinates[3].push(canonical_coordinates[3].value(index) * height);
+            localized.push(dimensions.is_some());
+        }
+    }
+    let box_field = box2d_field("box", true);
+    let DataType::Struct(box_fields) = box_field.data_type() else {
+        unreachable!("BOX2D is always a struct")
+    };
+    let boxes = Arc::new(StructArray::new(
+        box_fields.clone(),
+        coordinates
+            .into_iter()
+            .map(|values| Arc::new(Float32Array::from(values)) as ArrayRef)
+            .collect(),
+        Some(NullBuffer::from(localized.clone())),
+    ));
+    let locator = locator_field("locator", true);
+    let DataType::Struct(locator_fields) = locator.data_type() else {
+        unreachable!("LOCATOR is always a struct")
+    };
+    let char_spans = new_null_array(locator_fields[0].data_type(), values.len());
+    let locators = Arc::new(StructArray::new(
+        locator_fields.clone(),
+        vec![char_spans, boxes],
+        Some(NullBuffer::from(localized)),
+    ));
+    let task_values = Arc::new(StructArray::new(
+        task_detection_fields(),
+        vec![
+            Arc::clone(values.column(0)),
+            Arc::clone(values.column(1)),
+            locators,
+        ],
+        values.nulls().cloned(),
+    ));
+    Ok(Arc::new(ListArray::new(
+        Arc::new(arrow::datatypes::Field::new(
+            "item",
+            DataType::Struct(task_detection_fields()),
+            true,
+        )),
+        input.offsets().clone(),
+        task_values,
+        input.nulls().cloned(),
+    )))
 }
 
 fn build_detection_array(
@@ -600,6 +700,7 @@ fn finalize_detections(
 ) -> Vec<Detection> {
     detections.retain(|detection| {
         detection.confidence > 0.0
+            && detection.confidence <= 1.0
             && detection.confidence.is_finite()
             && detection.x.is_finite()
             && detection.y.is_finite()
@@ -964,7 +1065,9 @@ mod tests {
             3,
             &BoundInferenceParams {
                 classes: Some(vec!["car".to_owned()]),
-                min_confidence: 0.25,
+                min_score: 0.25,
+                output_mode: None,
+                extract_fields: Vec::new(),
             },
         )
         .unwrap();
@@ -973,5 +1076,49 @@ mod tests {
         assert!(!output.is_null(0));
         assert_eq!(output.value_length(0), 0);
         assert!(output.is_null(1));
+    }
+
+    #[test]
+    fn task_output_wraps_boxes_in_locators_and_renames_score() {
+        let canonical = mock_detection_output("person", 1);
+        let mut image_builder = crate::types::ImageRefBuilder::with_capacity(1);
+        image_builder.append(crate::types::ImageRef::referenced(
+            "one.png",
+            "vql://media/v1/1/one.png",
+            Some(200),
+            Some(100),
+        ));
+        let images = image_builder.finish();
+        let output = task_detection_output(&canonical, &images).unwrap();
+        let output = output.as_any().downcast_ref::<ListArray>().unwrap();
+        let values = output
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(values.fields()[0].name(), "label");
+        assert_eq!(values.fields()[1].name(), "score");
+        assert_eq!(values.fields()[2].name(), "locator");
+        let locators = values
+            .column(2)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert!(locators.column(0).is_null(0));
+        assert!(!locators.column(1).is_null(0));
+        let boxes = locators
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            boxes
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap()
+                .value(0),
+            50.0
+        );
     }
 }

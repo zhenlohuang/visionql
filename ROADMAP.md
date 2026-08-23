@@ -11,7 +11,7 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 - [x] Query image and video directories with native `IMAGE`, `VIDEO`, and `BOX2D` types.
 - [x] Run direct, version-bound Model calls with minimal `CREATE MODEL`, resolve-time introspection, local ONNX or remote Triton execution, and callable-namespace lifecycle statements.
 - [x] Provide generic `VECTOR`/`TENSOR` signatures and inferred constant-only Function parameters.
-- [x] Provide `VQL_CLASSIFY` and `VQL_EXTRACT` IMAGE execution through release-managed YOLO26n classification and detection models, with typed STRING/BINARY overloads returning `FEATURE_NOT_AVAILABLE`.
+- [x] Provide task-shaped `VQL_CLASSIFY`, `VQL_EXTRACT`, and `VQL_DETECT` contracts with shared `LOCATOR` provenance; release-managed YOLO26n artifacts execute the IMAGE classification and detection overloads, while unbacked IMAGE/STRING overloads return `FEATURE_NOT_AVAILABLE`.
 - [x] Extend queries with SQL functions and in-process Python UDFs.
 - [x] Analyze recorded video and live RTSP streams with the same SQL, including event time, watermarks, `TUMBLE` windows, and reconnects.
 - [x] Return foreground query results directly or write them to Kafka tables with bounded backpressure.

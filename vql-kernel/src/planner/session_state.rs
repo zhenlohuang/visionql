@@ -97,6 +97,7 @@ fn register_functions(
     context.register_udf(tumble_udf());
     context.register_udf(builtin_ai_udf(BuiltinAiFunction::Classify)?);
     context.register_udf(builtin_ai_udf(BuiltinAiFunction::Extract)?);
+    context.register_udf(builtin_ai_udf(BuiltinAiFunction::Detect)?);
     for (_, model) in snapshot.models() {
         context.register_udf(model_marker(&model.definition)?);
     }

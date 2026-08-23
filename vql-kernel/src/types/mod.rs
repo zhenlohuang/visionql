@@ -1,5 +1,6 @@
 mod box2d;
 mod image;
+mod locator;
 mod video;
 
 pub use box2d::box2d_field;
@@ -7,6 +8,7 @@ pub use image::{
     ImageRef, ImageRefBuilder, MediaLocator, image_field, image_storage_fields, is_image_field,
     is_image_storage, make_locator, parse_locator,
 };
+pub use locator::locator_field;
 pub use video::video_field;
 
 use crate::{Result, VqlError};

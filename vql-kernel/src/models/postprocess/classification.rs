@@ -11,7 +11,7 @@ use super::super::pipeline::{
     PostProcessor, PreProcessContext, RuntimeResponseBatch, TensorContract,
 };
 use super::super::registry::{PostProcessorFactory, deserialize_processor_options, invalid_option};
-use super::super::{BoundInferenceParams, classification_fields};
+use super::super::{BoundInferenceParams, ClassificationOutputMode, classification_fields};
 use crate::catalog::{ModelType, ProcessorSpec};
 use crate::{ErrorCode, Result, VqlError};
 
@@ -116,10 +116,10 @@ impl PostProcessor for ClassificationPostProcessor {
                 .cloned()
                 .zip(values.iter().copied())
                 .map(|(label, score)| {
-                    if !score.is_finite() {
+                    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
                         return Err(VqlError::new(
                             ErrorCode::Execution,
-                            "classification Runtime returned a non-finite score",
+                            "classification Runtime returned a score outside [0, 1]",
                         ));
                     }
                     Ok(Classification { label, score })
@@ -180,13 +180,20 @@ pub(in crate::models) fn filter_and_scatter_classifications(
         let classifications = read_classification_row(input, source_row)?
             .into_iter()
             .filter(|classification| {
-                classification.score >= invocation.min_confidence
-                    && invocation
-                        .classes
-                        .as_ref()
-                        .is_none_or(|classes| classes.contains(&classification.label))
+                invocation
+                    .classes
+                    .as_ref()
+                    .is_none_or(|classes| classes.contains(&classification.label))
             })
-            .collect();
+            .filter(|classification| {
+                invocation.output_mode == Some(ClassificationOutputMode::Single)
+                    || classification.score >= invocation.min_score
+            });
+        let classifications = if invocation.output_mode == Some(ClassificationOutputMode::Single) {
+            classifications.take(1).collect()
+        } else {
+            classifications.collect()
+        };
         rows[target_row] = Some(classifications);
     }
     Ok(build_classification_array(rows, total_rows))
@@ -278,7 +285,9 @@ mod tests {
             3,
             &BoundInferenceParams {
                 classes: Some(vec!["tabby".to_owned()]),
-                min_confidence: 0.5,
+                min_score: 0.5,
+                output_mode: Some(ClassificationOutputMode::Multi),
+                extract_fields: Vec::new(),
             },
         )
         .unwrap();
@@ -287,5 +296,37 @@ mod tests {
         assert!(output.is_null(0));
         assert_eq!(read_classification_row(output, 1).unwrap().len(), 1);
         assert!(output.is_null(2));
+    }
+
+    #[test]
+    fn single_mode_is_a_forced_choice_over_requested_categories() {
+        let input = build_classification_array(
+            [Some(vec![
+                Classification {
+                    label: "cat".to_owned(),
+                    score: 0.4,
+                },
+                Classification {
+                    label: "dog".to_owned(),
+                    score: 0.3,
+                },
+            ])],
+            1,
+        );
+        let output = filter_and_scatter_classifications(
+            &input,
+            &[0],
+            1,
+            &BoundInferenceParams {
+                classes: Some(vec!["cat".to_owned(), "dog".to_owned()]),
+                min_score: 0.9,
+                output_mode: Some(ClassificationOutputMode::Single),
+                extract_fields: Vec::new(),
+            },
+        )
+        .unwrap();
+        let output = output.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(read_classification_row(output, 0).unwrap().len(), 1);
+        assert_eq!(read_classification_row(output, 0).unwrap()[0].label, "cat");
     }
 }

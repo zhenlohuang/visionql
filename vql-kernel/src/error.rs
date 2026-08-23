@@ -6,6 +6,7 @@ use std::fmt::{Display, Formatter};
 #[non_exhaustive]
 pub enum ErrorCode {
     FeatureNotAvailable,
+    InvalidArgument,
     InvalidSql,
     InvalidOption,
     InvalidLocation,
@@ -24,6 +25,7 @@ impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::FeatureNotAvailable => "FEATURE_NOT_AVAILABLE",
+            Self::InvalidArgument => "INVALID_ARGUMENT",
             Self::InvalidSql => "INVALID_SQL",
             Self::InvalidOption => "INVALID_OPTION",
             Self::InvalidLocation => "INVALID_LOCATION",

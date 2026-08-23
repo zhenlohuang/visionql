@@ -42,7 +42,7 @@ Resolving the exact initial declaration establishes the first default. An added 
 
 Function bodies store computation rather than Model ownership. Model references in SQL functions resolve from the query snapshot when the body expands, so dropping a referenced Model does not cascade into Function deletion. Function definitions also persist parameters inferred to occupy constant-only Model positions.
 
-The `vql.builtin` schema is reserved for release-managed identities. User DDL cannot create, alter, rename, or drop objects in that schema. The v0.1 YOLO26 classifier and detector used by `VQL_CLASSIFY` and `VQL_EXTRACT` are kernel-owned rather than Catalog Models, so they do not appear in Catalog snapshots, Unity Catalog responses, `SHOW MODELS`, or internal object-revision history.
+The `vql.builtin` schema is reserved for release-managed identities. User DDL cannot create, alter, rename, or drop objects in that schema. The v0.1 YOLO26 classifier and detector used by `VQL_CLASSIFY` and `VQL_DETECT` are kernel-owned rather than Catalog Models, so they do not appear in Catalog snapshots, Unity Catalog responses, `SHOW MODELS`, or internal object-revision history.
 
 ## Tables and Provider Capabilities
 

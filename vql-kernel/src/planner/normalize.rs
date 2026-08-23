@@ -1,9 +1,11 @@
+use crate::functions::BuiltinAiFunction;
 use crate::{ErrorCode, Result, VqlError};
 
 pub(super) fn normalize_query(
     sql: &str,
     snapshot: &crate::catalog::DefinitionSnapshot,
 ) -> Result<String> {
+    reject_internal_builtin_ai_calls(sql)?;
     let sql = expand_macros(sql, snapshot)?;
     let sql = normalize_builtin_ai_calls(&sql)?;
     let sql = normalize_model_calls(&sql, snapshot)?;
@@ -21,11 +23,32 @@ pub(super) fn normalize_function_ddl(
     normalize_model_calls(&sql, snapshot)
 }
 
+fn reject_internal_builtin_ai_calls(sql: &str) -> Result<()> {
+    for function in [
+        BuiltinAiFunction::Classify,
+        BuiltinAiFunction::Extract,
+        BuiltinAiFunction::Detect,
+    ] {
+        if find_function_call(sql, function.marker_name())?.is_some() {
+            return Err(VqlError::new(
+                ErrorCode::InvalidSql,
+                format!(
+                    "{} is an internal planning marker; call {} instead",
+                    function.marker_name(),
+                    function.name().to_ascii_uppercase()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn normalize_builtin_ai_function_body(sql: &str) -> Result<String> {
     let Some(return_start) = function_return_start(sql) else {
         return Ok(sql.to_owned());
     };
     let body_start = return_start + "RETURN".len();
+    reject_internal_builtin_ai_calls(&sql[body_start..])?;
     Ok(format!(
         "{}{}",
         &sql[..body_start],
@@ -35,7 +58,7 @@ fn normalize_builtin_ai_function_body(sql: &str) -> Result<String> {
 
 #[derive(Clone, Copy)]
 struct BuiltinAiSignature {
-    name: &'static str,
+    function: BuiltinAiFunction,
     parameters: &'static [&'static str],
     required: usize,
     positional: usize,
@@ -43,35 +66,27 @@ struct BuiltinAiSignature {
 
 const BUILTIN_AI_SIGNATURES: [BuiltinAiSignature; 2] = [
     BuiltinAiSignature {
-        name: "VQL_CLASSIFY",
-        parameters: &["input", "categories", "min_score"],
+        function: BuiltinAiFunction::Classify,
+        parameters: &["input", "categories", "output_mode", "min_score"],
         required: 2,
         positional: 2,
     },
     BuiltinAiSignature {
-        name: "VQL_EXTRACT",
-        parameters: &["input", "classes", "min_confidence"],
+        function: BuiltinAiFunction::Detect,
+        parameters: &["input", "classes", "min_score"],
         required: 1,
         positional: 1,
     },
 ];
 
 fn normalize_builtin_ai_calls(sql: &str) -> Result<String> {
-    let mut output = sql.to_owned();
+    let mut output = normalize_extract_calls(sql)?;
     for signature in BUILTIN_AI_SIGNATURES {
         let mut cursor = 0usize;
-        while let Some((_start, open, close)) =
-            find_function_call_from(&output, signature.name, cursor)?
+        while let Some((start, open, close)) =
+            find_function_call_from(&output, signature.function.name(), cursor)?
         {
             let args = split_args(&output[open + 1..close])?;
-            let canonical_positional = args.len() == signature.parameters.len()
-                && !args
-                    .iter()
-                    .any(|argument| top_level_arrow(argument).is_some());
-            if canonical_positional {
-                cursor = close + 1;
-                continue;
-            }
             let mut ordered = vec![None; signature.parameters.len()];
             let mut positional_index = 0usize;
             let mut seen_named = false;
@@ -87,19 +102,28 @@ fn normalize_builtin_ai_calls(sql: &str) -> Result<String> {
                         .ok_or_else(|| {
                             VqlError::new(
                                 ErrorCode::InvalidSql,
-                                format!("unknown {} argument '{name}'", signature.name),
+                                format!(
+                                    "unknown {} argument '{name}'",
+                                    signature.function.name().to_ascii_uppercase()
+                                ),
                             )
                         })?;
                     if value.is_empty() {
                         return Err(VqlError::new(
                             ErrorCode::InvalidSql,
-                            format!("{} argument '{name}' requires a value", signature.name),
+                            format!(
+                                "{} argument '{name}' requires a value",
+                                signature.function.name().to_ascii_uppercase()
+                            ),
                         ));
                     }
                     if ordered[position].replace(value.to_owned()).is_some() {
                         return Err(VqlError::new(
                             ErrorCode::InvalidSql,
-                            format!("duplicate {} argument '{name}'", signature.name),
+                            format!(
+                                "duplicate {} argument '{name}'",
+                                signature.function.name().to_ascii_uppercase()
+                            ),
                         ));
                     }
                 } else {
@@ -108,7 +132,7 @@ fn normalize_builtin_ai_calls(sql: &str) -> Result<String> {
                             ErrorCode::InvalidSql,
                             format!(
                                 "{} positional arguments must precede named arguments",
-                                signature.name
+                                signature.function.name().to_ascii_uppercase()
                             ),
                         ));
                     }
@@ -117,7 +141,7 @@ fn normalize_builtin_ai_calls(sql: &str) -> Result<String> {
                             ErrorCode::InvalidSql,
                             format!(
                                 "{} optional arguments must use name => value",
-                                signature.name
+                                signature.function.name().to_ascii_uppercase()
                             ),
                         ));
                     }
@@ -132,7 +156,10 @@ fn normalize_builtin_ai_calls(sql: &str) -> Result<String> {
                 if ordered[index].is_none() {
                     return Err(VqlError::new(
                         ErrorCode::InvalidSql,
-                        format!("{} requires argument '{parameter}'", signature.name),
+                        format!(
+                            "{} requires argument '{parameter}'",
+                            signature.function.name().to_ascii_uppercase()
+                        ),
                     ));
                 }
             }
@@ -141,11 +168,316 @@ fn normalize_builtin_ai_calls(sql: &str) -> Result<String> {
                 .map(|value| value.unwrap_or_else(|| "NULL".to_owned()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            output.replace_range(open + 1..close, &replacement);
-            cursor = open + replacement.len() + 2;
+            let replacement = format!("{}({replacement})", signature.function.marker_name());
+            output.replace_range(start..=close, &replacement);
+            cursor = start + replacement.len();
         }
     }
     Ok(output)
+}
+
+fn normalize_extract_calls(sql: &str) -> Result<String> {
+    let function = BuiltinAiFunction::Extract;
+    let mut output = sql.to_owned();
+    let mut cursor = 0usize;
+    while let Some((start, open, close)) =
+        find_function_call_from(&output, function.name(), cursor)?
+    {
+        let args = split_args(&output[open + 1..close])?;
+        let mut input = None;
+        let mut fields = None;
+        let mut positional = 0usize;
+        let mut seen_named = false;
+        for argument in args {
+            if let Some(arrow) = top_level_arrow(argument) {
+                seen_named = true;
+                let name = argument[..arrow].trim().to_ascii_lowercase();
+                let value = argument[arrow + 2..].trim();
+                if matches!(name.as_str(), "classes" | "min_confidence") {
+                    return Err(extract_detection_migration_error());
+                }
+                let target = match name.as_str() {
+                    "input" => &mut input,
+                    "fields" => &mut fields,
+                    _ => {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!("unknown VQL_EXTRACT argument '{name}'"),
+                        ));
+                    }
+                };
+                if value.is_empty() {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidSql,
+                        format!("VQL_EXTRACT argument '{name}' requires a value"),
+                    ));
+                }
+                if target.replace(value.to_owned()).is_some() {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidSql,
+                        format!("duplicate VQL_EXTRACT argument '{name}'"),
+                    ));
+                }
+            } else {
+                if seen_named {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidSql,
+                        "VQL_EXTRACT positional arguments must precede named arguments",
+                    ));
+                }
+                match positional {
+                    0 => input = Some(argument.trim().to_owned()),
+                    1 => fields = Some(argument.trim().to_owned()),
+                    _ => return Err(extract_detection_migration_error()),
+                }
+                positional += 1;
+            }
+        }
+        let input = input.ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::InvalidSql,
+                "VQL_EXTRACT requires argument 'input'",
+            )
+        })?;
+        let fields = fields.ok_or_else(extract_detection_migration_error)?;
+        let fields = parse_extract_fields(&fields)?;
+        let mut normalized = Vec::with_capacity(1 + fields.len() * 3);
+        normalized.push(input);
+        for field in fields {
+            normalized.push(quote_sql_string(&field.name));
+            normalized.push(quote_sql_string(&field.question));
+            normalized.push(if field.list { "TRUE" } else { "FALSE" }.to_owned());
+        }
+        let replacement = format!("{}({})", function.marker_name(), normalized.join(", "));
+        output.replace_range(start..=close, &replacement);
+        cursor = start + replacement.len();
+    }
+    Ok(output)
+}
+
+fn extract_detection_migration_error() -> VqlError {
+    VqlError::new(
+        ErrorCode::InvalidArgument,
+        "VQL_EXTRACT now requires fields; rewrite detection calls as VQL_DETECT(input, classes => ..., min_score => ...)",
+    )
+}
+
+fn parse_extract_fields(value: &str) -> Result<Vec<crate::models::ExtractFieldSpec>> {
+    let value = strip_outer_parentheses(value);
+    let Some(after_map) = value
+        .get(3..)
+        .filter(|_| value[..3].eq_ignore_ascii_case("MAP"))
+    else {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT fields must be a non-empty constant MAP literal",
+        ));
+    };
+    let open = 3 + after_map.len() - after_map.trim_start().len();
+    if value.as_bytes().get(open) != Some(&b'{') {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT fields must use MAP { 'field': descriptor } syntax",
+        ));
+    }
+    let close = matching_delimiter(value, open, b'{', b'}')?;
+    if !value[close + 1..].trim().is_empty() {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT fields must be a constant MAP literal",
+        ));
+    }
+    let entries = split_args(&value[open + 1..close])?;
+    if entries.is_empty() {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT fields must not be empty",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .into_iter()
+        .map(|entry| {
+            let colon = find_top_level_map_colon(entry).ok_or_else(|| {
+                VqlError::new(
+                    ErrorCode::InvalidArgument,
+                    "VQL_EXTRACT MAP entries must use 'field': descriptor",
+                )
+            })?;
+            let name = parse_sql_string(&entry[..colon], "field name")?.to_ascii_lowercase();
+            if !is_valid_extract_field_name(&name) {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("VQL_EXTRACT field '{name}' is not a valid identifier"),
+                ));
+            }
+            if !seen.insert(name.clone()) {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("VQL_EXTRACT field '{name}' is duplicated after normalization"),
+                ));
+            }
+            let (question, list) = parse_extract_descriptor(&entry[colon + 1..])?;
+            Ok(crate::models::ExtractFieldSpec {
+                name,
+                question,
+                list,
+            })
+        })
+        .collect()
+}
+
+fn parse_extract_descriptor(value: &str) -> Result<(String, bool)> {
+    let value = strip_outer_parentheses(value);
+    if value.starts_with('\'') {
+        return Ok((parse_sql_string(value, "question")?, false));
+    }
+    let Some(after_struct) = value
+        .get(6..)
+        .filter(|_| value[..6].eq_ignore_ascii_case("STRUCT"))
+    else {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT field descriptors must be STRING or STRUCT(question, list)",
+        ));
+    };
+    let open = 6 + after_struct.len() - after_struct.trim_start().len();
+    if value.as_bytes().get(open) != Some(&b'(') {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT STRUCT descriptor requires parentheses",
+        ));
+    }
+    let close = matching_paren(value, open)?;
+    if !value[close + 1..].trim().is_empty() {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT STRUCT descriptor must be a constant literal",
+        ));
+    }
+    let mut question = None;
+    let mut list = None;
+    for member in split_args(&value[open + 1..close])? {
+        let (name, value) = if let Some(arrow) = top_level_arrow(member) {
+            (member[..arrow].trim(), member[arrow + 2..].trim())
+        } else if let Some(as_position) = find_top_level_keyword(member, "AS", 0) {
+            (
+                member[as_position + 2..].trim(),
+                member[..as_position].trim(),
+            )
+        } else {
+            return Err(VqlError::new(
+                ErrorCode::InvalidArgument,
+                "VQL_EXTRACT STRUCT members must name question and list",
+            ));
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "question" if question.is_none() => {
+                question = Some(parse_sql_string(value, "question")?)
+            }
+            "list" if list.is_none() => list = Some(parse_boolean(value)?),
+            "question" | "list" => {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("duplicate VQL_EXTRACT descriptor member '{name}'"),
+                ));
+            }
+            _ => {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("unknown VQL_EXTRACT descriptor member '{name}'"),
+                ));
+            }
+        }
+    }
+    Ok((
+        question.ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::InvalidArgument,
+                "VQL_EXTRACT descriptor requires question",
+            )
+        })?,
+        list.ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::InvalidArgument,
+                "VQL_EXTRACT descriptor requires list",
+            )
+        })?,
+    ))
+}
+
+fn parse_sql_string(value: &str, role: &str) -> Result<String> {
+    let value = value.trim();
+    if value.len() < 2 || !value.starts_with('\'') || !value.ends_with('\'') {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            format!("VQL_EXTRACT {role} must be a constant STRING"),
+        ));
+    }
+    let mut parsed = String::new();
+    let mut characters = value[1..value.len() - 1].chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\'' && characters.next_if_eq(&'\'').is_none() {
+            return Err(VqlError::new(
+                ErrorCode::InvalidArgument,
+                format!("VQL_EXTRACT {role} contains an unescaped quote"),
+            ));
+        }
+        parsed.push(character);
+    }
+    if parsed.is_empty() {
+        return Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            format!("VQL_EXTRACT {role} must not be empty"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_boolean(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "TRUE" => Ok(true),
+        "FALSE" => Ok(false),
+        _ => Err(VqlError::new(
+            ErrorCode::InvalidArgument,
+            "VQL_EXTRACT descriptor list must be a constant BOOLEAN",
+        )),
+    }
+}
+
+fn quote_sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn is_valid_extract_field_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn find_top_level_map_colon(value: &str) -> Option<usize> {
+    let code = sql_code_mask(value);
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    for (index, byte) in value.bytes().enumerate() {
+        if !code[index] {
+            continue;
+        }
+        match byte {
+            b'(' => parens += 1,
+            b')' => parens = parens.saturating_sub(1),
+            b'[' => brackets += 1,
+            b']' => brackets = brackets.saturating_sub(1),
+            b'{' => braces += 1,
+            b'}' => braces = braces.saturating_sub(1),
+            b':' if parens == 0 && brackets == 0 && braces == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn normalize_function_parameter_references(sql: &str) -> Result<String> {
@@ -245,7 +577,7 @@ pub(super) fn infer_constant_parameters(
     for signature in BUILTIN_AI_SIGNATURES {
         let mut cursor = 0usize;
         while let Some((_start, open, close)) =
-            find_function_call_from(expression, signature.name, cursor)?
+            find_function_call_from(expression, signature.function.marker_name(), cursor)?
         {
             let values = split_args(&expression[open + 1..close])?;
             for position in 1..signature.parameters.len() {
@@ -785,6 +1117,10 @@ fn parse_unnest_alias(alias: &str) -> Result<String> {
 }
 
 fn matching_paren(sql: &str, open: usize) -> Result<usize> {
+    matching_delimiter(sql, open, b'(', b')')
+}
+
+fn matching_delimiter(sql: &str, open: usize, opening: u8, closing: u8) -> Result<usize> {
     let mut depth = 0usize;
     let code = sql_code_mask(sql);
     for (offset, byte) in sql.as_bytes()[open..].iter().enumerate() {
@@ -792,9 +1128,9 @@ fn matching_paren(sql: &str, open: usize) -> Result<usize> {
         if !code[index] {
             continue;
         }
-        if *byte == b'(' {
+        if *byte == opening {
             depth += 1;
-        } else if *byte == b')' {
+        } else if *byte == closing {
             depth = depth.saturating_sub(1);
             if depth == 0 {
                 return Ok(index);
@@ -803,7 +1139,7 @@ fn matching_paren(sql: &str, open: usize) -> Result<usize> {
     }
     Err(VqlError::new(
         ErrorCode::InvalidSql,
-        "unterminated UNNEST expression",
+        "unterminated SQL expression",
     ))
 }
 
@@ -1037,27 +1373,62 @@ mod tests {
     #[test]
     fn normalizes_builtin_ai_arguments() {
         assert_eq!(
-            normalize_builtin_ai_calls("SELECT VQL_CLASSIFY(image, ['person'], min_score => 0.4)")
-                .unwrap(),
-            "SELECT VQL_CLASSIFY(image, ['person'], 0.4)"
+            normalize_builtin_ai_calls(
+                "SELECT VQL_CLASSIFY(image, ['person'], output_mode => 'multi', min_score => 0.4)"
+            )
+            .unwrap(),
+            "SELECT __vql_classify(image, ['person'], 'multi', 0.4)"
         );
         assert_eq!(
             normalize_builtin_ai_calls(
-                "SELECT VQL_EXTRACT(image, min_confidence => 0.5, classes => ['car'])"
+                "SELECT VQL_DETECT(image, min_score => 0.5, classes => ['car'])"
             )
             .unwrap(),
-            "SELECT VQL_EXTRACT(image, ['car'], 0.5)"
+            "SELECT __vql_detect(image, ['car'], 0.5)"
+        );
+        assert_eq!(
+            normalize_builtin_ai_calls(
+                "SELECT VQL_EXTRACT(image, MAP {\
+                   'Total_Amount': 'What is the total?',\
+                   'items': STRUCT('List the items' AS question, TRUE AS list)\
+                 })"
+            )
+            .unwrap(),
+            "SELECT __vql_extract(image, 'total_amount', 'What is the total?', FALSE, 'items', 'List the items', TRUE)"
         );
     }
 
     #[test]
     fn rejects_invalid_builtin_ai_arguments() {
-        let positional =
-            normalize_builtin_ai_calls("SELECT VQL_EXTRACT(image, ['person'])").unwrap_err();
-        assert!(positional.message.contains("optional arguments must use"));
+        let positional = normalize_builtin_ai_calls(
+            "SELECT VQL_EXTRACT(image, classes => ['person'], min_confidence => 0.5)",
+        )
+        .unwrap_err();
+        assert_eq!(positional.code, ErrorCode::InvalidArgument);
+        assert!(positional.message.contains("VQL_DETECT"));
+
+        let detect_positional =
+            normalize_builtin_ai_calls("SELECT VQL_DETECT(image, ['person'])").unwrap_err();
+        assert!(
+            detect_positional
+                .message
+                .contains("optional arguments must use")
+        );
 
         let missing = normalize_builtin_ai_calls("SELECT VQL_CLASSIFY(image)").unwrap_err();
         assert!(missing.message.contains("requires argument 'categories'"));
+
+        let duplicate = normalize_builtin_ai_calls(
+            "SELECT VQL_EXTRACT(image, MAP {'Name': 'first', 'name': 'second'})",
+        )
+        .unwrap_err();
+        assert_eq!(duplicate.code, ErrorCode::InvalidArgument);
+        assert!(duplicate.message.contains("after normalization"));
+
+        let marker = normalize_query("SELECT __vql_detect(image, NULL, 0.5)", &model_snapshot())
+            .unwrap_err();
+        assert_eq!(marker.code, ErrorCode::InvalidSql);
+        assert!(marker.message.contains("internal planning marker"));
     }
 
     #[test]

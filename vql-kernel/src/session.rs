@@ -1920,14 +1920,21 @@ fn validate_user_model_name(name: &str) -> Result<String> {
             "model name must not be empty",
         ));
     }
-    if name
+    let reserved_leaf = name
         .rsplit('.')
         .next()
-        .is_some_and(|leaf| leaf.to_ascii_uppercase().starts_with("VQL_"))
-    {
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_default();
+    if reserved_leaf.starts_with("VQL_") {
         return Err(VqlError::new(
             ErrorCode::NameConflict,
             "VQL_* callable names are reserved for built-in AI functions",
+        ));
+    }
+    if reserved_leaf.starts_with("__VQL_") {
+        return Err(VqlError::new(
+            ErrorCode::NameConflict,
+            "__VQL_* callable names are reserved for internal planning markers",
         ));
     }
     if name == "builtin" || name.starts_with("builtin.") || name.starts_with("vql.builtin.") {
@@ -3324,10 +3331,20 @@ mod tests {
             );
         }
         let error = session
+            .sql("CREATE FUNCTION __vql_detect(BIGINT) RETURNS BIGINT RETURN $1")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NameConflict);
+        assert!(error.message.contains("reserved internal prefix"));
+        let error = session
             .sql("CREATE MODEL VQL_CUSTOM TYPE OBJECT_DETECTION FROM 'mock://person'")
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::NameConflict);
         assert!(error.message.contains("VQL_*"));
+
+        let error = session
+            .sql("CREATE MODEL __VQL_DETECT TYPE OBJECT_DETECTION FROM 'mock://person'")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NameConflict);
 
         let functions = session.sql("SHOW FUNCTIONS").unwrap().collect().unwrap();
         assert_eq!(functions[0].num_rows(), 0);
@@ -3521,7 +3538,7 @@ mod tests {
     }
 
     #[test]
-    fn non_image_builtin_ai_inputs_are_feature_gated() {
+    fn builtin_ai_overloads_and_nulls_follow_the_task_contract() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
@@ -3533,22 +3550,55 @@ mod tests {
 
         for sql in [
             "SELECT VQL_CLASSIFY('image.jpg', ['cat'])",
-            "SELECT VQL_EXTRACT('document.pdf')",
-            "SELECT VQL_EXTRACT(X'CAFE')",
+            "SELECT VQL_EXTRACT('document.pdf', MAP {'title': 'What is the title?'})",
         ] {
             let error = session.sql(sql).unwrap_err();
             assert_eq!(error.code, ErrorCode::FeatureNotAvailable, "{sql}");
             assert_eq!(error.target_version.as_deref(), Some("未排期"), "{sql}");
         }
 
-        let error = session.sql("SELECT VQL_EXTRACT(42)").unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidSql);
+        let migration = session
+            .sql("SELECT VQL_EXTRACT('document.pdf')")
+            .unwrap_err();
+        assert_eq!(migration.code, ErrorCode::InvalidArgument);
+        assert!(migration.message.contains("VQL_DETECT"));
+
+        for sql in [
+            "SELECT VQL_CLASSIFY(X'CAFE', ['cat'])",
+            "SELECT VQL_EXTRACT(X'CAFE', MAP {'title': 'What is the title?'})",
+            "SELECT VQL_DETECT('image.jpg')",
+        ] {
+            let error = session.sql(sql).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidSql, "{sql}");
+        }
 
         let error = session
-            .sql("SELECT VQL_CLASSIFY(NULL, ['cat'])")
+            .sql("SELECT VQL_EXTRACT(42, MAP {'title': 'What is the title?'})")
             .unwrap_err();
-        assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
-        assert_eq!(error.target_version.as_deref(), Some("未排期"));
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+
+        for sql in [
+            "SELECT VQL_CLASSIFY(NULL, ['cat'])",
+            "SELECT VQL_DETECT(NULL)",
+            "SELECT VQL_EXTRACT(NULL, MAP {'title': 'What is the title?'})",
+        ] {
+            let batches = session.sql(sql).unwrap().collect().unwrap();
+            assert!(batches[0].column(0).is_null(0), "{sql}");
+        }
+        let batches = session
+            .sql(
+                "WITH extracted AS (\
+                   SELECT VQL_EXTRACT(NULL, MAP {\
+                     'total_amount': 'What is the total?',\
+                     'items': STRUCT('List the items' AS question, TRUE AS list)\
+                   }) AS r\
+                 )\
+                 SELECT r.total_amount.value FROM extracted",
+            )
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert!(batches[0].column(0).is_null(0));
         assert!(
             session
                 .sql("SELECT 'VQL_CLASSIFY(NULL, [''cat''])'")

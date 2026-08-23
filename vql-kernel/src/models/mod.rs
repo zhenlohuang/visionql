@@ -15,7 +15,11 @@ mod triton_backend;
 
 pub(crate) use builtin::BuiltinModels;
 pub(crate) use definition::{canonical_model_options, semantic_fingerprint};
-pub(crate) use params::{BoundInferenceParams, bind_inference_params};
+pub(crate) use params::{
+    BoundInferenceParams, ClassificationOutputMode, ExtractFieldSpec, bind_classification_params,
+    bind_detection_params, bind_inference_params,
+};
+pub(crate) use postprocess::task_detection_output;
 pub(crate) use registry::PipelineRegistry;
 pub(crate) use runtime::{ModelRuntime, model_marker};
 
@@ -26,7 +30,7 @@ use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, FixedShapeTensor,
 };
 
-use crate::types::box2d_field;
+use crate::types::{box2d_field, locator_field};
 
 pub(crate) fn object_detection_interface() -> crate::catalog::ModelInterface {
     crate::catalog::ModelInterface {
@@ -102,10 +106,6 @@ pub(crate) fn detections_type() -> DataType {
     )))
 }
 
-pub(crate) fn detection_field(name: impl Into<String>, nullable: bool) -> FieldRef {
-    Arc::new(Field::new(name, detections_type(), nullable))
-}
-
 pub(crate) fn classification_fields() -> Fields {
     Fields::from(vec![
         Arc::new(Field::new("label", DataType::Utf8, false)),
@@ -123,6 +123,58 @@ pub(crate) fn classifications_type() -> DataType {
 
 pub(crate) fn classification_field(name: impl Into<String>, nullable: bool) -> FieldRef {
     Arc::new(Field::new(name, classifications_type(), nullable))
+}
+
+pub(crate) fn task_detection_fields() -> Fields {
+    Fields::from(vec![
+        Arc::new(Field::new("label", DataType::Utf8, false)),
+        Arc::new(Field::new("score", DataType::Float32, false)),
+        Arc::new(locator_field("locator", true)),
+    ])
+}
+
+pub(crate) fn task_detections_type() -> DataType {
+    DataType::List(Arc::new(Field::new(
+        "item",
+        DataType::Struct(task_detection_fields()),
+        true,
+    )))
+}
+
+pub(crate) fn task_detection_field(name: impl Into<String>, nullable: bool) -> FieldRef {
+    Arc::new(Field::new(name, task_detections_type(), nullable))
+}
+
+pub(crate) fn extract_answer_type() -> DataType {
+    DataType::Struct(Fields::from(vec![
+        Arc::new(Field::new("value", DataType::Utf8, true)),
+        Arc::new(Field::new("score", DataType::Float32, true)),
+        Arc::new(locator_field("locator", true)),
+    ]))
+}
+
+pub(crate) fn extraction_field(
+    name: impl Into<String>,
+    fields: &[ExtractFieldSpec],
+    nullable: bool,
+) -> FieldRef {
+    let fields = fields
+        .iter()
+        .map(|field| {
+            let answer = extract_answer_type();
+            let data_type = if field.list {
+                DataType::List(Arc::new(Field::new("item", answer, true)))
+            } else {
+                answer
+            };
+            Arc::new(Field::new(&field.name, data_type, false))
+        })
+        .collect::<Vec<_>>();
+    Arc::new(Field::new(
+        name,
+        DataType::Struct(Fields::from(fields)),
+        nullable,
+    ))
 }
 
 pub(crate) fn canonical_output_type(model_type: crate::catalog::ModelType) -> DataType {

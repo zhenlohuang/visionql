@@ -113,6 +113,12 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
             format!("function name '{function_name}' uses the reserved VQL_* prefix"),
         ));
     }
+    if function_name.to_ascii_uppercase().starts_with("__VQL_") {
+        return Err(VqlError::new(
+            ErrorCode::NameConflict,
+            format!("function name '{function_name}' uses a reserved internal prefix"),
+        ));
+    }
     if function_name.starts_with("vql.builtin.") || function_name.starts_with("builtin.") {
         return Err(VqlError::new(
             ErrorCode::NameConflict,

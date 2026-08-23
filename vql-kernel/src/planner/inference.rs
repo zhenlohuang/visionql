@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrow::array::{Array, StringArray, StructArray};
-use arrow::datatypes::{Fields, SchemaRef};
+use arrow::datatypes::{Field, FieldRef, Fields, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -32,7 +32,8 @@ use crate::catalog::{
 };
 use crate::functions::BuiltinAiFunction;
 use crate::models::{
-    BoundInferenceParams, BuiltinModels, ModelRuntime, bind_inference_params, semantic_fingerprint,
+    BoundInferenceParams, BuiltinModels, ClassificationOutputMode, ExtractFieldSpec, ModelRuntime,
+    bind_classification_params, bind_detection_params, bind_inference_params, semantic_fingerprint,
 };
 use crate::planner::sink::SinkExtensionPlanner;
 use crate::resources::QueryBudget;
@@ -42,6 +43,7 @@ struct InferenceNode {
     input: LogicalPlan,
     input_exprs: Vec<Expr>,
     output_name: String,
+    output_field: FieldRef,
     schema: DFSchemaRef,
     operation: String,
     model: ResolvedModelDef,
@@ -60,6 +62,7 @@ impl InferenceNode {
         input: LogicalPlan,
         input_exprs: Vec<Expr>,
         output_name: String,
+        output_field: FieldRef,
         operation: String,
         model: ResolvedModelDef,
         invocation: BoundInferenceParams,
@@ -70,11 +73,9 @@ impl InferenceNode {
         cancellation: CancellationToken,
         budget: QueryBudget,
     ) -> DataFusionResult<Self> {
+        let output_field = Arc::new(output_field.as_ref().clone().with_name(&output_name));
         let result = DFSchema::from_unqualified_fields(
-            Fields::from(vec![
-                crate::models::interface_output_field(&output_name, &model.interface, true)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
-            ]),
+            Fields::from(vec![Arc::clone(&output_field)]),
             HashMap::new(),
         )?;
         let schema = Arc::new(input.schema().join(&result)?);
@@ -82,6 +83,7 @@ impl InferenceNode {
             input,
             input_exprs,
             output_name,
+            output_field,
             schema,
             operation,
             model,
@@ -239,6 +241,7 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
             inputs.remove(0),
             exprs,
             self.output_name.clone(),
+            Arc::clone(&self.output_field),
             self.operation.clone(),
             self.model.clone(),
             self.invocation.clone(),
@@ -319,7 +322,7 @@ pub(crate) async fn extract_inference(
         runtime.register_builtin(&model)?;
         builtin_models.classifier = Some(model);
     }
-    if requirements.contains(&BuiltinAiFunction::Extract) {
+    if requirements.contains(&BuiltinAiFunction::Detect) {
         let model = builtins.detector(cancellation.clone()).await?;
         runtime.register_builtin(&model)?;
         builtin_models.detector = Some(model);
@@ -351,7 +354,8 @@ impl ResolvedBuiltinModels {
     fn get(&self, function: BuiltinAiFunction) -> Option<&ResolvedModelDef> {
         match function {
             BuiltinAiFunction::Classify => self.classifier.as_ref(),
-            BuiltinAiFunction::Extract => self.detector.as_ref(),
+            BuiltinAiFunction::Detect => self.detector.as_ref(),
+            BuiltinAiFunction::Extract => None,
         }
     }
 }
@@ -380,14 +384,18 @@ fn validate_builtin_ai_node(
                 let Some(function) = BuiltinAiFunction::from_name(call.name()) else {
                     return Ok(Transformed::no(expression));
                 };
-                if call.args.len() != 3 {
+                if !function.normalized_argument_count(call.args.len()) {
                     validation_error = Some(crate::VqlError::new(
                         crate::ErrorCode::Internal,
                         format!(
-                            "{} was not normalized to three arguments",
+                            "{} has an invalid normalized argument list",
                             function.name().to_ascii_uppercase()
                         ),
                     ));
+                    return Ok(Transformed::no(expression));
+                }
+                if let Err(error) = validate_builtin_arguments(function, &call.args) {
+                    validation_error = Some(error);
                     return Ok(Transformed::no(expression));
                 }
                 let Some(input_plan) = inputs.first().filter(|_| inputs.len() == 1) else {
@@ -401,28 +409,56 @@ fn validate_builtin_ai_node(
                     return Ok(Transformed::no(expression));
                 };
                 let data_type = call.args[0].get_type(input_plan.schema())?;
-                if crate::types::is_image_storage(&data_type) {
-                    requirements.insert(function);
+                if is_null_literal(&call.args[0]) {
                     return Ok(Transformed::no(expression));
                 }
+                let is_image = crate::types::is_image_storage(&data_type);
                 let logical_type = builtin_input_type(&data_type);
-                if logical_type.is_some() || matches!(data_type, arrow::datatypes::DataType::Null) {
-                    validation_error = Some(crate::VqlError::feature(
-                        format!(
-                            "{} accepts {} input, but execution for that type is not implemented",
-                            function.name().to_ascii_uppercase(),
-                            logical_type.unwrap_or("non-IMAGE")
-                        ),
-                        "未排期",
-                    ));
-                } else {
-                    validation_error = Some(crate::VqlError::new(
-                        crate::ErrorCode::InvalidSql,
-                        format!(
-                            "{} input must be IMAGE, STRING, or BINARY; got {data_type}",
-                            function.name().to_ascii_uppercase()
-                        ),
-                    ));
+                match function {
+                    BuiltinAiFunction::Classify if is_image => {
+                        requirements.insert(function);
+                    }
+                    BuiltinAiFunction::Classify if logical_type == Some("STRING") => {
+                        validation_error = Some(crate::VqlError::feature(
+                            "VQL_CLASSIFY accepts STRING input, but execution for that type is not implemented",
+                            "未排期",
+                        ));
+                    }
+                    BuiltinAiFunction::Detect if is_image => {
+                        requirements.insert(function);
+                    }
+                    BuiltinAiFunction::Extract
+                        if is_image || logical_type == Some("STRING") =>
+                    {
+                        validation_error = Some(crate::VqlError::feature(
+                            format!(
+                                "VQL_EXTRACT accepts {} input, but execution for that type is not implemented",
+                                if is_image { "IMAGE" } else { "STRING" }
+                            ),
+                            "未排期",
+                        ));
+                    }
+                    BuiltinAiFunction::Classify => {
+                        validation_error = Some(invalid_builtin_input(
+                            function,
+                            "IMAGE or STRING",
+                            &data_type,
+                        ));
+                    }
+                    BuiltinAiFunction::Detect => {
+                        validation_error = Some(invalid_builtin_input(
+                            function,
+                            "IMAGE",
+                            &data_type,
+                        ));
+                    }
+                    BuiltinAiFunction::Extract => {
+                        validation_error = Some(invalid_builtin_input(
+                            function,
+                            "IMAGE or STRING",
+                            &data_type,
+                        ));
+                    }
                 }
                 Ok(Transformed::no(expression))
             })
@@ -433,6 +469,42 @@ fn validate_builtin_ai_node(
         }
     }
     Ok(())
+}
+
+fn validate_builtin_arguments(function: BuiltinAiFunction, args: &[Expr]) -> crate::Result<()> {
+    let invalid_constant = |error: DataFusionError| {
+        crate::VqlError::new(crate::ErrorCode::InvalidArgument, error.to_string())
+    };
+    match function {
+        BuiltinAiFunction::Classify => {
+            let categories = classes_literal(args.get(1)).map_err(invalid_constant)?;
+            let output_mode = optional_string_literal(args.get(2)).map_err(invalid_constant)?;
+            let min_score = probability_literal(args.get(3)).map_err(invalid_constant)?;
+            bind_classification_params(categories, output_mode, min_score).map(|_| ())
+        }
+        BuiltinAiFunction::Detect => {
+            let classes = classes_literal(args.get(1)).map_err(invalid_constant)?;
+            let min_score = probability_literal(args.get(2)).map_err(invalid_constant)?;
+            bind_detection_params(classes, min_score).map(|_| ())
+        }
+        BuiltinAiFunction::Extract => extract_fields_literal(&args[1..])
+            .map(|_| ())
+            .map_err(invalid_constant),
+    }
+}
+
+fn invalid_builtin_input(
+    function: BuiltinAiFunction,
+    expected: &str,
+    actual: &arrow::datatypes::DataType,
+) -> crate::VqlError {
+    crate::VqlError::new(
+        crate::ErrorCode::InvalidSql,
+        format!(
+            "{} input must be {expected}; got {actual}",
+            function.name().to_ascii_uppercase()
+        ),
+    )
 }
 
 fn builtin_input_type(data_type: &arrow::datatypes::DataType) -> Option<&'static str> {
@@ -479,12 +551,22 @@ fn rewrite_plan_node(
                     call.name()
                 )));
             }
+            let expression_output_type = expr.get_type(inputs[0].schema())?;
+            if builtin_function.is_some() && is_null_literal(&call.args[0]) {
+                let value = ScalarValue::try_new_null(&expression_output_type)?;
+                return Ok(Transformed::yes(Expr::Literal(value, None)));
+            }
             let (operation, model, input_exprs, invocation) =
                 if let Some(function) = builtin_function {
-                    if call.args.len() != 3 {
+                    if !function.normalized_argument_count(call.args.len()) {
                         return Err(DataFusionError::Plan(format!(
-                            "{} marker expects 3 normalized arguments; got {}",
+                            "{} marker has an invalid normalized argument count {}; got {}",
                             function.name().to_ascii_uppercase(),
+                            match function {
+                                BuiltinAiFunction::Classify => "4",
+                                BuiltinAiFunction::Detect => "3",
+                                BuiltinAiFunction::Extract => "1 + 3n",
+                            },
                             call.args.len()
                         )));
                     }
@@ -493,10 +575,31 @@ fn rewrite_plan_node(
                             "built-in AI call was not resolved after input validation".to_owned(),
                         )
                     })?;
-                    let classes = classes_literal(call.args.get(1))?;
-                    let min_confidence = probability_literal(call.args.get(2))?;
-                    let invocation = bind_inference_params(classes, min_confidence)
-                        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+                    let invocation = match function {
+                        BuiltinAiFunction::Classify => {
+                            let categories = classes_literal(call.args.get(1))?;
+                            let output_mode = optional_string_literal(call.args.get(2))?;
+                            let min_score = probability_literal(call.args.get(3))?;
+                            let params = bind_classification_params(
+                                categories,
+                                output_mode,
+                                min_score,
+                            )
+                            .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+                            validate_classification_vocabulary(&model, &params)?;
+                            params
+                        }
+                        BuiltinAiFunction::Detect => {
+                            let classes = classes_literal(call.args.get(1))?;
+                            let min_score = probability_literal(call.args.get(2))?;
+                            bind_detection_params(classes, min_score)
+                                .map_err(|error| DataFusionError::Plan(error.to_string()))?
+                        }
+                        BuiltinAiFunction::Extract => BoundInferenceParams {
+                            extract_fields: extract_fields_literal(&call.args[1..])?,
+                            ..BoundInferenceParams::default()
+                        },
+                    };
                     (
                         function.name().to_ascii_uppercase(),
                         model,
@@ -589,6 +692,12 @@ fn rewrite_plan_node(
                         invocation,
                     )
                 };
+            let output_field = if builtin_function.is_some() {
+                Arc::new(Field::new("", expression_output_type, true))
+            } else {
+                crate::models::interface_output_field("", &model.interface, true)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?
+            };
             let invocation_fingerprint = semantic_fingerprint(&invocation);
             let invocation_volatile = model.volatile
                 || !model.interface.deterministic
@@ -613,6 +722,7 @@ fn rewrite_plan_node(
                         input,
                         input_exprs,
                         output_name.clone(),
+                        Arc::clone(&output_field),
                         operation,
                         model,
                         invocation,
@@ -731,6 +841,63 @@ fn string_literal(expr: &Expr) -> DataFusionResult<String> {
     }
 }
 
+fn optional_string_literal(expr: Option<&Expr>) -> DataFusionResult<Option<String>> {
+    let Some(expr) = expr else {
+        return Ok(None);
+    };
+    match strip_cast(expr) {
+        Expr::Literal(ScalarValue::Null, _) => Ok(None),
+        Expr::Literal(ScalarValue::Utf8(Some(value)), _)
+        | Expr::Literal(ScalarValue::Utf8View(Some(value)), _)
+        | Expr::Literal(ScalarValue::LargeUtf8(Some(value)), _) => Ok(Some(value.clone())),
+        _ => Err(DataFusionError::Plan(
+            "AI function option must be a constant string".to_owned(),
+        )),
+    }
+}
+
+fn extract_fields_literal(args: &[Expr]) -> DataFusionResult<Vec<ExtractFieldSpec>> {
+    if args.is_empty() || !args.len().is_multiple_of(3) {
+        return Err(DataFusionError::Plan(
+            "VQL_EXTRACT requires one or more normalized field descriptors".to_owned(),
+        ));
+    }
+    args.chunks_exact(3)
+        .map(|descriptor| {
+            let name = extract_string_literal(&descriptor[0], "field name")?;
+            let question = extract_string_literal(&descriptor[1], "question")?;
+            let list = match strip_cast(&descriptor[2]) {
+                Expr::Literal(ScalarValue::Boolean(Some(value)), _) => *value,
+                _ => {
+                    return Err(DataFusionError::Plan(
+                        "VQL_EXTRACT field list flag must be a constant BOOLEAN".to_owned(),
+                    ));
+                }
+            };
+            Ok(ExtractFieldSpec {
+                name,
+                question,
+                list,
+            })
+        })
+        .collect()
+}
+
+fn extract_string_literal(expr: &Expr, role: &str) -> DataFusionResult<String> {
+    match strip_cast(expr) {
+        Expr::Literal(ScalarValue::Utf8(Some(value)), _)
+        | Expr::Literal(ScalarValue::Utf8View(Some(value)), _)
+        | Expr::Literal(ScalarValue::LargeUtf8(Some(value)), _)
+            if !value.is_empty() =>
+        {
+            Ok(value.clone())
+        }
+        _ => Err(DataFusionError::Plan(format!(
+            "VQL_EXTRACT {role} must be a non-empty constant STRING"
+        ))),
+    }
+}
+
 fn probability_literal(expr: Option<&Expr>) -> DataFusionResult<Option<f32>> {
     let Some(expr) = expr else {
         return Ok(None);
@@ -777,6 +944,54 @@ fn strip_cast(mut expr: &Expr) -> &Expr {
             Expr::TryCast(value) => expr = &value.expr,
             _ => return expr,
         }
+    }
+}
+
+fn is_null_literal(expr: &Expr) -> bool {
+    matches!(strip_cast(expr), Expr::Literal(value, _) if value.is_null())
+}
+
+fn validate_classification_vocabulary(
+    model: &ResolvedModelDef,
+    invocation: &BoundInferenceParams,
+) -> DataFusionResult<()> {
+    if invocation.output_mode != Some(ClassificationOutputMode::Single) {
+        return Ok(());
+    }
+    let ResolvedExecutionSpec::Embedded { post_processor, .. } = &model.execution else {
+        return Err(DataFusionError::Internal(
+            "built-in VQL_CLASSIFY requires an embedded enumerable vocabulary".to_owned(),
+        ));
+    };
+    let labels = post_processor
+        .options
+        .get("labels")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            DataFusionError::Internal(
+                "built-in VQL_CLASSIFY implementation has no enumerable vocabulary".to_owned(),
+            )
+        })?;
+    let labels = labels
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<HashSet<_>>();
+    let categories = invocation
+        .classes
+        .as_ref()
+        .expect("classification binding always has categories");
+    let unknown = categories
+        .iter()
+        .filter(|category| !labels.contains(category.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(DataFusionError::Plan(format!(
+            "VQL_CLASSIFY categories are outside the bound implementation vocabulary: {}",
+            unknown.join(", ")
+        )))
     }
 }
 
@@ -1035,6 +1250,18 @@ impl ExecutionPlan for InferenceExec {
                         )
                         .await
                         .map_err(|error| DataFusionError::External(Box::new(error)))?
+                };
+                let output = if operation.eq_ignore_ascii_case("VQL_DETECT") {
+                    let images = values[0]
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .ok_or_else(|| DataFusionError::Execution(
+                            "VQL_DETECT expects IMAGE".to_owned()
+                        ))?;
+                    crate::models::task_detection_output(&output, images)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?
+                } else {
+                    output
                 };
                 let mut columns = batch.columns().to_vec();
                 columns.push(output);

@@ -29,5 +29,5 @@ pub use session::{
 pub use sql::{ends_with_statement_terminator, split_statements};
 pub use types::{
     MediaLocator, VqlType, audio_field, box2d_field, image_field, is_image_field, is_image_storage,
-    logical_type_of, mask_field, parse_locator, video_field,
+    locator_field, logical_type_of, mask_field, parse_locator, video_field,
 };

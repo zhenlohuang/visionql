@@ -77,7 +77,7 @@ DataFusion `ExecutionPlan::execute` yields only `RecordBatch`. Watermarks, sourc
 
 ### Typed, optimizer-visible inference
 
-A Model is a callable Catalog object whose immutable interface comes from a capability preset or an explicit tensor signature. Planning binds the call target and version from one definition snapshot, then extracts the typed marker into an explicit inference extension node. The two v0.1 release-managed AI functions lower their IMAGE overloads through the same node: `VQL_CLASSIFY` binds the kernel-owned YOLO26n ImageNet classifier, while `VQL_EXTRACT` binds the YOLO26n COCO detector. Their STRING and BINARY overloads are typed but return `FEATURE_NOT_AVAILABLE`. Runtime-specific introspection, loading, batching, and device behavior remain behind kernel registries.
+A Model is a callable Catalog object whose immutable interface comes from a capability preset or an explicit tensor signature. Planning binds the call target and version from one definition snapshot, then extracts the typed marker into an explicit inference extension node. The v0.1 release-managed AI surface is task-shaped: `VQL_CLASSIFY` performs whole-input judgment, `VQL_EXTRACT` derives a typed named-field result from a constant request map, and `VQL_DETECT` discovers localized instances. The executable IMAGE overloads bind kernel-owned YOLO26n ImageNet classification and COCO detection identities through the same inference node; unbacked IMAGE or STRING overloads return `FEATURE_NOT_AVAILABLE`. Runtime-specific introspection, loading, batching, and device behavior remain behind kernel registries.
 
 ### Immutable definitions during execution
 

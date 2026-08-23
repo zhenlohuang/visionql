@@ -213,6 +213,8 @@ VQL logical types use standard Arrow storage and field metadata.
 | `POLYGON` | `List<POINT2D>` | Normalized two-dimensional polygons only |
 | `VECTOR(n)` / `TENSOR(dtype, dims...)` | Non-nullable `FixedSizeList` with `arrow.fixed_shape_tensor` extension metadata | One fixed-shape value per row; the Field records element dtype, shape, and optional dimension names |
 | Detection result | `List<Struct<label: Utf8, confidence: Float32, box: BOX2D>>` | One list per frame; `UNNEST` produces rows |
+| `LOCATOR` | `Struct<char_span: Struct<start: Int32, end: Int32>?, box: BOX2D?>` | Task-function provenance. `char_span` uses zero-based Unicode code-point offsets with an exclusive end; an IMAGE locator's box uses pixel coordinates with a top-left origin |
+| Task detection result | `List<Struct<label: Utf8, score: Float32, locator: LOCATOR?>>` | Sorted by descending score; `UNNEST` produces instances |
 | `AUDIO` / `MASK` | Reserved logical types | Registration and execution return an unsupported-feature error |
 
 Every `IMAGE` field carries `ARROW:extension:name=visionql.image` and `ARROW:extension:metadata={"version":1}`. An unaware client still sees a standard Arrow Struct.
@@ -305,7 +307,7 @@ A MODEL is a versioned callable backed by an artifact or endpoint. Capability fo
 |---|---|---|
 | `OBJECT_DETECTION` | `model(image IMAGE, classes => CONST ARRAY<STRING>?, min_confidence => CONST FLOAT?)` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` |
 
-`IMAGE_CLASSIFICATION`, `IMAGE_EMBEDDING`, `TEXT_EMBEDDING`, and text-generation Model presets remain roadmap-gated. Generic Model signatures expose `IMAGE`, numeric scalars, `VECTOR(n)`, `TENSOR(dtype, dims...)`, and structured tensor output without introducing generic selector functions. Supported tensor elements are `FLOAT32`, `FLOAT64`, `INT8`, `INT16`, `INT32`, `INT64`, and `UINT8`; `STRING`, `FLOAT16`, and `MODEL` are rejected at an embedded generic boundary. The release-managed `VQL_CLASSIFY` and `VQL_EXTRACT` contracts are specified separately under [Built-in Functions](#built-in-functions).
+`IMAGE_CLASSIFICATION`, `IMAGE_EMBEDDING`, `TEXT_EMBEDDING`, and text-generation Model presets remain roadmap-gated. Generic Model signatures expose `IMAGE`, numeric scalars, `VECTOR(n)`, `TENSOR(dtype, dims...)`, and structured tensor output without introducing generic selector functions. Supported tensor elements are `FLOAT32`, `FLOAT64`, `INT8`, `INT16`, `INT32`, `INT64`, and `UINT8`; `STRING`, `FLOAT16`, and `MODEL` are rejected at an embedded generic boundary. The release-managed `VQL_CLASSIFY`, `VQL_EXTRACT`, and `VQL_DETECT` contracts are specified separately under [Built-in Functions](#built-in-functions).
 
 Generic signatures use embedded ONNX Runtime. `RESOLVE MODEL` binds declared parameters to graph inputs positionally unless `<parameter>.input_name` overrides the binding, matches structured outputs by field name, validates one dynamic leading batch axis plus static per-row shapes, and persists the resolved tensor contracts. Numeric scalar parameters map only to graph inputs shaped `[N]`. An `IMAGE` parameter requires exactly one processing form: either the `imagenet` preset or the complete inline set `mean`, `std`, `scale`, `resize`, and `pad_value`; incomplete inline processing or mixing the two forms fails resolution. Multi-input options use a parameter-name prefix such as `image.preprocess`, while a single-input Model may use flat keys. Execution compacts rows for which every argument is non-NULL, preprocesses IMAGE inputs, runs all graph inputs and outputs together, and scatters results back so any row with a NULL or failed argument remains NULL.
 
@@ -385,19 +387,29 @@ Inference-call parameters such as `classes` and `min_confidence` are owned by th
 
 ### Built-in Functions
 
-Public generic inference selectors are absent. Model names remain direct call targets. The v0.1 release-managed AI surface contains exactly `VQL_CLASSIFY` and `VQL_EXTRACT`; neither Models nor Functions may claim any `VQL_*` name.
+Public generic inference selectors are absent. Model names remain direct call targets. The v0.1 release-managed AI surface contains exactly `VQL_CLASSIFY`, `VQL_EXTRACT`, and `VQL_DETECT`; neither Models nor Functions may claim any `VQL_*` name, and `__VQL_*` is reserved for internal planning markers. A function name fixes one task shape and one return schema across modalities. Every argument except `input` is a planning-time constant; required domain arguments remain positional and optional arguments use `name => value`.
 
 | Function | Signature | Contract |
 |---|---|---|
-| `VQL_CLASSIFY` | `(input IMAGE\|STRING\|BINARY, categories CONST ARRAY<STRING> [, min_score => CONST FLOAT]) -> ARRAY<STRUCT<label STRING, score FLOAT>>` | IMAGE execution uses the installed YOLO26n-cls classifier, filters its ImageNet label vocabulary by `categories`, and sorts matches by descending score. STRING and BINARY are accepted interface overloads whose use returns `FEATURE_NOT_AVAILABLE` with target `未排期` |
-| `VQL_EXTRACT` | `(input IMAGE\|STRING\|BINARY [, classes => CONST ARRAY<STRING>, min_confidence => CONST FLOAT]) -> ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | IMAGE execution returns YOLO26n detections. STRING and BINARY cover text, encoded files, and documents at the interface boundary but return `FEATURE_NOT_AVAILABLE` with target `未排期` when used |
+| `VQL_CLASSIFY` | `(input IMAGE\|STRING, categories CONST ARRAY<STRING> [, output_mode => CONST STRING, min_score => CONST FLOAT]) -> ARRAY<STRUCT<label STRING, score FLOAT>>` | `categories` is non-empty and distinct. `single` is the default and returns exactly the highest-scoring requested category; `multi` returns categories at or above `min_score`, default `0.25`. IMAGE uses the installed YOLO26n-cls classifier; STRING returns `FEATURE_NOT_AVAILABLE` with target `未排期` |
+| `VQL_EXTRACT` | `(input IMAGE\|STRING, fields CONST MAP<STRING, STRUCT<question STRING, list BOOLEAN>>) -> STRUCT<requested fields>` | The ordered constant map derives one lowercase result field per request. A scalar field returns `STRUCT<value STRING?, score FLOAT?, locator LOCATOR?>`; `list = true` returns an array of that answer struct. A bare STRING descriptor is shorthand for `STRUCT(question => value, list => false)`. Both overloads return `FEATURE_NOT_AVAILABLE` with target `未排期` |
+| `VQL_DETECT` | `(input IMAGE [, classes => CONST ARRAY<STRING>, min_score => CONST FLOAT]) -> ARRAY<STRUCT<label STRING, score FLOAT, locator LOCATOR?>>` | IMAGE execution uses the installed YOLO26n detector. Results are sorted by descending score; unknown class filters produce no matches; no detections is an empty array |
 | `BOX_CENTER` | `(BOX2D) -> POINT2D` | Function form of `box.center` |
 | `POLYGON` / `ST_POLYGON` | `(STRING) -> POLYGON` | Parse constants during planning; require closure, finite values, and `[0,1]` coordinates |
 | `ST_CONTAINS` | `(POLYGON, POINT2D) -> BOOLEAN` | Boundary points count as contained |
 
-The AI functions bind separate release-owned inference identities. `VQL_CLASSIFY` uses `vql.builtin.yolo26n-cls@v0.1` at `$VQL_HOME/models/yolo26n-cls.onnx`; `VQL_EXTRACT` uses `vql.builtin.yolo26n@v0.1` at `$VQL_HOME/models/yolo26n.onnx`. Install them with `python scripts/export_yolo26.py --task classify --install` and `python scripts/export_yolo26.py --task detect --install`. Each identity is an internal model definition, not a Catalog Model, and therefore has no DDL, object revision, `SHOW` row, or user-selectable version. Planning resolves only the artifact required by the invoked function and returns `INVALID_LOCATION` with the corresponding install command when it is absent. The default score threshold is `0.25`. Unknown requested labels produce no matching result rather than expanding the installed model vocabulary.
+The AI functions bind separate release-owned inference identities. `VQL_CLASSIFY` uses `vql.builtin.yolo26n-cls@v0.1` at `$VQL_HOME/models/yolo26n-cls.onnx`; `VQL_DETECT` uses `vql.builtin.yolo26n@v0.1` at `$VQL_HOME/models/yolo26n.onnx`. Install them with `python scripts/export_yolo26.py --task classify --install` and `python scripts/export_yolo26.py --task detect --install`. Each identity is an internal model definition, not a Catalog Model, and therefore has no DDL, object revision, `SHOW` row, or user-selectable version. Planning resolves only the artifact required by the invoked function and returns `INVALID_LOCATION` with the corresponding install command when it is absent. `VQL_EXTRACT` has no release-owned execution identity until a conforming field-extraction backend is scheduled.
 
-VisionQL built-ins use SQL NULL propagation. Function markers are planning-only and must be extracted into `InferenceNode`; scalar execution is an internal error.
+All three functions use `score` in `[0, 1]`, sorted descending and comparable only within one call. SQL NULL input produces a NULL result without resolving an implementation. Row processing failure produces NULL unless `vql.on_error = 'fail'`; successful absence is an empty array or a scalar answer with `value NULL`. Function markers are planning-only and executable overloads are extracted into `InferenceNode`; scalar marker execution is an internal error. Calls to the retired detection-shaped `VQL_EXTRACT` form fail with `INVALID_ARGUMENT` and a `VQL_DETECT` rewrite hint.
+
+The public extraction literal uses standard MAP and STRUCT syntax. Request order fixes return-field order and participates in call identity:
+
+```sql
+VQL_EXTRACT(document, MAP {
+  'title': 'What is the title?',
+  'line_items': STRUCT('List the line items' AS question, TRUE AS list)
+})
+```
 
 ---
 
@@ -735,6 +747,7 @@ Stable codes are separate from prose messages. Clients react to codes, never err
 |---|---|
 | `FEATURE_NOT_AVAILABLE` | Parseable but unavailable syntax; carries a target release or states that it is unscheduled, and registers no Catalog object |
 | `INVALID_SQL` | Syntax, allowlist, or statement-shape rejection |
+| `INVALID_ARGUMENT` | A function argument violates its task contract or requires an explicit migration rewrite |
 | `INVALID_OPTION` | Bad DDL option, Runtime option, or configuration value, reported with its full option path |
 | `INVALID_LOCATION` | Unusable table location or path |
 | `NAME_CONFLICT` | A Model, Function, or reserved built-in already owns a callable name; identifies the existing kind |

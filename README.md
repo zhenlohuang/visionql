@@ -108,8 +108,9 @@ Use `SHOW MODELS`, `SHOW MODEL VERSIONS yolo`, and `DESCRIBE MODEL yolo` to insp
 
 ### Built-in AI functions
 
-The v0.1 built-in AI surface is `VQL_CLASSIFY` and `VQL_EXTRACT`. Install their release-managed
-YOLO26n ImageNet classifier and COCO detector under the active `VQL_HOME`:
+The v0.1 built-in AI surface is organized by task shape: `VQL_CLASSIFY` judges a whole input,
+`VQL_EXTRACT` extracts user-named fields, and `VQL_DETECT` discovers instances. Install the
+release-managed YOLO26n ImageNet classifier and COCO detector under the active `VQL_HOME`:
 
 ```bash
 python scripts/export_yolo26.py --task classify --install
@@ -120,17 +121,19 @@ Then use either function without creating or resolving a Catalog Model:
 
 ```sql
 SELECT uri,
-       VQL_CLASSIFY(image, ['tabby_cat', 'golden_retriever']) AS categories,
-       VQL_EXTRACT(image,
+       VQL_CLASSIFY(image, ['football_helmet']) AS categories,
+       VQL_DETECT(image,
          classes => ['person'],
-         min_confidence => 0.5
+         min_score => 0.5
        ) AS detections
 FROM sample_images;
 ```
 
-Both interfaces also accept STRING and BINARY inputs so text, files, and documents do not require
-a future signature change. Those overloads return `FEATURE_NOT_AVAILABLE` in v0.1; IMAGE is the
-only executable input type.
+`VQL_CLASSIFY` also reserves a STRING overload. `VQL_EXTRACT` accepts IMAGE or STRING plus a
+planning-time field map such as
+`MAP {'title': 'What is the title?', 'items': STRUCT('List the items' AS question, TRUE AS list)}`.
+Those overloads currently return `FEATURE_NOT_AVAILABLE`; IMAGE execution is available for
+`VQL_CLASSIFY` and `VQL_DETECT`.
 
 ### Model sources
 
