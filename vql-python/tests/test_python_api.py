@@ -46,13 +46,12 @@ def test_image_filtering_python_udf_then_model(tmp_path):
         "LANGUAGE PYTHON AS 'scenario_ops:quality'"
     ).collect()
     session.sql(
-        "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' "
-        "USING ONNX_RUNTIME WITH (output={labels=['person']})"
+        "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'"
     ).collect()
     session.sql("RESOLVE MODEL detector").collect()
     table = session.sql(
         "SELECT CARDINALITY("
-        "IMAGE_DETECTION('detector', image, "
+        "detector(image, "
         "classes => ['person'], min_confidence => 0.8)) AS people "
         "FROM photos WHERE quality(img => image) >= 0"
     ).collect()

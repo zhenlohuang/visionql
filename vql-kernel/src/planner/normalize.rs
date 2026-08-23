@@ -4,89 +4,381 @@ pub(super) fn normalize_query(
     sql: &str,
     snapshot: &crate::catalog::DefinitionSnapshot,
 ) -> Result<String> {
-    let sql = normalize_inference_calls(sql, false)?;
-    let sql = expand_macros(&sql, snapshot)?;
-    let sql = normalize_inference_calls(&sql, true)?;
+    let sql = expand_macros(sql, snapshot)?;
+    let sql = normalize_builtin_ai_calls(&sql)?;
+    let sql = normalize_model_calls(&sql, snapshot)?;
     let sql = rewrite_center(&sql);
     rewrite_correlated_unnest(&sql)
 }
 
-fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Result<String> {
-    let mut output = sql.to_owned();
-    let mut cursor = 0usize;
-    while let Some((_start, open, close)) =
-        find_function_call_from(&output, "IMAGE_DETECTION", cursor)?
-    {
-        let args = split_args(&output[open + 1..close])?;
-        let has_named = args.iter().any(|arg| top_level_arrow(arg).is_some());
-        if !has_named {
-            if args.len() > 2 && !allow_canonical_positional {
-                return Err(VqlError::new(
-                    ErrorCode::InvalidSql,
-                    "IMAGE_DETECTION optional arguments must use name => value",
-                ));
-            }
-            cursor = close + 1;
-            continue;
-        }
+pub(super) fn normalize_function_ddl(
+    sql: &str,
+    snapshot: &crate::catalog::DefinitionSnapshot,
+) -> Result<String> {
+    let sql = expand_macros_inner(sql, snapshot, false)?;
+    let sql = normalize_function_parameter_references(&sql)?;
+    let sql = normalize_builtin_ai_function_body(&sql)?;
+    normalize_model_calls(&sql, snapshot)
+}
 
-        let mut positional = Vec::new();
-        let mut classes = None;
-        let mut min_confidence = None;
-        let mut seen_named = false;
-        for arg in args {
-            if let Some(arrow) = top_level_arrow(arg) {
-                seen_named = true;
-                let name = arg[..arrow].trim().to_ascii_lowercase();
-                let value = arg[arrow + 2..].trim();
-                if value.is_empty() {
-                    return Err(VqlError::new(
-                        ErrorCode::InvalidSql,
-                        format!("IMAGE_DETECTION argument '{name}' requires a value"),
-                    ));
-                }
-                let target = match name.as_str() {
-                    "classes" => &mut classes,
-                    "min_confidence" => &mut min_confidence,
-                    _ => {
+fn normalize_builtin_ai_function_body(sql: &str) -> Result<String> {
+    let Some(return_start) = function_return_start(sql) else {
+        return Ok(sql.to_owned());
+    };
+    let body_start = return_start + "RETURN".len();
+    Ok(format!(
+        "{}{}",
+        &sql[..body_start],
+        normalize_builtin_ai_calls(&sql[body_start..])?
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct BuiltinAiSignature {
+    name: &'static str,
+    parameters: &'static [&'static str],
+    required: usize,
+    positional: usize,
+}
+
+const BUILTIN_AI_SIGNATURES: [BuiltinAiSignature; 2] = [
+    BuiltinAiSignature {
+        name: "VQL_CLASSIFY",
+        parameters: &["input", "categories", "min_score"],
+        required: 2,
+        positional: 2,
+    },
+    BuiltinAiSignature {
+        name: "VQL_EXTRACT",
+        parameters: &["input", "classes", "min_confidence"],
+        required: 1,
+        positional: 1,
+    },
+];
+
+fn normalize_builtin_ai_calls(sql: &str) -> Result<String> {
+    let mut output = sql.to_owned();
+    for signature in BUILTIN_AI_SIGNATURES {
+        let mut cursor = 0usize;
+        while let Some((_start, open, close)) =
+            find_function_call_from(&output, signature.name, cursor)?
+        {
+            let args = split_args(&output[open + 1..close])?;
+            let canonical_positional = args.len() == signature.parameters.len()
+                && !args
+                    .iter()
+                    .any(|argument| top_level_arrow(argument).is_some());
+            if canonical_positional {
+                cursor = close + 1;
+                continue;
+            }
+            let mut ordered = vec![None; signature.parameters.len()];
+            let mut positional_index = 0usize;
+            let mut seen_named = false;
+            for argument in args {
+                if let Some(arrow) = top_level_arrow(argument) {
+                    seen_named = true;
+                    let name = argument[..arrow].trim().to_ascii_lowercase();
+                    let value = argument[arrow + 2..].trim();
+                    let position = signature
+                        .parameters
+                        .iter()
+                        .position(|parameter| *parameter == name)
+                        .ok_or_else(|| {
+                            VqlError::new(
+                                ErrorCode::InvalidSql,
+                                format!("unknown {} argument '{name}'", signature.name),
+                            )
+                        })?;
+                    if value.is_empty() {
                         return Err(VqlError::new(
                             ErrorCode::InvalidSql,
-                            format!("unknown IMAGE_DETECTION argument '{name}'"),
+                            format!("{} argument '{name}' requires a value", signature.name),
                         ));
                     }
-                };
-                if target.replace(value.to_owned()).is_some() {
-                    return Err(VqlError::new(
-                        ErrorCode::InvalidSql,
-                        format!("duplicate IMAGE_DETECTION argument '{name}'"),
-                    ));
+                    if ordered[position].replace(value.to_owned()).is_some() {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!("duplicate {} argument '{name}'", signature.name),
+                        ));
+                    }
+                } else {
+                    if seen_named {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!(
+                                "{} positional arguments must precede named arguments",
+                                signature.name
+                            ),
+                        ));
+                    }
+                    if positional_index >= signature.positional {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!(
+                                "{} optional arguments must use name => value",
+                                signature.name
+                            ),
+                        ));
+                    }
+                    ordered[positional_index] = Some(argument.trim().to_owned());
+                    positional_index += 1;
                 }
-            } else {
-                if seen_named {
-                    return Err(VqlError::new(
-                        ErrorCode::InvalidSql,
-                        "IMAGE_DETECTION positional arguments must precede named arguments",
-                    ));
-                }
-                positional.push(arg.trim().to_owned());
             }
+            for (index, parameter) in signature.parameters[..signature.required]
+                .iter()
+                .enumerate()
+            {
+                if ordered[index].is_none() {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidSql,
+                        format!("{} requires argument '{parameter}'", signature.name),
+                    ));
+                }
+            }
+            let replacement = ordered
+                .into_iter()
+                .map(|value| value.unwrap_or_else(|| "NULL".to_owned()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            output.replace_range(open + 1..close, &replacement);
+            cursor = open + replacement.len() + 2;
         }
-        if positional.len() != 2 {
-            return Err(VqlError::new(
-                ErrorCode::InvalidSql,
-                "IMAGE_DETECTION requires positional model and image arguments",
-            ));
+    }
+    Ok(output)
+}
+
+fn normalize_function_parameter_references(sql: &str) -> Result<String> {
+    let Some(return_start) = function_return_start(sql) else {
+        return Ok(sql.to_owned());
+    };
+    let open = sql[..return_start].find('(').ok_or_else(|| {
+        VqlError::new(
+            ErrorCode::InvalidSql,
+            "CREATE FUNCTION requires a parameter list",
+        )
+    })?;
+    let close = matching_paren(sql, open)?;
+    if close >= return_start {
+        return Ok(sql.to_owned());
+    }
+    let mut body = sql[return_start + "RETURN".len()..].to_owned();
+    for (index, parameter) in split_args(&sql[open + 1..close])?.into_iter().enumerate() {
+        let Some((name, _data_type)) = parameter.trim().split_once(char::is_whitespace) else {
+            continue;
+        };
+        body = replace_identifier(&body, name, &format!("${}", index + 1));
+    }
+    Ok(format!("{}RETURN{}", &sql[..return_start], body))
+}
+
+fn function_return_start(sql: &str) -> Option<usize> {
+    let upper = sql.to_ascii_uppercase();
+    let code = sql_code_mask(sql);
+    upper.match_indices("RETURN").find_map(|(position, _)| {
+        let end = position + "RETURN".len();
+        (code[position..end].iter().all(|value| *value)
+            && (position == 0 || !is_identifier_byte(sql.as_bytes()[position - 1]))
+            && sql
+                .as_bytes()
+                .get(end)
+                .is_none_or(|byte| !is_identifier_byte(*byte)))
+        .then_some(position)
+    })
+}
+
+pub(super) fn infer_constant_parameters(
+    expression: &str,
+    parameters: &[(String, String)],
+    snapshot: &crate::catalog::DefinitionSnapshot,
+) -> Result<Vec<String>> {
+    let mut constants = Vec::new();
+    for (model_name, model) in snapshot.models() {
+        let arguments = model.definition.interface.arguments().collect::<Vec<_>>();
+        let mut cursor = 0usize;
+        while let Some((_start, open, close)) =
+            find_function_call_from(expression, model_name, cursor)?
+        {
+            let values = split_args(&expression[open + 1..close])?;
+            for (index, parameter) in arguments.iter().enumerate() {
+                if !parameter.constant {
+                    continue;
+                }
+                let Some(value) = values.get(index) else {
+                    continue;
+                };
+                let value = strip_outer_parentheses(value);
+                if let Some((name, _)) =
+                    parameters
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, parameter)| {
+                            (value.eq_ignore_ascii_case(&parameter.0)
+                                || value == format!("${}", index + 1))
+                            .then_some(parameter)
+                        })
+                    && !constants.iter().any(|candidate: &String| candidate == name)
+                {
+                    constants.push(name.clone());
+                }
+            }
+            if let Some(value) = values.get(arguments.len()) {
+                let value = strip_outer_parentheses(value);
+                if !value.eq_ignore_ascii_case("null")
+                    && let Some((name, _)) =
+                        parameters
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, parameter)| {
+                                (value.eq_ignore_ascii_case(&parameter.0)
+                                    || value == format!("${}", index + 1))
+                                .then_some(parameter)
+                            })
+                    && !constants.iter().any(|candidate: &String| candidate == name)
+                {
+                    constants.push(name.clone());
+                }
+            }
+            cursor = close + 1;
         }
-        let mut ordered = positional;
-        if classes.is_some() || min_confidence.is_some() {
-            ordered.push(classes.unwrap_or_else(|| "NULL".to_owned()));
+    }
+    for signature in BUILTIN_AI_SIGNATURES {
+        let mut cursor = 0usize;
+        while let Some((_start, open, close)) =
+            find_function_call_from(expression, signature.name, cursor)?
+        {
+            let values = split_args(&expression[open + 1..close])?;
+            for position in 1..signature.parameters.len() {
+                let Some(value) = values.get(position) else {
+                    continue;
+                };
+                let value = strip_outer_parentheses(value);
+                if value.eq_ignore_ascii_case("null") {
+                    continue;
+                }
+                if let Some((name, _)) =
+                    parameters
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, parameter)| {
+                            (value.eq_ignore_ascii_case(&parameter.0)
+                                || value == format!("${}", index + 1))
+                            .then_some(parameter)
+                        })
+                    && !constants.iter().any(|candidate| candidate == name)
+                {
+                    constants.push(name.clone());
+                }
+            }
+            cursor = close + 1;
         }
-        if let Some(min_confidence) = min_confidence {
-            ordered.push(min_confidence);
+    }
+    Ok(constants)
+}
+
+fn normalize_model_calls(
+    sql: &str,
+    snapshot: &crate::catalog::DefinitionSnapshot,
+) -> Result<String> {
+    let mut output = sql.to_owned();
+    for (model_name, model) in snapshot.models() {
+        let mut cursor = 0usize;
+        while let Some((_start, open, close)) =
+            find_function_call_from(&output, model_name, cursor)?
+        {
+            let arguments = model.definition.interface.arguments().collect::<Vec<_>>();
+            let args = split_args(&output[open + 1..close])?;
+            let mut ordered = vec![None; arguments.len() + 1];
+            let canonical_positional = args.len() == ordered.len()
+                && !args
+                    .iter()
+                    .any(|argument| top_level_arrow(argument).is_some());
+            let mut positional_index = 0usize;
+            let mut seen_named = false;
+            for argument in args {
+                if let Some(arrow) = top_level_arrow(argument) {
+                    seen_named = true;
+                    let name = argument[..arrow].trim().to_ascii_lowercase();
+                    let value = argument[arrow + 2..].trim();
+                    if value.is_empty() {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!("model '{model_name}' argument '{name}' requires a value"),
+                        ));
+                    }
+                    let position = if name == "version" {
+                        arguments.len()
+                    } else {
+                        arguments
+                            .iter()
+                            .position(|parameter| parameter.name == name)
+                            .ok_or_else(|| {
+                                VqlError::new(
+                                    ErrorCode::InvalidSql,
+                                    format!("unknown model '{model_name}' argument '{name}'"),
+                                )
+                            })?
+                    };
+                    if ordered[position].replace(value.to_owned()).is_some() {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!("duplicate model '{model_name}' argument '{name}'"),
+                        ));
+                    }
+                } else {
+                    if seen_named {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!(
+                                "model '{model_name}' positional arguments must precede named arguments"
+                            ),
+                        ));
+                    }
+                    if positional_index >= model.definition.interface.parameters.len()
+                        && !canonical_positional
+                    {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!(
+                                "model '{model_name}' semantic and version arguments must use name => value"
+                            ),
+                        ));
+                    }
+                    if positional_index >= ordered.len() {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!("model '{model_name}' received too many arguments"),
+                        ));
+                    }
+                    ordered[positional_index] = Some(argument.trim().to_owned());
+                    positional_index += 1;
+                }
+            }
+            for (index, parameter) in arguments.iter().enumerate() {
+                if ordered[index].is_none() && !parameter.optional {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidSql,
+                        format!(
+                            "model '{model_name}' requires argument '{}'",
+                            parameter.name
+                        ),
+                    ));
+                }
+            }
+            let replacement = ordered
+                .into_iter()
+                .map(|value| value.unwrap_or_else(|| "NULL".to_owned()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if replacement.is_empty() {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidSql,
+                    format!("model '{model_name}' has no callable parameters"),
+                ));
+            }
+            output.replace_range(open + 1..close, &replacement);
+            cursor = open + replacement.len() + 2;
         }
-        let replacement = ordered.join(", ");
-        output.replace_range(open + 1..close, &replacement);
-        cursor = open + replacement.len() + 2;
     }
     Ok(output)
 }
@@ -94,6 +386,14 @@ fn normalize_inference_calls(sql: &str, allow_canonical_positional: bool) -> Res
 pub(super) fn expand_macros(
     sql: &str,
     snapshot: &crate::catalog::DefinitionSnapshot,
+) -> Result<String> {
+    expand_macros_inner(sql, snapshot, true)
+}
+
+fn expand_macros_inner(
+    sql: &str,
+    snapshot: &crate::catalog::DefinitionSnapshot,
+    enforce_constants: bool,
 ) -> Result<String> {
     let mut output = sql.to_owned();
     for _ in 0..16 {
@@ -116,9 +416,38 @@ pub(super) fn expand_macros(
                         ),
                     ));
                 }
+                for constant in function
+                    .definition
+                    .constant_parameters
+                    .iter()
+                    .filter(|_| enforce_constants)
+                {
+                    let position = function
+                        .definition
+                        .parameters
+                        .iter()
+                        .position(|(parameter, _)| parameter.eq_ignore_ascii_case(constant))
+                        .expect("constant function parameter exists in the signature");
+                    if !is_constant_argument(args[position]) {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            format!(
+                                "function '{name}' argument {} ('{constant}') must be constant",
+                                position + 1
+                            ),
+                        ));
+                    }
+                }
                 let mut expanded = expression.clone();
-                for ((parameter, _), argument) in function.definition.parameters.iter().zip(args) {
+                for (index, ((parameter, _), argument)) in
+                    function.definition.parameters.iter().zip(args).enumerate()
+                {
                     expanded = replace_identifier(&expanded, parameter, &format!("({argument})"));
+                    expanded = replace_identifier(
+                        &expanded,
+                        &format!("${}", index + 1),
+                        &format!("({argument})"),
+                    );
                 }
                 output.replace_range(start..=close, &format!("({expanded})"));
                 changed = true;
@@ -133,6 +462,42 @@ pub(super) fn expand_macros(
         ErrorCode::InvalidSql,
         "SQL macro expansion exceeded maximum depth 16",
     ))
+}
+
+fn strip_outer_parentheses(mut value: &str) -> &str {
+    loop {
+        let trimmed = value.trim();
+        if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+            return trimmed;
+        }
+        let Ok(close) = matching_paren(trimmed, 0) else {
+            return trimmed;
+        };
+        if close != trimmed.len() - 1 {
+            return trimmed;
+        }
+        value = &trimmed[1..trimmed.len() - 1];
+    }
+}
+
+fn is_constant_argument(value: &str) -> bool {
+    let value = strip_outer_parentheses(value);
+    if value.eq_ignore_ascii_case("null")
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("false")
+        || value.parse::<f64>().is_ok()
+    {
+        return true;
+    }
+    if value.starts_with('\'') && value.ends_with('\'') {
+        let code = sql_code_mask(value);
+        return code.iter().all(|in_code| !*in_code);
+    }
+    if value.starts_with('[') && value.ends_with(']') {
+        return split_args(&value[1..value.len() - 1])
+            .is_ok_and(|values| values.into_iter().all(is_constant_argument));
+    }
+    false
 }
 
 fn find_function_call(sql: &str, name: &str) -> Result<Option<(usize, usize, usize)>> {
@@ -596,70 +961,145 @@ fn sql_code_mask(sql: &str) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use crate::catalog::{
+        CatalogStore, ModelDef, ModelInterface, ModelParameter, ModelType, ModelVersion,
+    };
+
+    fn model_snapshot() -> crate::catalog::DefinitionSnapshot {
+        let directory = tempfile::tempdir().unwrap().keep();
+        let catalog = CatalogStore::open(&directory.join("catalog.db")).unwrap();
+        catalog
+            .create_model(&ModelDef {
+                name: "yolo".to_owned(),
+                interface: ModelInterface {
+                    capability: Some(ModelType::ObjectDetection),
+                    parameters: vec![ModelParameter {
+                        name: "image".to_owned(),
+                        data_type: "IMAGE".to_owned(),
+                        constant: false,
+                        optional: false,
+                    }],
+                    semantic_arguments: vec![
+                        ModelParameter {
+                            name: "classes".to_owned(),
+                            data_type: "ARRAY<STRING>".to_owned(),
+                            constant: true,
+                            optional: true,
+                        },
+                        ModelParameter {
+                            name: "min_confidence".to_owned(),
+                            data_type: "FLOAT".to_owned(),
+                            constant: true,
+                            optional: true,
+                        },
+                    ],
+                    return_type: "detections".to_owned(),
+                    processing_family: "vision.object_detection".to_owned(),
+                    deterministic: true,
+                },
+                versions: vec![ModelVersion {
+                    name: "v1".to_owned(),
+                    source: "mock://person".to_owned(),
+                    runtime_kind: "onnx-runtime".to_owned(),
+                    options: BTreeMap::new(),
+                    declaration_fingerprint: "declaration".to_owned(),
+                    resolved: None,
+                    created_at: 0,
+                }],
+                initial_version_fingerprint: "declaration".to_owned(),
+                default_version: None,
+                comment: None,
+                builtin: false,
+            })
+            .unwrap();
+        catalog.snapshot().unwrap()
+    }
 
     #[test]
     fn normalizes_named_inference_options() {
+        let snapshot = model_snapshot();
         assert_eq!(
-            normalize_inference_calls(
-                "SELECT IMAGE_DETECTION('yolo', image, min_confidence => 0.5, classes => ['person', 'car'])",
-                false,
+            normalize_model_calls(
+                "SELECT yolo(image, min_confidence => 0.5, classes => ['person', 'car'])",
+                &snapshot,
             )
             .unwrap(),
-            "SELECT IMAGE_DETECTION('yolo', image, ['person', 'car'], 0.5)"
+            "SELECT yolo(image, ['person', 'car'], 0.5, NULL)"
         );
         assert_eq!(
-            normalize_inference_calls(
-                "SELECT IMAGE_DETECTION('yolo', image, min_confidence => 0.5)",
-                false,
-            )
-            .unwrap(),
-            "SELECT IMAGE_DETECTION('yolo', image, NULL, 0.5)"
+            normalize_model_calls("SELECT yolo(image, min_confidence => 0.5)", &snapshot).unwrap(),
+            "SELECT yolo(image, NULL, 0.5, NULL)"
         );
     }
 
     #[test]
-    fn rejects_invalid_inference_option_shapes() {
+    fn normalizes_builtin_ai_arguments() {
+        assert_eq!(
+            normalize_builtin_ai_calls("SELECT VQL_CLASSIFY(image, ['person'], min_score => 0.4)")
+                .unwrap(),
+            "SELECT VQL_CLASSIFY(image, ['person'], 0.4)"
+        );
+        assert_eq!(
+            normalize_builtin_ai_calls(
+                "SELECT VQL_EXTRACT(image, min_confidence => 0.5, classes => ['car'])"
+            )
+            .unwrap(),
+            "SELECT VQL_EXTRACT(image, ['car'], 0.5)"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_builtin_ai_arguments() {
         let positional =
-            normalize_inference_calls("SELECT IMAGE_DETECTION('yolo', image, ['person'])", false)
-                .unwrap_err();
+            normalize_builtin_ai_calls("SELECT VQL_EXTRACT(image, ['person'])").unwrap_err();
+        assert!(positional.message.contains("optional arguments must use"));
+
+        let missing = normalize_builtin_ai_calls("SELECT VQL_CLASSIFY(image)").unwrap_err();
+        assert!(missing.message.contains("requires argument 'categories'"));
+    }
+
+    #[test]
+    fn rejects_invalid_inference_option_shapes() {
+        let snapshot = model_snapshot();
+        let positional =
+            normalize_model_calls("SELECT yolo(image, ['person'])", &snapshot).unwrap_err();
         assert!(positional.message.contains("must use name => value"));
 
-        let duplicate = normalize_inference_calls(
-            "SELECT IMAGE_DETECTION('yolo', image, classes => ['person'], classes => ['car'])",
-            false,
+        let duplicate = normalize_model_calls(
+            "SELECT yolo(image, classes => ['person'], classes => ['car'])",
+            &snapshot,
         )
         .unwrap_err();
         assert!(
             duplicate
                 .message
-                .contains("duplicate IMAGE_DETECTION argument 'classes'")
+                .contains("duplicate model 'yolo' argument 'classes'")
         );
 
-        let unknown = normalize_inference_calls(
-            "SELECT IMAGE_DETECTION('yolo', image, threshold => 0.5)",
-            false,
-        )
-        .unwrap_err();
+        let unknown =
+            normalize_model_calls("SELECT yolo(image, threshold => 0.5)", &snapshot).unwrap_err();
         assert!(
             unknown
                 .message
-                .contains("unknown IMAGE_DETECTION argument 'threshold'")
+                .contains("unknown model 'yolo' argument 'threshold'")
         );
     }
 
     #[test]
     fn rewrites_correlated_unnest_to_projection_unnest() {
         assert_eq!(
-            rewrite_correlated_unnest("SELECT det.label FROM photos, UNNEST(IMAGE_DETECTION('yolo', image)) AS u(det) WHERE det.confidence > 0.5").unwrap(),
-            "SELECT det.label FROM (SELECT *, UNNEST(IMAGE_DETECTION('yolo', image)) AS det FROM photos) AS photos WHERE det.confidence > 0.5"
+            rewrite_correlated_unnest("SELECT det.label FROM photos, UNNEST(yolo(image)) AS u(det) WHERE det.confidence > 0.5").unwrap(),
+            "SELECT det.label FROM (SELECT *, UNNEST(yolo(image)) AS det FROM photos) AS photos WHERE det.confidence > 0.5"
         );
     }
 
     #[test]
     fn preserves_the_left_relation_alias_after_unnest_rewrite() {
         assert_eq!(
-            rewrite_correlated_unnest("SELECT f.uri, det.box FROM traffic_videos AS f, UNNEST(IMAGE_DETECTION('yolo', f.frame)) AS det WHERE det.label = 'person'").unwrap(),
-            "SELECT f.uri, det.box FROM (SELECT *, UNNEST(IMAGE_DETECTION('yolo', f.frame)) AS det FROM traffic_videos AS f) AS f WHERE det.label = 'person'"
+            rewrite_correlated_unnest("SELECT f.uri, det.box FROM traffic_videos AS f, UNNEST(yolo(f.frame)) AS det WHERE det.label = 'person'").unwrap(),
+            "SELECT f.uri, det.box FROM (SELECT *, UNNEST(yolo(f.frame)) AS det FROM traffic_videos AS f) AS f WHERE det.label = 'person'"
         );
     }
 

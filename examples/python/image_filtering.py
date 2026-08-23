@@ -28,16 +28,12 @@ if __name__ == "__main__":
     ).collect()
     session.sql(
         f"CREATE MODEL yolo26n TYPE OBJECT_DETECTION "
-        f"FROM 'file://{model}' USING ONNX_RUNTIME "
-        "WITH ("
-        "input={name='images', width=640, height=640}, "
-        "output={name='output0', format='yolo_e2e', labels='coco80'}"
-        ")"
+        f"FROM 'file://{model}'"
     ).collect()
     session.sql("RESOLVE MODEL yolo26n").collect()
     result = session.sql(
         "SELECT uri, CARDINALITY("
-        "IMAGE_DETECTION('yolo26n', image, "
+        "yolo26n(image, "
         "classes => ['person'], min_confidence => 0.6)) AS people "
         "FROM product_photos WHERE quality(image) >= 0 ORDER BY uri"
     )

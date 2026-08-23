@@ -9,6 +9,6 @@ CREATE TABLE people_stream USING RTSP OPTIONS (
 CREATE MODEL detector
 TYPE OBJECT_DETECTION
 FROM 'file://${MODEL_PATH}'
-USING ONNX_RUNTIME;
+OPTIONS (image_size = 640, format = 'yolo_e2e', labels = 'coco80', box_format = 'xyxy');
 
 RESOLVE MODEL detector;

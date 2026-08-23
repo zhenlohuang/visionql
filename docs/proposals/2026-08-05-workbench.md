@@ -130,7 +130,7 @@ Workbench contains a browser SPA and a small BFF. The BFF exists because browser
 
 ### 3.2 Client Representation of `IMAGE`
 
-The engine protocol returns references by default. The Workbench Flight session selects `image_mode=thumbnail`, so each result can carry a small preview. `IMAGE.uri` is display-only. Clicking the image calls public `FRAME_AT(locator [, pts_ms])` to obtain an original. The locator binds a source revision and media version and is reauthorized on every server read. File and object-store references can be reread. Live RTSP frames are available only while retained by the engine's bounded compressed-GOP ring; after expiry, the thumbnail remains and the UI explains the limitation. Sections 4.3–4.4 define the full transport and authorization path.
+The engine protocol returns references by default. The Workbench Flight session selects `image_mode=thumbnail`, so each result can carry a small preview. `IMAGE.uri` is display-only. Clicking the image calls public `FRAME_AT(locator [, pts_ms])` to obtain an original. The locator binds an opaque source generation and media version and is reauthorized on every server read. File and object-store references can be reread. Live RTSP frames are available only while retained by the engine's bounded compressed-GOP ring; after expiry, the thumbnail remains and the UI explains the limitation. Sections 4.3–4.4 define the full transport and authorization path.
 
 ### 3.3 State Ownership
 
@@ -247,7 +247,7 @@ sequenceDiagram
     U->>W: POST /api/v1/media:open {media_ref}
     W->>W: Validate session ownership and expiry
     W->>V: Prepared FRAME_AT(locator [, pts]) query
-    V->>V: Parse locator, reauthorize source revision, validate range
+    V->>V: Parse locator, reauthorize source generation, validate range
     V-->>W: image/jpeg or stable error code
     W-->>U: Same-origin image response
 ```

@@ -4,8 +4,8 @@ use arrow::datatypes::{DataType, Schema};
 use chrono::{DateTime, Utc};
 
 use crate::catalog::{
-    EventTimePolicy, FunctionDef, FunctionImplementation, KafkaTableConfig, ModelDef, ModelType,
-    RtspTransport, TableDef, TableProvider,
+    EventTimePolicy, FunctionDef, FunctionImplementation, KafkaTableConfig, ModelDef,
+    ModelInterface, ModelVersion, RtspTransport, TableDef, TableProvider,
 };
 use crate::{ErrorCode, Result, VqlError};
 
@@ -109,30 +109,102 @@ impl RenderCreate for TableDef {
 
 impl RenderCreate for ModelDef {
     fn render_create(&self) -> Result<String> {
-        let model_type = match self.model_type {
-            ModelType::ObjectDetection => "OBJECT_DETECTION",
-        };
-        let runtime = self.runtime_kind.to_ascii_uppercase().replace('-', "_");
-        let mut sql = format!(
-            "CREATE MODEL {} TYPE {model_type} FROM {} USING {runtime}",
-            quote_identifier(&self.name),
-            quote_sanitized_string(&self.source),
-        );
-        if !self.options.is_empty() {
-            let options = self
-                .options
+        let first = self.versions.first().ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::Catalog,
+                format!("model '{}' has no live versions", self.name),
+            )
+        })?;
+        let mut statements = vec![render_initial_model(self, first)];
+        statements.extend(
+            self.versions
                 .iter()
-                .map(|(key, value)| {
-                    format!(
-                        "{} = {}",
-                        render_dotted_identifier(key),
-                        render_json_value(value, key)
-                    )
-                })
-                .collect::<Vec<_>>();
-            write!(sql, " WITH ({})", options.join(", ")).expect("writing to String cannot fail");
+                .skip(1)
+                .map(|version| render_added_model_version(&self.name, version)),
+        );
+        if let Some(default_version) = self.default_version.as_deref() {
+            statements.push(format!(
+                "ALTER MODEL {} SET DEFAULT_VERSION = {}",
+                quote_identifier(&self.name),
+                quote_string(default_version)
+            ));
         }
-        Ok(sql)
+        Ok(statements.join(";\n"))
+    }
+}
+
+fn render_initial_model(model: &ModelDef, version: &ModelVersion) -> String {
+    let mut sql = format!(
+        "CREATE MODEL {} {}",
+        quote_identifier(&model.name),
+        render_model_interface(&model.interface)
+    );
+    if version.name != "v1" {
+        write!(sql, " VERSION {}", quote_string(&version.name))
+            .expect("writing to String cannot fail");
+    }
+    render_model_version_tail(&mut sql, version);
+    if let Some(comment) = model.comment.as_deref() {
+        write!(sql, " COMMENT {}", quote_string(comment)).expect("writing to String cannot fail");
+    }
+    sql
+}
+
+fn render_added_model_version(name: &str, version: &ModelVersion) -> String {
+    let mut sql = format!(
+        "ALTER MODEL {} ADD VERSION {}",
+        quote_identifier(name),
+        quote_string(&version.name)
+    );
+    render_model_version_tail(&mut sql, version);
+    sql
+}
+
+fn render_model_interface(interface: &ModelInterface) -> String {
+    interface.capability.map_or_else(
+        || {
+            format!(
+                "({}) RETURNS {}",
+                interface
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        format!(
+                            "{} {}",
+                            quote_identifier(&parameter.name),
+                            parameter.data_type
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                interface.return_type
+            )
+        },
+        |capability| format!("TYPE {}", capability.as_str()),
+    )
+}
+
+fn render_model_version_tail(sql: &mut String, version: &ModelVersion) {
+    let runtime = version.runtime_kind.to_ascii_uppercase().replace('-', "_");
+    write!(
+        sql,
+        " FROM {} USING {runtime}",
+        quote_sanitized_string(&version.source)
+    )
+    .expect("writing to String cannot fail");
+    if !version.options.is_empty() {
+        let options = version
+            .options
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{} = {}",
+                    render_dotted_identifier(key),
+                    render_json_value(value, key)
+                )
+            })
+            .collect::<Vec<_>>();
+        write!(sql, " OPTIONS ({})", options.join(", ")).expect("writing to String cannot fail");
     }
 }
 

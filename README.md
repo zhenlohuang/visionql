@@ -86,36 +86,51 @@ VisionQL persists the table definition, so a new shell session can query `sample
 
 ### Typed visual inference
 
-The v0.1 contract registers one typed Model and calls the fixed built-in function selected by its `TYPE`. Inference remains visible to the optimizer; SQL/Python user functions use DataFusion's separate function extension path.
+The v0.1 contract registers a Model and calls that Model by name. Its persisted interface fixes the typed arguments and result, while inference remains visible to the optimizer.
 
 ```sql
-CREATE MODEL yolo
-TYPE OBJECT_DETECTION
-FROM 'file:///models/yolo.onnx'
-USING ONNX_RUNTIME
-WITH (
-  input = {
-    name = 'images', width = 640, height = 640, resize = 'letterbox'
-  },
-  output = {name = 'output0', format = 'yolo_e2e', labels = 'coco80'}
-);
+CREATE MODEL yolo TYPE OBJECT_DETECTION
+FROM 'file:///models/yolo.onnx';
 
 RESOLVE MODEL yolo;
 
 SELECT uri,
-       IMAGE_DETECTION(
-         'yolo',
-         image,
+       yolo(image,
          classes => ['person'],
          min_confidence => 0.5
        ) AS detections
 FROM sample_images;
 ```
 
-`USING` selects the Runtime, and `WITH` is interpreted only by that Runtime. `CREATE MODEL` is a fast local declaration: it does not download an artifact or contact a service. `RESOLVE MODEL` performs the potentially slow download, cache installation, checksum verification, or service metadata validation. Queries reject a Model that has not been resolved.
+`CREATE MODEL` is local and free of I/O. An `.onnx` source selects ONNX Runtime; other unambiguous source schemes have fixed Runtime defaults, and `USING` is required otherwise. `RESOLVE MODEL` introspects the graph, downloads and verifies remote artifacts when needed, and publishes the first version. Flat `OPTIONS` supply only facts introspection cannot determine, such as `sha256`, `format`, `labels`, or a dynamic `image_size`.
 
-Use `SHOW MODELS` to inspect each declaration's `UNRESOLVED` or `RESOLVED` status.
-`SHOW CREATE TABLE|MODEL|FUNCTION <name>` returns sanitized canonical DDL that can be parsed and executed again; credential references are redacted.
+Use `SHOW MODELS`, `SHOW MODEL VERSIONS yolo`, and `DESCRIBE MODEL yolo` to inspect the aggregate, versions, and callable interface. `SHOW CREATE TABLE|MODEL|FUNCTION <name>` returns sanitized canonical DDL; credential references are redacted.
+
+### Built-in AI functions
+
+The v0.1 built-in AI surface is `VQL_CLASSIFY` and `VQL_EXTRACT`. Install their release-managed
+YOLO26n ImageNet classifier and COCO detector under the active `VQL_HOME`:
+
+```bash
+python scripts/export_yolo26.py --task classify --install
+python scripts/export_yolo26.py --task detect --install
+```
+
+Then use either function without creating or resolving a Catalog Model:
+
+```sql
+SELECT uri,
+       VQL_CLASSIFY(image, ['tabby_cat', 'golden_retriever']) AS categories,
+       VQL_EXTRACT(image,
+         classes => ['person'],
+         min_confidence => 0.5
+       ) AS detections
+FROM sample_images;
+```
+
+Both interfaces also accept STRING and BINARY inputs so text, files, and documents do not require
+a future signature change. Those overloads return `FEATURE_NOT_AVAILABLE` in v0.1; IMAGE is the
+only executable input type.
 
 ### Model sources
 
@@ -123,19 +138,16 @@ Use `SHOW MODELS` to inspect each declaration's `UNRESOLVED` or `RESOLVED` statu
 |---|---|---|
 | Local ONNX artifact | `'./model.onnx'` or `'file:///models/model.onnx'` | `RESOLVE MODEL` hashes it in place; no cache copy |
 | Hugging Face artifact | `'hf://owner/repository@<commit>/model.onnx'` | `RESOLVE MODEL` downloads and caches it by digest |
-| Inference service | `'http://triton-prod:8000'` | `RESOLVE MODEL` validates the Runtime-specific service contract |
+| Inference service | `'triton+https://triton-prod:8000/detector@42'` | `RESOLVE MODEL` validates the service contract; service versions are volatile |
 
 ```sql
-CREATE MODEL production_detector
-TYPE OBJECT_DETECTION
-FROM 'http://triton-prod:8000'
-USING TRITON_INFERENCE_SERVER
-WITH (model = 'detector', version = '42');
+CREATE MODEL production_detector TYPE OBJECT_DETECTION
+FROM 'triton+https://triton-prod:8000/detector@42';
 
 RESOLVE MODEL production_detector;
 ```
 
-The Runtime registry is intentionally explicit. `ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER` are the v0.1 paths; `TRANSFORMERS`, `VLLM`, `SGLANG`, and `LLAMA_CPP` remain roadmap-gated. Embedded ONNX execution derives its VisionQL-owned pre/post-processing pipeline from `WITH.input` and `WITH.output`. A Triton service instead owns the complete preprocessing, inference, and postprocessing path: VisionQL sends encoded images and accepts only the canonical typed detection result, never service-specific raw tensors.
+`ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER` are the v0.1 Runtime paths. ONNX resolution derives tensor binding and processing from graph metadata plus flat `OPTIONS`; Triton owns preprocessing and postprocessing and exposes the canonical capability result.
 
 Set `HF_TOKEN` when resolving a private Hugging Face bundle. The resolver reads it from the process environment only during `RESOLVE MODEL`; it is never persisted in the Catalog or visible Model DDL.
 
@@ -299,8 +311,8 @@ cargo test -p vql-testing --test sql --locked
 
 Cases are grouped under `vql-testing/tests/cases/{ddl,functions,scenarios}` as one-purpose
 sqllogictest files. Each file gets an isolated Engine and catalog. Real-data cases run against
-`data/datasets` and `data/models/yolo26n.onnx`, and report an ignored test when a required fixture
-is absent.
+`data/datasets`, `data/models/yolo26n-cls.onnx`, and `data/models/yolo26n.onnx`; they report an
+ignored test when a required fixture is absent.
 
 Optional development and system-test services use profiles in the root Compose file. For example:
 

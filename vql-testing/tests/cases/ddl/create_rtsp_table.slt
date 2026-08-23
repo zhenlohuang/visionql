@@ -9,4 +9,4 @@ OPTIONS (
   transport = 'tcp'
 );
 ----
-created table 'cam_entrance' at revision 1
+created table 'cam_entrance'

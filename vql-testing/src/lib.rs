@@ -64,6 +64,7 @@ pub struct FixturePaths {
     pub images: PathBuf,
     pub videos: PathBuf,
     pub model: PathBuf,
+    pub classification_model: PathBuf,
 }
 
 impl FixturePaths {
@@ -72,6 +73,7 @@ impl FixturePaths {
             images: workspace.join("data/datasets/images/coco128/images"),
             videos: workspace.join("data/datasets/videos/sample-videos"),
             model: workspace.join("data/models/yolo26n.onnx"),
+            classification_model: workspace.join("data/models/yolo26n-cls.onnx"),
         }
     }
 
@@ -92,6 +94,16 @@ impl FixturePaths {
                 &self.model,
                 "python scripts/export_yolo26.py --size n",
             ),
+            (
+                "${BUILTIN_DETECTION_MODEL}",
+                &self.model,
+                "python scripts/export_yolo26.py --task detect --size n",
+            ),
+            (
+                "${BUILTIN_CLASSIFICATION_MODEL}",
+                &self.classification_model,
+                "python scripts/export_yolo26.py --task classify --size n",
+            ),
         ]
         .into_iter()
         .filter(|(placeholder, path, _)| source.contains(placeholder) && !path.exists())
@@ -107,8 +119,23 @@ struct EmbeddedDatabaseFactory {
 }
 
 impl EmbeddedDatabaseFactory {
-    fn isolated() -> Result<Self, TestError> {
+    fn isolated(
+        builtin_detection_model: Option<&Path>,
+        builtin_classification_model: Option<&Path>,
+    ) -> Result<Self, TestError> {
         let home = Arc::new(tempfile::tempdir()?);
+        if builtin_detection_model.is_some() || builtin_classification_model.is_some() {
+            let model_dir = home.path().join("models");
+            std::fs::create_dir_all(&model_dir)?;
+        }
+        if let Some(source) = builtin_detection_model {
+            let model_dir = home.path().join("models");
+            std::fs::copy(source, model_dir.join("yolo26n.onnx"))?;
+        }
+        if let Some(source) = builtin_classification_model {
+            let model_dir = home.path().join("models");
+            std::fs::copy(source, model_dir.join("yolo26n-cls.onnx"))?;
+        }
         let engine = Engine::new(EngineConfig::from_home(home.path()))?;
         Ok(Self { engine, home })
     }
@@ -154,7 +181,16 @@ impl sqllogictest::DB for EmbeddedDatabase {
 
 /// Run one `.slt` file against a fresh embedded Engine and catalog.
 pub fn run_slt_file(path: &Path, fixtures: &FixturePaths) -> Result<(), String> {
-    let factory = EmbeddedDatabaseFactory::isolated().map_err(|error| error.to_string())?;
+    let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let builtin_detection_model = source
+        .contains("${BUILTIN_DETECTION_MODEL}")
+        .then_some(fixtures.model.as_path());
+    let builtin_classification_model = source
+        .contains("${BUILTIN_CLASSIFICATION_MODEL}")
+        .then_some(fixtures.classification_model.as_path());
+    let factory =
+        EmbeddedDatabaseFactory::isolated(builtin_detection_model, builtin_classification_model)
+            .map_err(|error| error.to_string())?;
     let mut runner = Runner::new(move || {
         let connection = factory.connect();
         async move { connection }

@@ -16,14 +16,6 @@ use crate::{ErrorCode, VqlError};
 
 use super::python_udf::parse_data_type as parse_python_data_type;
 
-const RESERVED_INFERENCE_FUNCTION_NAMES: &[&str] = &[
-    "image_detection",
-    "image_classification",
-    "image_embedding",
-    "text_embedding",
-    "text_generation",
-];
-
 #[derive(Debug, Default)]
 pub(crate) struct VqlTypePlanner;
 
@@ -34,6 +26,15 @@ impl TypePlanner for VqlTypePlanner {
                 if arguments.is_empty() && name.to_string().eq_ignore_ascii_case("IMAGE") =>
             {
                 Ok(Some(Arc::new(crate::types::image_field("", true))))
+            }
+            SqlDataType::Custom(name, arguments)
+                if name.to_string().eq_ignore_ascii_case("VECTOR")
+                    || name.to_string().eq_ignore_ascii_case("TENSOR") =>
+            {
+                let rendered = format!("{}({})", name, arguments.join(", "));
+                crate::models::parse_boundary_field("", &rendered, true)
+                    .map(Some)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))
             }
             _ => Ok(None),
         }
@@ -106,10 +107,16 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
         ));
     }
     let function_name = statement.name.to_ascii_lowercase();
-    if RESERVED_INFERENCE_FUNCTION_NAMES.contains(&function_name.as_str()) {
+    if function_name.to_ascii_uppercase().starts_with("VQL_") {
         return Err(VqlError::new(
-            ErrorCode::InvalidOption,
-            format!("function name '{function_name}' is reserved for built-in typed inference"),
+            ErrorCode::NameConflict,
+            format!("function name '{function_name}' uses the reserved VQL_* prefix"),
+        ));
+    }
+    if function_name.starts_with("vql.builtin.") || function_name.starts_with("builtin.") {
+        return Err(VqlError::new(
+            ErrorCode::NameConflict,
+            "the vql.builtin schema is release-managed",
         ));
     }
     let arguments = statement.args.as_deref().unwrap_or_default();
@@ -139,6 +146,12 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
         .enumerate()
         .map(|(index, argument)| {
             let data_type = data_type_name(&argument.data_type, !is_python)?;
+            if data_type.eq_ignore_ascii_case("MODEL") {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "MODEL is not a function parameter type; use one wrapper function per model",
+                ));
+            }
             if is_python {
                 parse_python_data_type(&data_type)?;
             }
@@ -198,6 +211,7 @@ fn build_definition(statement: &CreateFunction) -> crate::Result<(FunctionDef, D
         name: function_name,
         implementation,
         parameters,
+        constant_parameters: Vec::new(),
         return_type,
         semantic_fingerprint: String::new(),
     };

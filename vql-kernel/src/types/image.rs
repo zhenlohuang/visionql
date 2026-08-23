@@ -180,16 +180,16 @@ impl ImageRefBuilder {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaLocator {
-    pub table_revision: i64,
+    pub table_generation: i64,
     pub relative_path: String,
     pub pts_ms: Option<i64>,
 }
 
-pub fn make_locator(table_revision: i64, relative_path: &str, pts_ms: Option<i64>) -> String {
+pub fn make_locator(table_generation: i64, relative_path: &str, pts_ms: Option<i64>) -> String {
     let encoded = utf8_percent_encode(relative_path, NON_ALPHANUMERIC);
     match pts_ms {
-        Some(pts_ms) => format!("vql://media/v1/{table_revision}/{encoded}?pts_ms={pts_ms}"),
-        None => format!("vql://media/v1/{table_revision}/{encoded}"),
+        Some(pts_ms) => format!("vql://media/v1/{table_generation}/{encoded}?pts_ms={pts_ms}"),
+        None => format!("vql://media/v1/{table_generation}/{encoded}"),
     }
 }
 
@@ -202,16 +202,16 @@ pub fn parse_locator(locator: &str) -> Result<MediaLocator> {
         )
     })?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let (revision, encoded_path) = path.split_once('/').ok_or_else(|| {
+    let (generation, encoded_path) = path.split_once('/').ok_or_else(|| {
         VqlError::new(
             ErrorCode::InvalidLocation,
-            "media locator is missing its source revision or path",
+            "media locator is missing its source generation or path",
         )
     })?;
-    let table_revision = revision.parse::<i64>().map_err(|error| {
+    let table_generation = generation.parse::<i64>().map_err(|error| {
         VqlError::new(
             ErrorCode::InvalidLocation,
-            "media locator has an invalid source revision",
+            "media locator has an invalid source generation",
         )
         .with_source(error)
     })?;
@@ -250,7 +250,7 @@ pub fn parse_locator(locator: &str) -> Result<MediaLocator> {
     };
 
     Ok(MediaLocator {
-        table_revision,
+        table_generation,
         relative_path,
         pts_ms,
     })
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(
             parse_locator(&locator).unwrap(),
             MediaLocator {
-                table_revision: 42,
+                table_generation: 42,
                 relative_path: "nested/门口 1.png".to_owned(),
                 pts_ms: Some(1250),
             }

@@ -12,11 +12,11 @@ use crate::connectors::images::ImagesTableProvider;
 use crate::connectors::rtsp::RtspTableProvider;
 use crate::connectors::videos::VideosTableProvider;
 use crate::functions::{
-    VqlFunctionFactory, VqlTypePlanner, box_center_udf, polygon_udf, python_function_udf,
-    st_contains_udf, tumble_udf,
+    BuiltinAiFunction, VqlFunctionFactory, VqlTypePlanner, box_center_udf, builtin_ai_udf,
+    polygon_udf, python_function_udf, st_contains_udf, tumble_udf,
 };
 use crate::media::MediaRuntime;
-use crate::models::image_detection;
+use crate::models::model_marker;
 use crate::planner::inference::VqlQueryPlanner;
 use crate::resources::QueryBudget;
 use crate::{ErrorCode, Result, VqlError};
@@ -95,7 +95,11 @@ fn register_functions(
     context.register_udf(polygon_udf("st_polygon"));
     context.register_udf(st_contains_udf());
     context.register_udf(tumble_udf());
-    context.register_udf(image_detection());
+    context.register_udf(builtin_ai_udf(BuiltinAiFunction::Classify)?);
+    context.register_udf(builtin_ai_udf(BuiltinAiFunction::Extract)?);
+    for (_, model) in snapshot.models() {
+        context.register_udf(model_marker(&model.definition)?);
+    }
     for (_, function) in snapshot.functions() {
         match &function.definition.implementation {
             crate::catalog::FunctionImplementation::Python { .. } => {
@@ -125,7 +129,8 @@ fn register_tables(
                 location,
                 recursive,
             } => {
-                let provider = ImagesTableProvider::try_new(location, table.revision, *recursive)?;
+                let provider =
+                    ImagesTableProvider::try_new(location, table.generation, *recursive)?;
                 if provider.schema().as_ref() != table.schema.as_ref() {
                     return Err(VqlError::new(
                         ErrorCode::Catalog,
@@ -142,7 +147,7 @@ fn register_tables(
             } => {
                 let provider = VideosTableProvider::try_new(
                     location,
-                    table.revision,
+                    table.generation,
                     *recursive,
                     *fps,
                     *start_time_ms,

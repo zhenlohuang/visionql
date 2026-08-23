@@ -11,6 +11,7 @@ pub enum ErrorCode {
     InvalidLocation,
     Catalog,
     AlreadyExists,
+    NameConflict,
     NotFound,
     QueryCancelled,
     ResourceExhausted,
@@ -28,6 +29,7 @@ impl ErrorCode {
             Self::InvalidLocation => "INVALID_LOCATION",
             Self::Catalog => "CATALOG_ERROR",
             Self::AlreadyExists => "ALREADY_EXISTS",
+            Self::NameConflict => "NAME_CONFLICT",
             Self::NotFound => "NOT_FOUND",
             Self::QueryCancelled => "QUERY_CANCELLED",
             Self::ResourceExhausted => "RESOURCE_EXHAUSTED",
@@ -110,10 +112,17 @@ impl From<serde_json::Error> for VqlError {
     }
 }
 
+impl From<arrow::error::ArrowError> for VqlError {
+    fn from(source: arrow::error::ArrowError) -> Self {
+        Self::new(ErrorCode::Execution, source.to_string()).with_source(source)
+    }
+}
+
 impl From<vql_catalog::CatalogError> for VqlError {
     fn from(source: vql_catalog::CatalogError) -> Self {
         let code = match source.code {
             vql_catalog::CatalogErrorCode::AlreadyExists => ErrorCode::AlreadyExists,
+            vql_catalog::CatalogErrorCode::NameConflict => ErrorCode::NameConflict,
             vql_catalog::CatalogErrorCode::NotFound => ErrorCode::NotFound,
             vql_catalog::CatalogErrorCode::InvalidArgument => ErrorCode::InvalidOption,
             vql_catalog::CatalogErrorCode::Conflict | vql_catalog::CatalogErrorCode::Storage => {

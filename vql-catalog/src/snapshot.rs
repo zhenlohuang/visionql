@@ -6,6 +6,11 @@ use crate::{FunctionDef, ModelDef, TableDef};
 
 #[derive(Debug, Clone)]
 pub struct SnapshotTable {
+    /// Stable identity for this Catalog object.
+    pub object_id: String,
+    /// Opaque storage generation used to locate this exact historical definition.
+    pub generation: i64,
+    /// Monotonic revision within this Table's lifetime.
     pub revision: i64,
     pub definition: TableDef,
     pub schema: SchemaRef,
@@ -20,6 +25,11 @@ pub struct DefinitionSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct SnapshotObject<T> {
+    /// Stable identity for this Catalog object.
+    pub object_id: String,
+    /// Opaque storage generation used for compare-and-swap updates.
+    pub generation: i64,
+    /// Monotonic revision within this object's lifetime.
     pub revision: i64,
     pub definition: T,
 }

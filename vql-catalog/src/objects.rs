@@ -450,6 +450,63 @@ pub fn provider_schema(provider: &TableProvider) -> Option<SchemaRef> {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelType {
     ObjectDetection,
+    ImageClassification,
+}
+
+impl ModelType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ObjectDetection => "OBJECT_DETECTION",
+            Self::ImageClassification => "IMAGE_CLASSIFICATION",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelParameter {
+    pub name: String,
+    pub data_type: String,
+    #[serde(default)]
+    pub constant: bool,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInterface {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<ModelType>,
+    pub parameters: Vec<ModelParameter>,
+    #[serde(default)]
+    pub semantic_arguments: Vec<ModelParameter>,
+    pub return_type: String,
+    pub processing_family: String,
+    #[serde(default = "default_true")]
+    pub deterministic: bool,
+}
+
+impl ModelInterface {
+    pub fn arguments(&self) -> impl Iterator<Item = &ModelParameter> {
+        self.parameters.iter().chain(&self.semantic_arguments)
+    }
+
+    pub fn render_arguments(&self) -> String {
+        self.arguments()
+            .map(|parameter| {
+                let constant = if parameter.constant { "CONST " } else { "" };
+                let optional = if parameter.optional { "?" } else { "" };
+                format!(
+                    "{} {constant}{}{optional}",
+                    parameter.name, parameter.data_type
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -469,9 +526,17 @@ pub struct ProcessorSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ModelDef {
+pub struct GenericTensorSpec {
     pub name: String,
-    pub model_type: ModelType,
+    pub data_type: String,
+    pub shape: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processor: Option<ProcessorSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelVersion {
+    pub name: String,
     pub source: String,
     pub runtime_kind: String,
     #[serde(default)]
@@ -479,6 +544,21 @@ pub struct ModelDef {
     pub declaration_fingerprint: String,
     #[serde(default)]
     pub resolved: Option<ResolvedModelSpec>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelDef {
+    pub name: String,
+    pub interface: ModelInterface,
+    pub versions: Vec<ModelVersion>,
+    pub initial_version_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -502,12 +582,18 @@ pub enum ResolvedExecutionSpec {
     Service {
         runtime: RuntimeSpec,
     },
+    Generic {
+        runtime: RuntimeSpec,
+        inputs: Vec<GenericTensorSpec>,
+        outputs: Vec<GenericTensorSpec>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedModelDef {
     pub name: String,
-    pub model_type: ModelType,
+    pub version: String,
+    pub interface: ModelInterface,
     pub source: String,
     pub resolved_source: String,
     pub artifact_hash: Option<String>,
@@ -517,12 +603,28 @@ pub struct ResolvedModelDef {
 }
 
 impl ModelDef {
-    pub fn resolved_definition(&self) -> Option<ResolvedModelDef> {
-        let resolved = self.resolved.as_ref()?;
+    pub fn version(&self, name: &str) -> Option<&ModelVersion> {
+        self.versions.iter().find(|version| version.name == name)
+    }
+
+    pub fn version_mut(&mut self, name: &str) -> Option<&mut ModelVersion> {
+        self.versions
+            .iter_mut()
+            .find(|version| version.name == name)
+    }
+
+    pub fn default(&self) -> Option<&ModelVersion> {
+        self.version(self.default_version.as_deref()?)
+    }
+
+    pub fn resolved_definition(&self, version: &str) -> Option<ResolvedModelDef> {
+        let version = self.version(version)?;
+        let resolved = version.resolved.as_ref()?;
         Some(ResolvedModelDef {
             name: self.name.clone(),
-            model_type: self.model_type,
-            source: self.source.clone(),
+            version: version.name.clone(),
+            interface: self.interface.clone(),
+            source: version.source.clone(),
             resolved_source: resolved.resolved_source.clone(),
             artifact_hash: resolved.artifact_hash.clone(),
             execution: resolved.execution.clone(),
@@ -544,6 +646,8 @@ pub struct FunctionDef {
     pub name: String,
     pub implementation: FunctionImplementation,
     pub parameters: Vec<(String, String)>,
+    #[serde(default)]
+    pub constant_parameters: Vec<String>,
     pub return_type: String,
     pub semantic_fingerprint: String,
 }

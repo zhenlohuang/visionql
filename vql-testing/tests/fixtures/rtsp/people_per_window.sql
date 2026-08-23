@@ -2,9 +2,7 @@ WITH detected AS (
   SELECT
     ts,
     CARDINALITY(
-      IMAGE_DETECTION(
-        'detector',
-        frame,
+      detector(frame,
         classes => ['person'],
         min_confidence => 0.5
       )

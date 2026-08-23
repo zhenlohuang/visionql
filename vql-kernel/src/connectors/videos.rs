@@ -35,7 +35,7 @@ pub(crate) use vql_catalog::videos_schema;
 #[derive(Debug)]
 pub(crate) struct VideosTableProvider {
     root: PathBuf,
-    table_revision: i64,
+    table_generation: i64,
     recursive: bool,
     fps: f64,
     start_time_ms: Option<i64>,
@@ -46,7 +46,7 @@ pub(crate) struct VideosTableProvider {
 impl VideosTableProvider {
     pub(crate) fn try_new(
         root: impl Into<PathBuf>,
-        table_revision: i64,
+        table_generation: i64,
         recursive: bool,
         fps: Option<f64>,
         start_time_ms: Option<i64>,
@@ -71,7 +71,7 @@ impl VideosTableProvider {
         }
         Ok(Self {
             root,
-            table_revision,
+            table_generation,
             recursive,
             fps,
             start_time_ms,
@@ -119,7 +119,7 @@ impl TableProvider for VideosTableProvider {
         });
         Ok(Arc::new(VideosExec::new(
             self.root.clone(),
-            self.table_revision,
+            self.table_generation,
             self.recursive,
             self.fps,
             self.start_time_ms,
@@ -134,7 +134,7 @@ impl TableProvider for VideosTableProvider {
 
 struct VideosExec {
     root: PathBuf,
-    table_revision: i64,
+    table_generation: i64,
     recursive: bool,
     fps: f64,
     start_time_ms: Option<i64>,
@@ -150,7 +150,7 @@ impl VideosExec {
     #[allow(clippy::too_many_arguments)]
     fn new(
         root: PathBuf,
-        table_revision: i64,
+        table_generation: i64,
         recursive: bool,
         fps: f64,
         start_time_ms: Option<i64>,
@@ -169,7 +169,7 @@ impl VideosExec {
         ));
         Self {
             root,
-            table_revision,
+            table_generation,
             recursive,
             fps,
             start_time_ms,
@@ -264,7 +264,7 @@ impl ExecutionPlan for VideosExec {
             )));
         }
         let root = self.root.clone();
-        let table_revision = self.table_revision;
+        let table_generation = self.table_generation;
         let recursive = self.recursive;
         let fps = self.fps;
         let start_time_ms = self.start_time_ms;
@@ -322,7 +322,7 @@ impl ExecutionPlan for VideosExec {
             }
             if rows.is_empty() {
                 yield build_batch(
-                    table_revision,
+                    table_generation,
                     start_time_ms,
                     &source_schema,
                     &output_schema,
@@ -332,7 +332,7 @@ impl ExecutionPlan for VideosExec {
             }
             for chunk in rows.chunks(BATCH_SIZE) {
                 yield build_batch(
-                    table_revision,
+                    table_generation,
                     start_time_ms,
                     &source_schema,
                     &output_schema,
@@ -357,7 +357,7 @@ struct VideoRow {
 }
 
 fn build_batch(
-    table_revision: i64,
+    table_generation: i64,
     start_time_ms: Option<i64>,
     source_schema: &SchemaRef,
     output_schema: &SchemaRef,
@@ -368,7 +368,7 @@ fn build_batch(
     for row in rows {
         images.append(ImageRef::referenced(
             row.path.to_string_lossy(),
-            make_locator(table_revision, &row.relative, Some(row.frame.pts_ms)),
+            make_locator(table_generation, &row.relative, Some(row.frame.pts_ms)),
             row.metadata.as_ref().map(|metadata| metadata.width),
             row.metadata.as_ref().map(|metadata| metadata.height),
         ));

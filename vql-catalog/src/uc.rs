@@ -344,20 +344,28 @@ impl UnityCatalogService {
             }
             None => schema_from_columns(&request.columns)?,
         };
-        let revision = self.store.create_table_in(
+        self.store.create_table_in(
             &request.catalog_name,
             &request.schema_name,
             &definition,
             &schema,
         )?;
+        let snapshot = self
+            .store
+            .snapshot_in(&request.catalog_name, &request.schema_name)?;
+        let table = snapshot.table(&definition.name).ok_or_else(|| {
+            CatalogError::new(
+                CatalogErrorCode::Internal,
+                format!(
+                    "created table '{}' is missing from the catalog",
+                    definition.name
+                ),
+            )
+        })?;
         Ok(table_response(
             &request.catalog_name,
             &request.schema_name,
-            &SnapshotTable {
-                revision,
-                definition,
-                schema,
-            },
+            table,
         ))
     }
 
@@ -572,7 +580,7 @@ fn table_response(
         comment: table.definition.metadata.comment.clone(),
         properties,
         owner: table.definition.metadata.owner.clone(),
-        table_id: format!("vql-table-{}", table.revision),
+        table_id: table.object_id.clone(),
     }
 }
 
@@ -1208,6 +1216,7 @@ pub mod http {
         fn into_response(self) -> Response {
             let (default_status, error_code) = match self.error.code {
                 CatalogErrorCode::AlreadyExists => (StatusCode::CONFLICT, "ALREADY_EXISTS"),
+                CatalogErrorCode::NameConflict => (StatusCode::CONFLICT, "NAME_CONFLICT"),
                 CatalogErrorCode::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
                 CatalogErrorCode::InvalidArgument => (StatusCode::BAD_REQUEST, "INVALID_ARGUMENT"),
                 CatalogErrorCode::Conflict => {

@@ -15,12 +15,12 @@ use super::ort_backend::OrtRuntimeFactory;
 use super::pipeline::{
     BatchingOwner, CompiledPipeline, PostProcessor, PreProcessor, RuntimeSession, TensorContract,
 };
-use super::postprocess::YoloPostProcessorFactory;
+use super::postprocess::{ClassificationPostProcessorFactory, YoloPostProcessorFactory};
 use super::preprocess::ImageTensorFactory;
 use super::triton_backend::TritonRuntimeFactory;
 use crate::catalog::{
-    ModelDef, ModelType, ProcessorSpec, ResolvedExecutionSpec, ResolvedModelDef, ResolvedModelSpec,
-    RuntimeSpec,
+    ModelInterface, ModelType, ModelVersion, ProcessorSpec, ResolvedExecutionSpec,
+    ResolvedModelDef, ResolvedModelSpec, RuntimeSpec,
 };
 use crate::{ErrorCode, Result, VqlError};
 
@@ -49,10 +49,15 @@ pub(super) struct RuntimeResolution {
 pub(super) trait RuntimeFactory: Send + Sync + Debug {
     fn kind(&self) -> &str;
     fn supported_types(&self) -> &[ModelType];
-    fn validate_declaration(&self, model: &ModelDef) -> Result<()>;
+    fn validate_declaration(
+        &self,
+        interface: &ModelInterface,
+        version: &ModelVersion,
+    ) -> Result<()>;
     async fn resolve(
         &self,
-        model: &ModelDef,
+        interface: &ModelInterface,
+        version: &ModelVersion,
         cache_dir: &Path,
         cancel: CancellationToken,
     ) -> Result<RuntimeResolution>;
@@ -107,6 +112,7 @@ impl PipelineRegistry {
             post_processors: HashMap::new(),
         };
         registry.register_pre_processor(Arc::new(ImageTensorFactory));
+        registry.register_post_processor(Arc::new(ClassificationPostProcessorFactory));
         registry.register_post_processor(Arc::new(YoloPostProcessorFactory::end_to_end()));
         registry.register_post_processor(Arc::new(YoloPostProcessorFactory::raw()));
         registry.register_post_processor(Arc::new(YoloPostProcessorFactory::xywh_normalized()));
@@ -136,23 +142,30 @@ impl PipelineRegistry {
         self.runtimes.insert(factory.kind().to_owned(), factory);
     }
 
-    pub(crate) fn validate_declaration(&self, model: &ModelDef) -> Result<()> {
-        let factory = self.runtime(model.model_type, &model.runtime_kind)?;
-        factory.validate_declaration(model)
+    pub(crate) fn validate_declaration(
+        &self,
+        interface: &ModelInterface,
+        version: &ModelVersion,
+    ) -> Result<()> {
+        let factory = self.runtime_for_interface(interface, &version.runtime_kind)?;
+        factory.validate_declaration(interface, version)
     }
 
-    pub(crate) async fn resolve_model(
+    pub(crate) async fn resolve_version(
         &self,
-        model: &ModelDef,
+        interface: &ModelInterface,
+        version: &ModelVersion,
         cache_dir: &Path,
         cancel: CancellationToken,
     ) -> Result<ResolvedModelSpec> {
-        self.validate_declaration(model)?;
-        let factory = self.runtime(model.model_type, &model.runtime_kind)?;
-        let resolution = factory.resolve(model, cache_dir, cancel).await?;
-        self.validate_execution(model.model_type, &model.runtime_kind, &resolution.execution)?;
+        self.validate_declaration(interface, version)?;
+        let factory = self.runtime_for_interface(interface, &version.runtime_kind)?;
+        let resolution = factory
+            .resolve(interface, version, cache_dir, cancel)
+            .await?;
+        self.validate_execution(interface, &version.runtime_kind, &resolution.execution)?;
         let fingerprint = semantic_fingerprint(&ResolvedFingerprint {
-            declaration_fingerprint: &model.declaration_fingerprint,
+            declaration_fingerprint: &version.declaration_fingerprint,
             resolved_source: &resolution.resolved_source,
             artifact_hash: resolution.artifact_hash.as_deref(),
             execution: &resolution.execution,
@@ -177,10 +190,11 @@ impl PipelineRegistry {
                 pre_processor,
                 post_processor,
             } => {
-                self.validate_execution(model.model_type, &runtime.kind, &model.execution)?;
-                let pre_factory = self.pre_processor(model.model_type, pre_processor)?;
-                let post_factory = self.post_processor(model.model_type, post_processor)?;
-                let runtime_factory = self.runtime(model.model_type, &runtime.kind)?;
+                let model_type = execution_model_type(&model.interface);
+                self.validate_execution(&model.interface, &runtime.kind, &model.execution)?;
+                let pre_factory = self.pre_processor(model_type, pre_processor)?;
+                let post_factory = self.post_processor(model_type, post_processor)?;
+                let runtime_factory = self.runtime(model_type, &runtime.kind)?;
                 let pre_processor = pre_factory.build(pre_processor)?;
                 let post_processor = post_factory.build(post_processor)?;
                 let runtime = runtime_factory.build_embedded(
@@ -194,25 +208,31 @@ impl PipelineRegistry {
                 Ok((Arc::new(pipeline), batching_owner))
             }
             ResolvedExecutionSpec::Service { runtime } => {
-                self.validate_execution(model.model_type, &runtime.kind, &model.execution)?;
-                let runtime_factory = self.runtime(model.model_type, &runtime.kind)?;
+                let model_type = execution_model_type(&model.interface);
+                self.validate_execution(&model.interface, &runtime.kind, &model.execution)?;
+                let runtime_factory = self.runtime(model_type, &runtime.kind)?;
                 Ok((
                     runtime_factory.build_service(model, runtime)?,
                     BatchingOwner::Service,
                 ))
             }
+            ResolvedExecutionSpec::Generic { .. } => Err(VqlError::new(
+                ErrorCode::Internal,
+                "generic Model execution does not use the vision capability pipeline",
+            )),
         }
     }
 
     fn validate_execution(
         &self,
-        model_type: ModelType,
+        interface: &ModelInterface,
         declared_runtime: &str,
         execution: &ResolvedExecutionSpec,
     ) -> Result<()> {
         let runtime = match execution {
             ResolvedExecutionSpec::Embedded { runtime, .. }
-            | ResolvedExecutionSpec::Service { runtime } => runtime,
+            | ResolvedExecutionSpec::Service { runtime }
+            | ResolvedExecutionSpec::Generic { runtime, .. } => runtime,
         };
         if runtime.kind != declared_runtime {
             return Err(VqlError::new(
@@ -220,13 +240,14 @@ impl PipelineRegistry {
                 "resolved Runtime does not match the Model declaration",
             ));
         }
-        self.runtime(model_type, &runtime.kind)?;
+        self.runtime_for_interface(interface, &runtime.kind)?;
         if let ResolvedExecutionSpec::Embedded {
             pre_processor,
             post_processor,
             ..
         } = execution
         {
+            let model_type = execution_model_type(interface);
             self.pre_processor(model_type, pre_processor)?
                 .validate(pre_processor)?;
             self.post_processor(model_type, post_processor)?
@@ -298,6 +319,30 @@ impl PipelineRegistry {
         )?;
         Ok(factory.as_ref())
     }
+
+    fn runtime_for_interface(
+        &self,
+        interface: &ModelInterface,
+        kind: &str,
+    ) -> Result<&dyn RuntimeFactory> {
+        if let Some(model_type) = interface.capability {
+            return self.runtime(model_type, kind);
+        }
+        if kind != "onnx-runtime" {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                format!(
+                    "USING: generic Model signatures require the embedded ONNX_RUNTIME, found '{kind}'"
+                ),
+            ));
+        }
+        self.runtimes.get(kind).map(AsRef::as_ref).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::InvalidOption,
+                format!("OPTIONS: unsupported Runtime '{kind}'"),
+            )
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -330,9 +375,11 @@ fn ensure_supported(
 }
 
 const fn model_type_name(model_type: ModelType) -> &'static str {
-    match model_type {
-        ModelType::ObjectDetection => "OBJECT_DETECTION",
-    }
+    model_type.as_str()
+}
+
+fn execution_model_type(interface: &ModelInterface) -> ModelType {
+    interface.capability.unwrap_or(ModelType::ObjectDetection)
 }
 
 #[derive(Debug)]
@@ -367,13 +414,18 @@ impl RuntimeFactory for UnavailableRuntimeFactory {
         &[ModelType::ObjectDetection]
     }
 
-    fn validate_declaration(&self, _model: &ModelDef) -> Result<()> {
+    fn validate_declaration(
+        &self,
+        _interface: &ModelInterface,
+        _version: &ModelVersion,
+    ) -> Result<()> {
         self.unavailable()
     }
 
     async fn resolve(
         &self,
-        _model: &ModelDef,
+        _interface: &ModelInterface,
+        _version: &ModelVersion,
         _cache_dir: &Path,
         _cancel: CancellationToken,
     ) -> Result<RuntimeResolution> {
@@ -392,7 +444,11 @@ pub(super) fn deserialize_model_options<T: DeserializeOwned>(
     runtime: &str,
     options: &BTreeMap<String, Value>,
 ) -> Result<T> {
-    deserialize_options("WITH", options, format!("unknown {runtime} Runtime option"))
+    deserialize_options(
+        "OPTIONS",
+        options,
+        format!("unknown {runtime} Model option"),
+    )
 }
 
 fn deserialize_options<T: DeserializeOwned>(
@@ -434,27 +490,34 @@ fn invalid_option_error(name: impl AsRef<str>, message: impl Into<String>) -> Vq
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::semantic_fingerprint;
 
-    fn declaration(runtime_kind: &str) -> ModelDef {
-        let mut model = ModelDef {
-            name: "detector".to_owned(),
-            model_type: ModelType::ObjectDetection,
+    fn declaration(runtime_kind: &str) -> (ModelInterface, ModelVersion) {
+        let interface = ModelInterface {
+            capability: Some(ModelType::ObjectDetection),
+            parameters: Vec::new(),
+            semantic_arguments: Vec::new(),
+            return_type: "detections".to_owned(),
+            processing_family: "vision.object_detection".to_owned(),
+            deterministic: true,
+        };
+        let version = ModelVersion {
+            name: "v1".to_owned(),
             source: "mock://person".to_owned(),
             runtime_kind: runtime_kind.to_owned(),
             options: BTreeMap::new(),
-            declaration_fingerprint: String::new(),
+            declaration_fingerprint: "declaration".to_owned(),
             resolved: None,
+            created_at: 0,
         };
-        model.declaration_fingerprint = semantic_fingerprint(&model);
-        model
+        (interface, version)
     }
 
     #[test]
     fn registry_rejects_unknown_runtime_with_stable_error() {
         let registry = PipelineRegistry::builtins();
+        let (interface, version) = declaration("unknown");
         let error = registry
-            .validate_declaration(&declaration("unknown"))
+            .validate_declaration(&interface, &version)
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidOption);
         assert!(error.message.contains("USING"));
@@ -464,8 +527,9 @@ mod tests {
     #[test]
     fn known_future_runtime_is_version_gated_by_a_stub_factory() {
         let registry = PipelineRegistry::builtins();
+        let (interface, version) = declaration("transformers");
         let error = registry
-            .validate_declaration(&declaration("transformers"))
+            .validate_declaration(&interface, &version)
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
         assert_eq!(error.target_version.as_deref(), Some("v0.3"));

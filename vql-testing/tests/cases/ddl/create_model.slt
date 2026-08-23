@@ -3,4 +3,4 @@ control substitution on
 query T
 CREATE MODEL detector TYPE OBJECT_DETECTION FROM '${MODEL}' USING ONNX_RUNTIME;
 ----
-created model 'detector' at revision 1
+created model 'detector'

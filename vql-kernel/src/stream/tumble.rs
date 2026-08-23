@@ -212,8 +212,13 @@ impl TumbleSpec {
             for (argument, field) in aggregate_function.params.args.iter().zip(coerced_fields) {
                 let data_type = field.data_type();
                 if !is_persistable_scalar(data_type) {
+                    let logical_type = if matches!(data_type, DataType::FixedSizeList(_, _)) {
+                        "TENSOR".to_owned()
+                    } else {
+                        data_type.to_string()
+                    };
                     return Err(invalid(format!(
-                        "streaming {} input has unsupported type {data_type}; IMAGE, VIDEO, binary, and complex values cannot enter window state",
+                        "streaming {} input has unsupported type {logical_type}; IMAGE, VIDEO, TENSOR, binary, and complex values cannot enter window state; project scalar features before TUMBLE",
                         aggregate_function.func.name().to_ascii_uppercase()
                     )));
                 }

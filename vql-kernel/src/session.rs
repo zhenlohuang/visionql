@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{ArrayRef, Int64Array, StringArray};
+use arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
@@ -12,22 +12,24 @@ use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::{
-    FunctionImplementation, ModelDef, ObjectKind, RtspTableConfig, TableDef, TableProvider,
+    FunctionImplementation, ModelDef, ModelInterface, ModelParameter, ModelType, ModelVersion,
+    ObjectKind, RtspTableConfig, TableDef, TableProvider,
 };
 use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::rtsp::{rtsp_schema, start_rtsp_source};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
 use crate::functions::{VqlFunctionFactory, materialize_batch_images};
 use crate::media::MediaRuntime;
-use crate::models::semantic_fingerprint;
+use crate::models::{canonical_model_options, semantic_fingerprint};
 use crate::planner::{
     SinkTarget, bind_stream_epoch, bind_tumble_output, context_for_function_ddl,
-    context_for_snapshot, normalize_function_ddl, plan_statement, wrap_sink,
+    context_for_snapshot, infer_constant_parameters, normalize_function_ddl, plan_statement,
+    wrap_sink,
 };
 use crate::resources::{QueryBudget, QueryReservation, SessionMemoryPool};
 use crate::sql::{
-    CreateModel, CreateTable, ShowKind, TableColumn, VqlStatement, parse_statement, render_create,
-    render_create_table,
+    AlterModel, CreateModel, CreateTable, ModelInterfaceSpec, ShowKind, TableColumn, VqlStatement,
+    parse_statement, render_create, render_create_table,
 };
 use crate::types::{image_field, is_image_storage};
 use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
@@ -691,14 +693,22 @@ impl Session {
         match parse_statement(sql)? {
             VqlStatement::CreateTable(create) => self.create_table(create).map(Statement::Ddl),
             VqlStatement::CreateModel(create) => self.create_model(create).map(Statement::Ddl),
-            VqlStatement::ResolveModel { name } => self.resolve_model(&name).map(Statement::Ddl),
+            VqlStatement::ResolveModel { name, version } => self
+                .resolve_model(&name, version.as_deref())
+                .map(Statement::Ddl),
+            VqlStatement::AlterModel { name, action } => {
+                self.alter_model(&name, action).map(Statement::Ddl)
+            }
             VqlStatement::CreateFunction { sql } => self.create_function(&sql).map(Statement::Ddl),
             VqlStatement::Drop { kind, name } => self.drop_object(kind, &name).map(Statement::Ddl),
             VqlStatement::Show(kind) => self.show_objects(kind).map(Statement::Ddl),
+            VqlStatement::ShowModelVersions { name } => {
+                self.show_model_versions(&name).map(Statement::Ddl)
+            }
             VqlStatement::ShowCreate { kind, name } => {
                 self.show_create(kind, &name).map(Statement::Ddl)
             }
-            VqlStatement::Describe { name } => self.describe(&name).map(Statement::Ddl),
+            VqlStatement::Describe { kind, name } => self.describe(kind, &name).map(Statement::Ddl),
             VqlStatement::Query { sql }
                 if sql.trim_start().to_ascii_uppercase().starts_with("INSERT") =>
             {
@@ -766,6 +776,7 @@ impl Session {
             &context,
             &snapshot,
             sql,
+            Arc::clone(&self.engine.inner.builtins),
             Arc::clone(&self.engine.inner.models),
             Arc::clone(&self.fail_on_error),
             cancellation.clone(),
@@ -938,50 +949,229 @@ impl Session {
             }
         };
         let definition = TableDef::new(name.clone(), provider);
-        let revision = self
-            .engine
+        self.engine
             .inner
             .catalog
             .create_table(&definition, &schema)?;
-        Ok(message_result(format!(
-            "created table '{}' at revision {revision}",
-            name
-        )))
+        Ok(message_result(format!("created table '{name}'")))
     }
 
     fn drop_table(&self, name: &str) -> Result<DdlResult> {
-        let revision = self.engine.inner.catalog.drop_table(name)?;
-        Ok(message_result(format!(
-            "dropped table '{name}' at revision {revision}"
-        )))
+        self.engine.inner.catalog.drop_table(name)?;
+        Ok(message_result(format!("dropped table '{name}'")))
     }
 
     fn create_model(&self, create: CreateModel) -> Result<DdlResult> {
-        let name = create.name.to_ascii_lowercase();
+        let name = validate_user_model_name(&create.name)?;
+        let version_name = validate_version_name(&create.version)?;
+        let interface = model_interface(create.interface)?;
+        let (source, runtime_kind, options) =
+            normalize_model_declaration(create.source, create.runtime_kind, create.options)?;
         let declaration_fingerprint = semantic_fingerprint(&(
-            create.model_type,
-            &create.source,
-            &create.runtime_kind,
-            &create.options,
+            &interface,
+            &version_name,
+            &source,
+            &runtime_kind,
+            canonical_model_options(&options),
         ));
-        let model = ModelDef {
-            name,
-            model_type: create.model_type,
-            source: create.source,
-            runtime_kind: create.runtime_kind,
-            options: create.options,
+        let version = ModelVersion {
+            name: version_name.clone(),
+            source,
+            runtime_kind,
+            options,
             declaration_fingerprint,
             resolved: None,
+            created_at: chrono::Utc::now().timestamp_millis(),
         };
-        self.engine.inner.pipelines.validate_declaration(&model)?;
-        let revision = self.engine.inner.catalog.create_model(&model)?;
+        let initial_version_fingerprint = version.declaration_fingerprint.clone();
+        self.engine
+            .inner
+            .pipelines
+            .validate_declaration(&interface, &version)?;
+        let model = ModelDef {
+            name,
+            interface,
+            versions: vec![version],
+            initial_version_fingerprint,
+            default_version: None,
+            comment: create.comment,
+            builtin: false,
+        };
+        match self.engine.inner.catalog.create_model(&model) {
+            Ok(_) => {}
+            Err(error)
+                if create.if_not_exists
+                    && matches!(error.code, vql_catalog::CatalogErrorCode::AlreadyExists) =>
+            {
+                return Ok(message_result(format!(
+                    "model '{}' already exists",
+                    model.name
+                )));
+            }
+            Err(error) if matches!(error.code, vql_catalog::CatalogErrorCode::AlreadyExists) => {
+                return Err(VqlError::new(
+                    ErrorCode::AlreadyExists,
+                    format!(
+                        "model '{}' already exists; use ALTER MODEL {} ADD VERSION or DROP MODEL",
+                        model.name, model.name
+                    ),
+                )
+                .with_source(error));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(message_result(format!("created model '{}'", model.name)))
+    }
+
+    fn resolve_model(&self, name: &str, requested_version: Option<&str>) -> Result<DdlResult> {
+        self.resolve_model_internal(name, requested_version, true)
+    }
+
+    fn resolve_model_internal(
+        &self,
+        name: &str,
+        requested_version: Option<&str>,
+        cancellable: bool,
+    ) -> Result<DdlResult> {
+        let name = name.to_ascii_lowercase();
+        let initial_snapshot = self.engine.inner.catalog.snapshot()?;
+        let initial_model = initial_snapshot.model(&name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("model '{name}' does not exist"),
+            )
+        })?;
+        let version_name = match requested_version {
+            Some(version) => validate_version_name(version)?,
+            None if initial_model.definition.versions.len() == 1 => {
+                initial_model.definition.versions[0].name.clone()
+            }
+            None => {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    format!(
+                        "model '{name}' has multiple versions ({}); use RESOLVE MODEL {name} VERSION '<version>'",
+                        initial_model
+                            .definition
+                            .versions
+                            .iter()
+                            .map(|version| version.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        };
+        let initial_version = initial_model
+            .definition
+            .version(&version_name)
+            .ok_or_else(|| {
+                VqlError::new(
+                    ErrorCode::NotFound,
+                    format!("model '{name}' has no version '{version_name}'"),
+                )
+            })?
+            .clone();
+        if initial_version.resolved.is_some() {
+            return Ok(message_result(format!(
+                "model '{}:{}' is already resolved",
+                initial_model.definition.name, version_name
+            )));
+        }
+        let interface = initial_model.definition.interface.clone();
+        let cancellation = CancellationToken::new();
+        let _active_guard = if cancellable {
+            let mut active = self.active_query.lock().map_err(|_| {
+                VqlError::new(ErrorCode::Internal, "active query lock was poisoned")
+            })?;
+            *active = Some(ActiveQueryControl {
+                cancellation: cancellation.clone(),
+                graceful_stop: None,
+            });
+            Some(ActiveQueryGuard(Arc::clone(&self.active_query)))
+        } else {
+            None
+        };
+        let resolved =
+            self.engine
+                .inner
+                .runtime
+                .block_on(self.engine.inner.models.resolve_version(
+                    &interface,
+                    &initial_version,
+                    self.engine.inner.config.model_cache_dir(),
+                    cancellation,
+                ))?;
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let model_object = snapshot.model(&name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("model '{name}' does not exist"),
+            )
+        })?;
+        let expected_generation = model_object.generation;
+        let mut model = model_object.definition.clone();
+        let version = model.version(&version_name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("model '{name}' has no version '{version_name}'"),
+            )
+        })?;
+        ensure_resolution_declaration_unchanged(
+            &name,
+            &version_name,
+            &initial_version.declaration_fingerprint,
+            &version.declaration_fingerprint,
+        )?;
+        if version.resolved.is_some() {
+            return Ok(message_result(format!(
+                "model '{}:{}' is already resolved",
+                model.name, version_name
+            )));
+        }
+        model
+            .version_mut(&version_name)
+            .expect("selected model version remains present")
+            .resolved = Some(resolved);
+        if model.default_version.is_none()
+            && model.initial_version_fingerprint == initial_version.declaration_fingerprint
+        {
+            model.default_version = Some(version_name.clone());
+        }
+        match self
+            .engine
+            .inner
+            .catalog
+            .update_model(&name, &model, expected_generation)
+        {
+            Ok(_) => {}
+            Err(error) if error.code == vql_catalog::CatalogErrorCode::Conflict => {
+                let peer = self.engine.inner.catalog.snapshot()?;
+                let peer_resolved = peer
+                    .model(&name)
+                    .and_then(|object| object.definition.version(&version_name))
+                    .and_then(|version| version.resolved.as_ref());
+                let ours = model
+                    .version(&version_name)
+                    .and_then(|version| version.resolved.as_ref());
+                if peer_resolved.map(|resolved| &resolved.semantic_fingerprint)
+                    == ours.map(|resolved| &resolved.semantic_fingerprint)
+                {
+                    // Another resolver committed the same immutable result.
+                } else {
+                    return Err(error.into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.engine.inner.models.evict_stale()?;
         Ok(message_result(format!(
-            "created model '{}' at revision {revision}",
-            model.name
+            "resolved model '{}:{}'",
+            model.name, version_name
         )))
     }
 
-    fn resolve_model(&self, name: &str) -> Result<DdlResult> {
+    fn alter_model(&self, name: &str, action: AlterModel) -> Result<DdlResult> {
         let name = name.to_ascii_lowercase();
         let snapshot = self.engine.inner.catalog.snapshot()?;
         let model_object = snapshot.model(&name).ok_or_else(|| {
@@ -990,39 +1180,132 @@ impl Session {
                 format!("model '{name}' does not exist"),
             )
         })?;
-        let expected_revision = model_object.revision;
-        let mut model = model_object.definition.clone();
-        let cancellation = CancellationToken::new();
-        {
-            let mut active = self.active_query.lock().map_err(|_| {
-                VqlError::new(ErrorCode::Internal, "active query lock was poisoned")
-            })?;
-            *active = Some(ActiveQueryControl {
-                cancellation: cancellation.clone(),
-                graceful_stop: None,
-            });
+        if model_object.definition.builtin {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                "built-in Model definitions are release-managed",
+            ));
         }
-        let _active_guard = ActiveQueryGuard(Arc::clone(&self.active_query));
-        let resolved =
-            self.engine
-                .inner
-                .runtime
-                .block_on(self.engine.inner.pipelines.resolve_model(
-                    &model,
-                    self.engine.inner.config.model_cache_dir(),
-                    cancellation,
-                ))?;
-        model.resolved = Some(resolved);
-        let revision = self
-            .engine
+        let expected_generation = model_object.generation;
+        let mut model = model_object.definition.clone();
+        let message = match action {
+            AlterModel::AddVersion {
+                if_not_exists,
+                version,
+                source,
+                runtime_kind,
+                options,
+            } => {
+                let version_name = validate_version_name(&version)?;
+                if model.version(&version_name).is_some() {
+                    if if_not_exists {
+                        return Ok(message_result(format!(
+                            "model '{}:{}' already exists",
+                            model.name, version_name
+                        )));
+                    }
+                    return Err(VqlError::new(
+                        ErrorCode::AlreadyExists,
+                        format!("model '{}:{}' already exists", model.name, version_name),
+                    ));
+                }
+                let (source, runtime_kind, options) =
+                    normalize_model_declaration(source, runtime_kind, options)?;
+                let declaration_fingerprint = semantic_fingerprint(&(
+                    &model.interface,
+                    &version_name,
+                    &source,
+                    &runtime_kind,
+                    canonical_model_options(&options),
+                ));
+                let version = ModelVersion {
+                    name: version_name.clone(),
+                    source,
+                    runtime_kind,
+                    options,
+                    declaration_fingerprint,
+                    resolved: None,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                };
+                self.engine
+                    .inner
+                    .pipelines
+                    .validate_declaration(&model.interface, &version)?;
+                model.versions.push(version);
+                format!("added model version '{}:{}'", model.name, version_name)
+            }
+            AlterModel::DropVersion { version } => {
+                let version_name = validate_version_name(&version)?;
+                let position = model
+                    .versions
+                    .iter()
+                    .position(|candidate| candidate.name == version_name)
+                    .ok_or_else(|| {
+                        VqlError::new(
+                            ErrorCode::NotFound,
+                            format!("model '{}' has no version '{version_name}'", model.name),
+                        )
+                    })?;
+                if model.default_version.as_deref() == Some(version_name.as_str()) {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        format!(
+                            "cannot drop default model version '{}:{}'; move default first",
+                            model.name, version_name
+                        ),
+                    ));
+                }
+                if model.versions.len() == 1 {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        format!(
+                            "cannot drop the last version of model '{}'; use DROP MODEL {}",
+                            model.name, model.name
+                        ),
+                    ));
+                }
+                model.versions.remove(position);
+                format!("dropped model version '{}:{}'", model.name, version_name)
+            }
+            AlterModel::SetDefaultVersion { version } => {
+                let version_name = validate_version_name(&version)?;
+                let version = model.version(&version_name).ok_or_else(|| {
+                    VqlError::new(
+                        ErrorCode::NotFound,
+                        format!("model '{}' has no version '{version_name}'", model.name),
+                    )
+                })?;
+                if version.resolved.is_none() {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        format!(
+                            "model version '{}:{}' is unresolved; run RESOLVE MODEL {} VERSION '{}'",
+                            model.name, version_name, model.name, version_name
+                        ),
+                    ));
+                }
+                model.default_version = Some(version_name.clone());
+                format!(
+                    "set model '{}' default version to '{version_name}'",
+                    model.name
+                )
+            }
+            AlterModel::SetComment { comment } => {
+                model.comment = Some(comment);
+                format!("updated model '{}' comment", model.name)
+            }
+            AlterModel::RenameTo { name: new_name } => {
+                let new_name = validate_user_model_name(&new_name)?;
+                model.name = new_name.clone();
+                format!("renamed model '{name}' to '{new_name}'")
+            }
+        };
+        self.engine
             .inner
             .catalog
-            .update_model(&model, expected_revision)?;
+            .update_model(&name, &model, expected_generation)?;
         self.engine.inner.models.evict_stale()?;
-        Ok(message_result(format!(
-            "resolved model '{}' at revision {revision}",
-            model.name
-        )))
+        Ok(message_result(message))
     }
 
     fn create_function(&self, sql: &str) -> Result<DdlResult> {
@@ -1042,10 +1325,15 @@ impl Session {
             .runtime
             .block_on(context.sql(&sql))
             .map_err(function_ddl_error)?;
-        let function = factory.take_definition()?;
-        let revision = self.engine.inner.catalog.create_function(&function)?;
+        let mut function = factory.take_definition()?;
+        if let FunctionImplementation::SqlMacro { expression } = &function.implementation {
+            function.constant_parameters =
+                infer_constant_parameters(expression, &function.parameters, &snapshot)?;
+            function.semantic_fingerprint = semantic_fingerprint(&function);
+        }
+        self.engine.inner.catalog.create_function(&function)?;
         Ok(message_result(format!(
-            "created function '{}' at revision {revision}",
+            "created function '{}'",
             function.name
         )))
     }
@@ -1132,22 +1420,30 @@ impl Session {
     }
 
     fn drop_object(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
-        let revision = match kind {
+        match kind {
             ShowKind::Tables => return self.drop_table(name),
             ShowKind::Models => {
-                let revision = self.engine.inner.catalog.drop_model(name)?;
+                let snapshot = self.engine.inner.catalog.snapshot()?;
+                if snapshot
+                    .model(name)
+                    .is_some_and(|model| model.definition.builtin)
+                {
+                    return Err(VqlError::new(
+                        ErrorCode::InvalidOption,
+                        "built-in Model definitions are release-managed",
+                    ));
+                }
+                self.engine.inner.catalog.drop_model(name)?;
                 self.engine.inner.models.evict_stale()?;
-                revision
             }
-            ShowKind::Functions => self
-                .engine
-                .inner
-                .catalog
-                .drop_object(ObjectKind::Function, name)?,
-        };
-        Ok(message_result(format!(
-            "dropped object '{name}' at revision {revision}"
-        )))
+            ShowKind::Functions => {
+                self.engine
+                    .inner
+                    .catalog
+                    .drop_object(ObjectKind::Function, name)?;
+            }
+        }
+        Ok(message_result(format!("dropped object '{name}'")))
     }
 
     fn show_objects(&self, kind: ShowKind) -> Result<DdlResult> {
@@ -1157,21 +1453,7 @@ impl Session {
         if kind == ShowKind::Models {
             return self.show_models();
         }
-        let snapshot = self.engine.inner.catalog.snapshot()?;
-        let rows = match kind {
-            ShowKind::Functions => snapshot
-                .functions()
-                .map(|(name, value)| {
-                    let implementation = match &value.definition.implementation {
-                        FunctionImplementation::Python { .. } => "PYTHON",
-                        FunctionImplementation::SqlMacro { .. } => "SQL_MACRO",
-                    };
-                    (name.to_owned(), implementation.to_owned(), value.revision)
-                })
-                .collect(),
-            ShowKind::Tables | ShowKind::Models => unreachable!(),
-        };
-        named_objects_result(rows)
+        self.show_functions()
     }
 
     fn show_create(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
@@ -1210,26 +1492,30 @@ impl Session {
     }
 
     fn set(&self, sql: &str) -> Result<DdlResult> {
-        let normalized = sql
-            .trim()
-            .trim_end_matches(';')
-            .replace(' ', "")
-            .to_ascii_lowercase();
-        let fail = match normalized.as_str() {
-            "setvql.on_error='fail'" | "setvql.on_error=fail" => true,
-            "setvql.on_error='null'" | "setvql.on_error=null" => false,
-            _ => {
-                return Err(VqlError::new(
-                    ErrorCode::InvalidOption,
-                    "SET vql.on_error accepts 'null' or 'fail'",
-                ));
+        let (name, value) = parse_session_setting(sql)?;
+        match name.as_str() {
+            "vql.on_error" => {
+                let fail = match value.as_str() {
+                    "fail" => true,
+                    "null" => false,
+                    _ => {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidOption,
+                            "SET vql.on_error accepts 'null' or 'fail'",
+                        ));
+                    }
+                };
+                self.fail_on_error.store(fail, Ordering::Relaxed);
+                Ok(message_result(format!(
+                    "vql.on_error = '{}'",
+                    if fail { "fail" } else { "null" }
+                )))
             }
-        };
-        self.fail_on_error.store(fail, Ordering::Relaxed);
-        Ok(message_result(format!(
-            "vql.on_error = '{}'",
-            if fail { "fail" } else { "null" }
-        )))
+            _ => Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                format!("unknown session setting '{name}'"),
+            )),
+        }
     }
 
     fn show_tables(&self) -> Result<DdlResult> {
@@ -1237,7 +1523,6 @@ impl Session {
         let mut names = Vec::new();
         let mut providers = Vec::new();
         let mut locations = Vec::new();
-        let mut revisions = Vec::new();
         for (name, table) in snapshot.tables() {
             names.push(name.to_owned());
             providers.push(format!("{:?}", table.definition.provider.kind()).to_ascii_uppercase());
@@ -1249,13 +1534,11 @@ impl Session {
                     .unwrap_or_default()
                     .to_owned(),
             );
-            revisions.push(table.revision);
         }
         let schema = Arc::new(Schema::new(vec![
             Field::new("table_name", DataType::Utf8, false),
             Field::new("provider", DataType::Utf8, false),
             Field::new("location", DataType::Utf8, false),
-            Field::new("revision", DataType::Int64, false),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -1263,7 +1546,6 @@ impl Session {
                 Arc::new(StringArray::from(names)) as ArrayRef,
                 Arc::new(StringArray::from(providers)),
                 Arc::new(StringArray::from(locations)),
-                Arc::new(Int64Array::from(revisions)),
             ],
         )
         .map_err(|error| {
@@ -1279,47 +1561,61 @@ impl Session {
         let snapshot = self.engine.inner.catalog.snapshot()?;
         let models = snapshot.models().collect::<Vec<_>>();
         let schema = Arc::new(Schema::new(vec![
-            Field::new("model_name", DataType::Utf8, false),
-            Field::new("type", DataType::Utf8, false),
-            Field::new("runtime", DataType::Utf8, false),
-            Field::new("status", DataType::Utf8, false),
-            Field::new("revision", DataType::Int64, false),
+            Field::new("catalog", DataType::Utf8, false),
+            Field::new("schema", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("interface", DataType::Utf8, false),
+            Field::new("versions", DataType::Int64, false),
+            Field::new("default_version", DataType::Utf8, true),
+            Field::new("comment", DataType::Utf8, true),
         ]));
+        let addresses = models
+            .iter()
+            .map(|(name, _)| object_address(name))
+            .collect::<Vec<_>>();
         let batch = RecordBatch::try_new(
             schema,
             vec![
                 Arc::new(StringArray::from(
-                    models.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-                )) as ArrayRef,
-                Arc::new(StringArray::from(vec!["OBJECT_DETECTION"; models.len()])),
-                Arc::new(StringArray::from(
-                    models
+                    addresses
                         .iter()
-                        .map(|(_, model)| {
-                            model
-                                .definition
-                                .runtime_kind
-                                .to_ascii_uppercase()
-                                .replace('-', "_")
-                        })
+                        .map(|(catalog, _, _)| catalog.as_str())
+                        .collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(StringArray::from(
+                    addresses
+                        .iter()
+                        .map(|(_, schema, _)| schema.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    addresses
+                        .iter()
+                        .map(|(_, _, name)| name.as_str())
                         .collect::<Vec<_>>(),
                 )),
                 Arc::new(StringArray::from(
                     models
                         .iter()
-                        .map(|(_, model)| {
-                            if model.definition.resolved.is_some() {
-                                "RESOLVED"
-                            } else {
-                                "UNRESOLVED"
-                            }
-                        })
+                        .map(|(_, model)| format_model_interface(&model.definition.interface))
                         .collect::<Vec<_>>(),
                 )),
                 Arc::new(Int64Array::from(
                     models
                         .iter()
-                        .map(|(_, model)| model.revision)
+                        .map(|(_, model)| model.definition.versions.len() as i64)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    models
+                        .iter()
+                        .map(|(_, model)| model.definition.default_version.clone())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    models
+                        .iter()
+                        .map(|(_, model)| model.definition.comment.clone())
                         .collect::<Vec<_>>(),
                 )),
             ],
@@ -1334,7 +1630,177 @@ impl Session {
         })
     }
 
-    fn describe(&self, name: &str) -> Result<DdlResult> {
+    fn show_model_versions(&self, name: &str) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let model = snapshot.model(name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("model '{name}' does not exist"),
+            )
+        })?;
+        let (catalog, schema_name, object_name) = object_address(name);
+        let versions = &model.definition.versions;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("catalog", DataType::Utf8, false),
+            Field::new("schema", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("version", DataType::Utf8, false),
+            Field::new("status", DataType::Utf8, false),
+            Field::new("volatility", DataType::Utf8, false),
+            Field::new("fingerprint", DataType::Utf8, true),
+            Field::new("created_at", DataType::Int64, false),
+            Field::new("is_default", DataType::Boolean, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![catalog.as_str(); versions.len()])) as ArrayRef,
+                Arc::new(StringArray::from(vec![
+                    schema_name.as_str();
+                    versions.len()
+                ])),
+                Arc::new(StringArray::from(vec![
+                    object_name.as_str();
+                    versions.len()
+                ])),
+                Arc::new(StringArray::from(
+                    versions
+                        .iter()
+                        .map(|version| version.name.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    versions
+                        .iter()
+                        .map(|version| {
+                            if version.resolved.is_some() {
+                                "RESOLVED"
+                            } else {
+                                "UNRESOLVED"
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    versions
+                        .iter()
+                        .map(|version| {
+                            if version
+                                .resolved
+                                .as_ref()
+                                .is_some_and(|value| value.volatile)
+                            {
+                                "VOLATILE"
+                            } else {
+                                "IMMUTABLE"
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    versions
+                        .iter()
+                        .map(|version| {
+                            version
+                                .resolved
+                                .as_ref()
+                                .map(|resolved| resolved.semantic_fingerprint.clone())
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    versions
+                        .iter()
+                        .map(|version| version.created_at)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(BooleanArray::from(
+                    versions
+                        .iter()
+                        .map(|version| {
+                            model.definition.default_version.as_deref()
+                                == Some(version.name.as_str())
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            ],
+        )?;
+        Ok(DdlResult {
+            message: format!("{} version(s)", versions.len()),
+            batches: vec![batch],
+        })
+    }
+
+    fn show_functions(&self) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let mut rows = snapshot
+            .functions()
+            .map(|(name, function)| {
+                let (catalog, schema, name) = object_address(name);
+                (
+                    catalog,
+                    schema,
+                    name,
+                    "FUNCTION".to_owned(),
+                    format_function_arguments(&function.definition),
+                    function.definition.return_type.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.extend(snapshot.models().map(|(name, model)| {
+            let (catalog, schema, name) = object_address(name);
+            (
+                catalog,
+                schema,
+                name,
+                "MODEL".to_owned(),
+                model.definition.interface.render_arguments(),
+                model.definition.interface.return_type.clone(),
+            )
+        }));
+        rows.sort_by(|left, right| {
+            (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2))
+        });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("catalog", DataType::Utf8, false),
+            Field::new("schema", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("kind", DataType::Utf8, false),
+            Field::new("arguments", DataType::Utf8, false),
+            Field::new("return_type", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            (0..6)
+                .map(|column| {
+                    Arc::new(StringArray::from(
+                        rows.iter()
+                            .map(|row| match column {
+                                0 => row.0.as_str(),
+                                1 => row.1.as_str(),
+                                2 => row.2.as_str(),
+                                3 => row.3.as_str(),
+                                4 => row.4.as_str(),
+                                _ => row.5.as_str(),
+                            })
+                            .collect::<Vec<_>>(),
+                    )) as ArrayRef
+                })
+                .collect(),
+        )?;
+        Ok(DdlResult {
+            message: format!("{} callable(s)", rows.len()),
+            batches: vec![batch],
+        })
+    }
+
+    fn describe(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
+        if kind == ShowKind::Models {
+            return self.describe_model(name);
+        }
+        if kind == ShowKind::Functions {
+            return self.describe_function(name);
+        }
         let snapshot = self.engine.inner.catalog.snapshot()?;
         let relation_schema = snapshot
             .table(name)
@@ -1382,6 +1848,422 @@ impl Session {
             batches: vec![batch],
         })
     }
+
+    fn describe_model(&self, name: &str) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let model = snapshot.model(name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("model '{name}' does not exist"),
+            )
+        })?;
+        let status = match model.definition.default() {
+            Some(version) if version.resolved.is_some() => "RESOLVED",
+            Some(_) => "UNRESOLVED",
+            None => "UNPUBLISHED",
+        };
+        callable_description_result(
+            &model.definition.name,
+            "MODEL",
+            &model.definition.interface.render_arguments(),
+            &model.definition.interface.return_type,
+            status,
+            model.definition.default_version.as_deref(),
+        )
+    }
+
+    fn describe_function(&self, name: &str) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        let function = snapshot.function(name).ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::NotFound,
+                format!("function '{name}' does not exist"),
+            )
+        })?;
+        let status = match &function.definition.implementation {
+            FunctionImplementation::SqlMacro { expression } => snapshot
+                .models()
+                .find(|(model_name, _)| {
+                    expression
+                        .to_ascii_lowercase()
+                        .contains(&format!("{}(", model_name.to_ascii_lowercase()))
+                })
+                .map_or("AVAILABLE".to_owned(), |(model_name, model)| {
+                    if model
+                        .definition
+                        .default()
+                        .is_some_and(|version| version.resolved.is_some())
+                    {
+                        format!("MODEL {model_name} RESOLVED")
+                    } else {
+                        format!("MODEL {model_name} UNRESOLVED")
+                    }
+                }),
+            FunctionImplementation::Python { .. } => "AVAILABLE".to_owned(),
+        };
+        callable_description_result(
+            &function.definition.name,
+            "FUNCTION",
+            &format_function_arguments(&function.definition),
+            &function.definition.return_type,
+            &status,
+            None,
+        )
+    }
+}
+
+fn validate_user_model_name(name: &str) -> Result<String> {
+    let name = name.to_ascii_lowercase();
+    if name.is_empty() {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "model name must not be empty",
+        ));
+    }
+    if name
+        .rsplit('.')
+        .next()
+        .is_some_and(|leaf| leaf.to_ascii_uppercase().starts_with("VQL_"))
+    {
+        return Err(VqlError::new(
+            ErrorCode::NameConflict,
+            "VQL_* callable names are reserved for built-in AI functions",
+        ));
+    }
+    if name == "builtin" || name.starts_with("builtin.") || name.starts_with("vql.builtin.") {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "built-in Model definitions are release-managed",
+        ));
+    }
+    Ok(name)
+}
+
+fn validate_version_name(version: &str) -> Result<String> {
+    let version = version.trim();
+    if version.is_empty() || version.chars().any(char::is_control) {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "model version name must be a non-empty string without control characters",
+        ));
+    }
+    if version.eq_ignore_ascii_case("default") {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "model version name 'default' is reserved",
+        ));
+    }
+    Ok(version.to_owned())
+}
+
+fn model_interface(spec: ModelInterfaceSpec) -> Result<ModelInterface> {
+    match spec {
+        ModelInterfaceSpec::Capability(ModelType::ObjectDetection) => {
+            Ok(crate::models::object_detection_interface())
+        }
+        ModelInterfaceSpec::Capability(ModelType::ImageClassification) => {
+            Ok(crate::models::image_classification_interface())
+        }
+        ModelInterfaceSpec::Signature {
+            parameters,
+            return_type,
+        } => {
+            for (_, data_type) in &parameters {
+                validate_generic_model_type(data_type, false)?;
+            }
+            validate_generic_model_type(&return_type, true)?;
+            Ok(ModelInterface {
+                capability: None,
+                parameters: parameters
+                    .into_iter()
+                    .map(|(name, data_type)| ModelParameter {
+                        name,
+                        data_type,
+                        constant: false,
+                        optional: false,
+                    })
+                    .collect(),
+                semantic_arguments: Vec::new(),
+                return_type,
+                processing_family: "generic.tensor".to_owned(),
+                deterministic: true,
+            })
+        }
+    }
+}
+
+fn validate_generic_model_type(data_type: &str, output: bool) -> Result<()> {
+    let upper = data_type.trim().to_ascii_uppercase();
+    if upper == "MODEL" || upper.contains(" MODEL") {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "MODEL is not a SQL value type; use the model as a call target",
+        ));
+    }
+    if upper == "STRING" || upper == "VARCHAR" || upper == "TEXT" {
+        return Err(VqlError::new(
+            ErrorCode::InvalidOption,
+            "STRING is not supported at an embedded generic Model boundary; use a capability preset with tokenization",
+        ));
+    }
+    let scalar = matches!(
+        upper.as_str(),
+        "TINYINT"
+            | "INT8"
+            | "SMALLINT"
+            | "INT16"
+            | "INT"
+            | "INTEGER"
+            | "INT32"
+            | "BIGINT"
+            | "INT64"
+            | "UINT8"
+            | "FLOAT"
+            | "FLOAT32"
+            | "DOUBLE"
+            | "FLOAT64"
+            | "REAL"
+    );
+    let vector = upper
+        .strip_prefix("VECTOR(")
+        .and_then(|value| value.strip_suffix(')'))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .is_some_and(|dimension| dimension > 0);
+    let tensor = upper
+        .strip_prefix("TENSOR(")
+        .and_then(|value| value.strip_suffix(')'))
+        .is_some_and(valid_tensor_signature);
+    let structure = output && upper.starts_with("STRUCT<") && upper.ends_with('>');
+    if upper == "IMAGE" || scalar || vector || tensor || structure {
+        return Ok(());
+    }
+    Err(VqlError::new(
+        ErrorCode::InvalidOption,
+        format!("unsupported generic Model boundary type '{data_type}'"),
+    ))
+}
+
+fn valid_tensor_signature(value: &str) -> bool {
+    let mut parts = value.split(',').map(str::trim);
+    let dtype = parts.next().unwrap_or_default();
+    if !matches!(
+        dtype,
+        "FLOAT32" | "FLOAT64" | "INT8" | "INT16" | "INT32" | "INT64" | "UINT8"
+    ) {
+        return false;
+    }
+    let dimensions = parts.collect::<Vec<_>>();
+    !dimensions.is_empty()
+        && dimensions
+            .iter()
+            .all(|value| value.parse::<usize>().is_ok_and(|dimension| dimension > 0))
+}
+
+fn normalize_model_declaration(
+    mut source: String,
+    runtime_kind: Option<String>,
+    mut options: std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(
+    String,
+    String,
+    std::collections::BTreeMap<String, serde_json::Value>,
+)> {
+    let inferred =
+        if source.starts_with("mock://") || source.to_ascii_lowercase().ends_with(".onnx") {
+            Some("onnx-runtime")
+        } else if source.starts_with("triton+http://") || source.starts_with("triton+https://") {
+            Some("triton-inference-server")
+        } else {
+            None
+        };
+    let runtime_kind = runtime_kind
+        .or(inferred.map(str::to_owned))
+        .ok_or_else(|| {
+            VqlError::new(
+                ErrorCode::InvalidOption,
+                "Model source has no unambiguous Runtime default; add USING <runtime>",
+            )
+        })?;
+    if runtime_kind == "triton-inference-server"
+        && (source.starts_with("triton+http://") || source.starts_with("triton+https://"))
+    {
+        let http_source = source.strip_prefix("triton+").expect("prefix checked");
+        let mut url = url::Url::parse(http_source).map_err(|error| {
+            VqlError::new(
+                ErrorCode::InvalidLocation,
+                "invalid triton+http(s) Model source URI",
+            )
+            .with_source(error)
+        })?;
+        let route = url.path().trim_matches('/');
+        if route.is_empty() || route.contains('/') {
+            return Err(VqlError::new(
+                ErrorCode::InvalidLocation,
+                "Triton Model source must end in /model[@server_version]",
+            ));
+        }
+        let (model, server_version) = route
+            .rsplit_once('@')
+            .map_or((route, None), |(model, version)| (model, Some(version)));
+        if model.is_empty() || server_version.is_some_and(str::is_empty) {
+            return Err(VqlError::new(
+                ErrorCode::InvalidLocation,
+                "Triton Model source must end in /model[@server_version]",
+            ));
+        }
+        if options
+            .insert("model".to_owned(), serde_json::json!(model))
+            .is_some()
+        {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                "OPTIONS.model conflicts with the Triton source URI",
+            ));
+        }
+        if let Some(version) = server_version
+            && options
+                .insert("version".to_owned(), serde_json::json!(version))
+                .is_some()
+        {
+            return Err(VqlError::new(
+                ErrorCode::InvalidOption,
+                "OPTIONS.version conflicts with @server_version in the Triton source URI",
+            ));
+        }
+        url.set_path("");
+        source = url.to_string().trim_end_matches('/').to_owned();
+    }
+    Ok((source, runtime_kind, options))
+}
+
+fn object_address(name: &str) -> (String, String, String) {
+    let parts = name.split('.').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [catalog, schema, name] => (
+            (*catalog).to_owned(),
+            (*schema).to_owned(),
+            (*name).to_owned(),
+        ),
+        [schema, name] => ("vql".to_owned(), (*schema).to_owned(), (*name).to_owned()),
+        [name] => ("vql".to_owned(), "default".to_owned(), (*name).to_owned()),
+        _ => ("vql".to_owned(), "default".to_owned(), name.to_owned()),
+    }
+}
+
+fn parse_session_setting(sql: &str) -> Result<(String, String)> {
+    let statement = sql.trim().trim_end_matches(';').trim();
+    let rest = statement.get(3..).filter(|_| {
+        statement
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("SET"))
+    });
+    let rest = rest.ok_or_else(|| VqlError::new(ErrorCode::InvalidSql, "expected SET"))?;
+    let (name, value) = rest
+        .split_once('=')
+        .ok_or_else(|| VqlError::new(ErrorCode::InvalidSql, "SET requires <setting> = <value>"))?;
+    let name = name.trim().to_ascii_lowercase();
+    let value = value.trim();
+    let value = if value.len() >= 2
+        && ((value.starts_with('\'') && value.ends_with('\''))
+            || (value.starts_with('"') && value.ends_with('"')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    Ok((name, value.trim().to_ascii_lowercase()))
+}
+
+fn ensure_resolution_declaration_unchanged(
+    model_name: &str,
+    version_name: &str,
+    initial_fingerprint: &str,
+    current_fingerprint: &str,
+) -> Result<()> {
+    if current_fingerprint == initial_fingerprint {
+        return Ok(());
+    }
+    Err(VqlError::new(
+        ErrorCode::Catalog,
+        format!(
+            "model '{model_name}:{version_name}' changed while RESOLVE MODEL was running; retry the statement"
+        ),
+    ))
+}
+
+fn format_model_interface(interface: &ModelInterface) -> String {
+    interface.capability.map_or_else(
+        || {
+            format!(
+                "({}) RETURNS {}",
+                interface
+                    .parameters
+                    .iter()
+                    .map(|parameter| format!("{} {}", parameter.name, parameter.data_type))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                interface.return_type
+            )
+        },
+        |capability| format!("TYPE {}", capability.as_str()),
+    )
+}
+
+fn format_function_arguments(function: &crate::catalog::FunctionDef) -> String {
+    function
+        .parameters
+        .iter()
+        .map(|(name, data_type)| {
+            if function
+                .constant_parameters
+                .iter()
+                .any(|constant| constant.eq_ignore_ascii_case(name))
+            {
+                format!("{name} CONST {data_type}")
+            } else {
+                format!("{name} {data_type}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn callable_description_result(
+    name: &str,
+    kind: &str,
+    arguments: &str,
+    return_type: &str,
+    status: &str,
+    default_version: Option<&str>,
+) -> Result<DdlResult> {
+    let (catalog, schema_name, object_name) = object_address(name);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("catalog", DataType::Utf8, false),
+        Field::new("schema", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("arguments", DataType::Utf8, false),
+        Field::new("return_type", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
+        Field::new("default_version", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![catalog])) as ArrayRef,
+            Arc::new(StringArray::from(vec![schema_name])),
+            Arc::new(StringArray::from(vec![object_name])),
+            Arc::new(StringArray::from(vec![kind])),
+            Arc::new(StringArray::from(vec![arguments])),
+            Arc::new(StringArray::from(vec![return_type])),
+            Arc::new(StringArray::from(vec![status])),
+            Arc::new(StringArray::from(vec![default_version])),
+        ],
+    )?;
+    Ok(DdlResult {
+        message: format!("{} '{}'", kind.to_ascii_lowercase(), name),
+        batches: vec![batch],
+    })
 }
 
 fn schema_for_columns(columns: &[TableColumn]) -> Result<SchemaRef> {
@@ -1497,35 +2379,6 @@ fn message_result(message: String) -> DdlResult {
     }
 }
 
-fn named_objects_result(rows: Vec<(String, String, i64)>) -> Result<DdlResult> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("name", DataType::Utf8, false),
-        Field::new("kind", DataType::Utf8, false),
-        Field::new("revision", DataType::Int64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(StringArray::from(
-                rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
-            )),
-            Arc::new(Int64Array::from(
-                rows.iter().map(|row| row.2).collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .map_err(|error| {
-        VqlError::new(ErrorCode::Execution, "failed to build catalog result").with_source(error)
-    })?;
-    Ok(DdlResult {
-        message: format!("{} object(s)", batch.num_rows()),
-        batches: vec![batch],
-    })
-}
-
 fn show_create_result(name: &str, object_type: &str, create_sql: String) -> Result<DdlResult> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("object_name", DataType::Utf8, false),
@@ -1571,6 +2424,7 @@ mod tests {
     use super::*;
     use crate::EngineConfig;
     use arrow::array::{Array, Float64Array, Int64Array};
+    use base64::Engine as _;
     use datafusion::execution::memory_pool::MemoryPool;
     use image::{Rgb, RgbImage};
     use std::io::{Read, Write};
@@ -1775,12 +2629,13 @@ mod tests {
         let unresolved_model = show_create_sql(&session, "SHOW CREATE MODEL detector");
         session.sql("RESOLVE MODEL detector").unwrap();
         let resolved_model = show_create_sql(&session, "SHOW CREATE MODEL detector");
-        assert_eq!(resolved_model, unresolved_model);
+        assert!(resolved_model.starts_with(&unresolved_model));
+        assert!(resolved_model.contains("SET DEFAULT_VERSION = 'v1'"));
 
         let statements = [
             show_create_sql(&session, "SHOW CREATE TABLE photos"),
             show_create_sql(&session, "SHOW CREATE TABLE entrance"),
-            resolved_model,
+            unresolved_model,
             show_create_sql(&session, "SHOW CREATE FUNCTION plus_one"),
             show_create_sql(&session, "SHOW CREATE FUNCTION py_double"),
             show_create_sql(&session, "SHOW CREATE TABLE events"),
@@ -1792,8 +2647,7 @@ mod tests {
         let copy = Engine::new(EngineConfig::new(temp.path().join("copy.db"))).unwrap();
         let copy_session = copy.session().build().unwrap();
         for statement in &statements {
-            parse_statement(statement).unwrap();
-            copy_session.sql(statement).unwrap();
+            copy_session.run_script(statement).unwrap();
         }
         let copied_events = copy
             .inner
@@ -1815,6 +2669,7 @@ mod tests {
                 .model("detector")
                 .unwrap()
                 .definition
+                .versions[0]
                 .resolved
                 .is_none()
         );
@@ -2013,48 +2868,51 @@ mod tests {
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
 
+        let error = session
+            .sql("CREATE MODEL ambiguous TYPE OBJECT_DETECTION FROM './weights.bin'")
+            .unwrap_err();
+        assert!(error.message.contains("USING"));
+
         session
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
                  CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
-                 CREATE MODEL remote TYPE OBJECT_DETECTION FROM 'http://127.0.0.1:9' \
-                   USING TRITON_INFERENCE_SERVER WITH (model='remote');",
+                 CREATE MODEL remote TYPE OBJECT_DETECTION \
+                   FROM 'triton+http://127.0.0.1:9/remote';",
                 photos.display()
             ))
             .unwrap();
 
         let snapshot = engine.inner.catalog.snapshot().unwrap();
         assert!(
-            snapshot
-                .model("detector")
-                .unwrap()
-                .definition
+            snapshot.model("detector").unwrap().definition.versions[0]
                 .resolved
                 .is_none()
         );
         assert!(
-            snapshot
-                .model("remote")
-                .unwrap()
-                .definition
+            snapshot.model("remote").unwrap().definition.versions[0]
                 .resolved
                 .is_none()
         );
-        let shown = session.sql("SHOW MODELS").unwrap().collect().unwrap();
-        assert_eq!(shown[0].schema().field(3).name(), "status");
+        let shown = session
+            .sql("SHOW MODEL VERSIONS detector")
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(shown[0].schema().field(4).name(), "status");
         let statuses = shown[0]
-            .column(3)
+            .column(4)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(statuses.value(0), "UNRESOLVED");
-        assert_eq!(statuses.value(1), "UNRESOLVED");
         let error = session
-            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
+            .sql("SELECT detector(image) FROM photos")
             .unwrap_err();
         assert!(error.message.contains("RESOLVE MODEL detector"));
 
         session.sql("RESOLVE MODEL detector").unwrap();
+        assert_eq!(engine.inner.models.active_resolution_job_count(), 0);
         assert!(
             engine
                 .inner
@@ -2064,26 +2922,298 @@ mod tests {
                 .model("detector")
                 .unwrap()
                 .definition
+                .versions[0]
                 .resolved
                 .is_some()
         );
-        let shown = session.sql("SHOW MODELS").unwrap().collect().unwrap();
+        let shown = session
+            .sql("SHOW MODEL VERSIONS detector")
+            .unwrap()
+            .collect()
+            .unwrap();
         let statuses = shown[0]
-            .column(3)
+            .column(4)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(statuses.value(0), "RESOLVED");
-        let explain = explain_text(
-            &session,
-            "EXPLAIN SELECT IMAGE_DETECTION('detector', image) FROM photos",
-        );
+        let explain = explain_text(&session, "EXPLAIN SELECT detector(image) FROM photos");
         assert!(explain.contains("VisionQLPlan mode=bounded"));
         assert!(explain.contains("Inference model=detector"));
         assert!(explain.contains("batching_owner=visionql"));
         assert!(explain.contains("dedup=enabled"));
         assert!(explain.contains("decode=skipped(mock)"));
         assert!(explain.contains("image_payload=locator_or_encoded"));
+    }
+
+    #[test]
+    fn model_versions_require_explicit_publication_and_support_call_site_selection() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        RgbImage::from_pixel(8, 8, Rgb([10, 20, 30]))
+            .save(photos.join("one.png"))
+            .unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        let error = session
+            .sql(
+                "CREATE MODEL invalid_version TYPE OBJECT_DETECTION VERSION 'default'
+                 FROM 'mock://invalid'",
+            )
+            .unwrap_err();
+        assert!(error.message.contains("reserved"));
+        session
+            .run_script(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}';
+                 CREATE MODEL detector TYPE OBJECT_DETECTION VERSION 'alpha'
+                   FROM 'mock://alpha';
+                 ALTER MODEL detector ADD VERSION 'beta' FROM 'mock://beta';",
+                photos.display()
+            ))
+            .unwrap();
+        let error = session
+            .sql("CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://duplicate'")
+            .unwrap_err();
+        assert!(error.message.contains("ALTER MODEL detector ADD VERSION"));
+
+        let error = session
+            .sql("ALTER MODEL detector SET DEFAULT_VERSION = 'beta'")
+            .unwrap_err();
+        assert!(error.message.contains("unresolved"));
+        session
+            .sql("RESOLVE MODEL detector VERSION 'beta'")
+            .unwrap();
+
+        let definition = engine
+            .inner
+            .catalog
+            .snapshot()
+            .unwrap()
+            .model("detector")
+            .unwrap()
+            .definition
+            .clone();
+        assert_eq!(definition.default_version, None);
+        let error = session.sql("RESOLVE MODEL detector").unwrap_err();
+        assert!(error.message.contains("alpha, beta"));
+        session
+            .sql("RESOLVE MODEL detector VERSION 'alpha'")
+            .unwrap();
+        assert_eq!(
+            engine
+                .inner
+                .catalog
+                .snapshot()
+                .unwrap()
+                .model("detector")
+                .unwrap()
+                .definition
+                .default_version
+                .as_deref(),
+            Some("alpha")
+        );
+
+        let explain = explain_text(
+            &session,
+            "EXPLAIN SELECT detector(image), detector(image, version => 'beta') FROM photos",
+        );
+        assert!(explain.contains("detector@alpha"));
+        assert!(explain.contains("detector@beta"));
+        let error = session
+            .sql("SELECT detector(image, version => 'missing') FROM photos")
+            .unwrap_err();
+        assert!(error.message.contains("known versions"));
+        let error = session
+            .sql("SELECT detector(image, version => uri) FROM photos")
+            .unwrap_err();
+        assert!(error.message.contains("version"));
+        assert!(error.message.contains("constant"));
+        let ab = session
+            .sql(
+                "SELECT detector(image) AS alpha_one,
+                        detector(image) AS alpha_two,
+                        detector(image, version => 'beta') AS beta_one,
+                        detector(image, version => 'beta') AS beta_two
+                 FROM photos",
+            )
+            .unwrap();
+        let Statement::Query(query) = &ab else {
+            panic!("model SELECT must produce a query");
+        };
+        assert_eq!(
+            query
+                .dataframe
+                .logical_plan()
+                .display_indent()
+                .to_string()
+                .matches("InferenceNode")
+                .count(),
+            2
+        );
+        let error = session
+            .sql("ALTER MODEL detector DROP VERSION 'alpha'")
+            .unwrap_err();
+        assert!(error.message.contains("move default first"));
+        let pinned = session
+            .sql("SELECT detector(image) AS detections FROM photos")
+            .unwrap();
+        session
+            .run_script(
+                "ALTER MODEL detector SET DEFAULT_VERSION = 'beta';
+                 ALTER MODEL detector DROP VERSION 'alpha';
+                 ALTER MODEL detector ADD VERSION 'alpha' FROM 'mock://alpha2';",
+            )
+            .unwrap();
+        let Statement::Query(query) = &pinned else {
+            panic!("model SELECT must produce a query");
+        };
+        assert!(
+            query
+                .dataframe
+                .logical_plan()
+                .display_indent()
+                .to_string()
+                .contains("detector@alpha")
+        );
+        pinned.collect().unwrap();
+        let versions = session
+            .sql("SHOW MODEL VERSIONS detector")
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(versions[0].num_rows(), 2);
+
+        session
+            .run_script(
+                "CREATE MODEL unpublished TYPE OBJECT_DETECTION VERSION 'origin'
+                   FROM 'mock://origin';
+                 ALTER MODEL unpublished ADD VERSION 'candidate' FROM 'mock://candidate';
+                 RESOLVE MODEL unpublished VERSION 'candidate';
+                 ALTER MODEL unpublished DROP VERSION 'origin';
+                 ALTER MODEL unpublished ADD VERSION 'origin' FROM 'mock://replacement';
+                 RESOLVE MODEL unpublished VERSION 'origin';",
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .inner
+                .catalog
+                .snapshot()
+                .unwrap()
+                .model("unpublished")
+                .unwrap()
+                .definition
+                .default_version,
+            None
+        );
+    }
+
+    #[test]
+    fn generic_mock_model_preserves_types_and_null_row_alignment() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(
+                "CREATE MODEL identity(value DOUBLE) RETURNS DOUBLE FROM 'mock://identity';
+                 RESOLVE MODEL identity;",
+            )
+            .unwrap();
+
+        let batches = session
+            .sql(
+                "SELECT identity(value) AS result
+                 FROM (VALUES (CAST(1.5 AS DOUBLE)), (CAST(NULL AS DOUBLE))) AS t(value)",
+            )
+            .unwrap()
+            .collect()
+            .unwrap();
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 1.5);
+        assert!(values.is_null(1));
+
+        let stable = session
+            .sql("SELECT identity(1.5) AS first, identity(1.5) AS second")
+            .unwrap();
+        let Statement::Query(query) = stable else {
+            panic!("generic Model SELECT must produce a query")
+        };
+        assert_eq!(
+            query
+                .dataframe
+                .logical_plan()
+                .display_indent()
+                .to_string()
+                .matches("InferenceNode")
+                .count(),
+            1
+        );
+        let volatile = session
+            .sql("SELECT identity(random()) AS first, identity(random()) AS second")
+            .unwrap();
+        let Statement::Query(query) = volatile else {
+            panic!("generic Model SELECT must produce a query")
+        };
+        assert_eq!(
+            query
+                .dataframe
+                .logical_plan()
+                .display_indent()
+                .to_string()
+                .matches("InferenceNode")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn generic_onnx_model_executes_multiple_inputs_and_restores_null_rows() {
+        const ADD_MODEL: &str = "CAo6SwoOCgF4CgF5EgF6IgNBZGQSA2FkZFoQCgF4EgsKCQgLEgUKAxIBTloQCgF5EgsKCQgLEgUKAxIBTmIQCgF6EgsKCQgLEgUKAxIBTkIECgAQEg==";
+        let temp = tempdir().unwrap();
+        let model = temp.path().join("add.onnx");
+        std::fs::write(
+            &model,
+            base64::engine::general_purpose::STANDARD
+                .decode(ADD_MODEL)
+                .unwrap(),
+        )
+        .unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(&format!(
+                "CREATE MODEL add_values(left DOUBLE, right DOUBLE) RETURNS DOUBLE
+                   FROM '{}';
+                 RESOLVE MODEL add_values;",
+                model.display()
+            ))
+            .unwrap();
+
+        let batches = session
+            .sql(
+                "SELECT add_values(left_value, right_value) AS result
+                 FROM (VALUES
+                   (CAST(1.5 AS DOUBLE), CAST(2.5 AS DOUBLE)),
+                   (CAST(NULL AS DOUBLE), CAST(2.0 AS DOUBLE)),
+                   (CAST(4.0 AS DOUBLE), CAST(NULL AS DOUBLE))
+                 ) AS values(left_value, right_value)",
+            )
+            .unwrap()
+            .collect()
+            .unwrap();
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 4.0);
+        assert!(values.is_null(1));
+        assert!(values.is_null(2));
     }
 
     #[test]
@@ -2105,7 +3235,7 @@ mod tests {
             ))
             .unwrap();
         session
-            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
+            .sql("SELECT detector(image) FROM photos")
             .unwrap()
             .collect()
             .unwrap();
@@ -2121,7 +3251,7 @@ mod tests {
             )
             .unwrap();
         session
-            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
+            .sql("SELECT detector(image) FROM photos")
             .unwrap()
             .collect()
             .unwrap();
@@ -2139,8 +3269,8 @@ mod tests {
                 .sql(
                     "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' \
                      USING ONNX_RUNTIME \
-                     WITH (input={name='pixels', width=320, height=192}, \
-                           output={name='detections', labels=['person']})",
+                     OPTIONS (input_name='pixels', image_size=[320, 192], \
+                              output_name='detections', format='yolo_e2e', labels=['person'])",
                 )
                 .unwrap();
         }
@@ -2149,13 +3279,11 @@ mod tests {
         let snapshot = engine.inner.catalog.snapshot().unwrap();
         let model = &snapshot.model("detector").unwrap().definition;
 
-        assert_eq!(model.runtime_kind, "onnx-runtime");
-        assert_eq!(model.options["input"]["width"], serde_json::json!(320));
-        assert_eq!(
-            model.options["output"]["labels"],
-            serde_json::json!(["person"])
-        );
-        assert!(model.resolved.is_none());
+        let version = &model.versions[0];
+        assert_eq!(version.runtime_kind, "onnx-runtime");
+        assert_eq!(version.options["image_size"], serde_json::json!([320, 192]));
+        assert_eq!(version.options["labels"], serde_json::json!(["person"]));
+        assert!(version.resolved.is_none());
     }
 
     #[test]
@@ -2174,33 +3302,32 @@ mod tests {
     }
 
     #[test]
-    fn typed_inference_function_names_are_reserved() {
+    fn vql_function_names_are_reserved() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
         let session = engine.session().build().unwrap();
 
-        for name in [
-            "IMAGE_DETECTION",
-            "IMAGE_CLASSIFICATION",
-            "IMAGE_EMBEDDING",
-            "TEXT_EMBEDDING",
-            "TEXT_GENERATION",
-        ] {
+        for name in ["VQL_CLASSIFY", "vql_custom"] {
             let error = session
                 .sql(&format!(
                     "CREATE FUNCTION {name}(BIGINT) RETURNS BIGINT RETURN $1"
                 ))
                 .unwrap_err();
 
-            assert_eq!(error.code, ErrorCode::InvalidOption);
+            assert_eq!(error.code, ErrorCode::NameConflict);
             assert_eq!(
                 error.message,
                 format!(
-                    "function name '{}' is reserved for built-in typed inference",
+                    "function name '{}' uses the reserved VQL_* prefix",
                     name.to_ascii_lowercase()
                 )
             );
         }
+        let error = session
+            .sql("CREATE MODEL VQL_CUSTOM TYPE OBJECT_DETECTION FROM 'mock://person'")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NameConflict);
+        assert!(error.message.contains("VQL_*"));
 
         let functions = session.sql("SHOW FUNCTIONS").unwrap().collect().unwrap();
         assert_eq!(functions[0].num_rows(), 0);
@@ -2319,8 +3446,7 @@ mod tests {
                  CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person' USING ONNX_RUNTIME;
                  RESOLVE MODEL detector;
                  CREATE FUNCTION detect_people(IMAGE)
-                 RETURN IMAGE_DETECTION(
-                   'detector', $1,
+                 RETURN detector($1,
                    classes => ['person'], min_confidence => 0.5
                  );",
                 photos.display()
@@ -2339,6 +3465,122 @@ mod tests {
             .unwrap();
 
         assert_eq!(values.value(0), 1);
+    }
+
+    #[test]
+    fn function_constant_parameters_are_inferred_and_propagated() {
+        let temp = tempdir().unwrap();
+        let photos = temp.path().join("photos");
+        std::fs::create_dir(&photos).unwrap();
+        RgbImage::from_pixel(8, 8, Rgb([10, 20, 30]))
+            .save(photos.join("one.png"))
+            .unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}';
+                 CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';
+                 RESOLVE MODEL detector;
+                 CREATE FUNCTION detect_at(image IMAGE, threshold DOUBLE)
+                   RETURN detector(image, min_confidence => threshold);
+                 CREATE FUNCTION nested_detect(image IMAGE, threshold DOUBLE)
+                   RETURN detect_at(image, threshold);",
+                photos.display()
+            ))
+            .unwrap();
+
+        for name in ["detect_at", "nested_detect"] {
+            let described = session
+                .sql(&format!("DESCRIBE FUNCTION {name}"))
+                .unwrap()
+                .collect()
+                .unwrap();
+            let arguments = described[0]
+                .column(4)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert!(arguments.value(0).contains("threshold CONST DOUBLE"));
+            let error = session
+                .sql(&format!("SELECT {name}(image, width) FROM photos"))
+                .unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("argument 2 ('threshold') must be constant")
+            );
+            assert!(
+                session
+                    .sql(&format!("SELECT {name}(image, 0.5) FROM photos"))
+                    .unwrap()
+                    .collect()
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn non_image_builtin_ai_inputs_are_feature_gated() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        let error = session
+            .sql("CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'mock://classifier'")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
+        assert_eq!(error.target_version.as_deref(), Some("未排期"));
+
+        for sql in [
+            "SELECT VQL_CLASSIFY('image.jpg', ['cat'])",
+            "SELECT VQL_EXTRACT('document.pdf')",
+            "SELECT VQL_EXTRACT(X'CAFE')",
+        ] {
+            let error = session.sql(sql).unwrap_err();
+            assert_eq!(error.code, ErrorCode::FeatureNotAvailable, "{sql}");
+            assert_eq!(error.target_version.as_deref(), Some("未排期"), "{sql}");
+        }
+
+        let error = session.sql("SELECT VQL_EXTRACT(42)").unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidSql);
+
+        let error = session
+            .sql("SELECT VQL_CLASSIFY(NULL, ['cat'])")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
+        assert_eq!(error.target_version.as_deref(), Some("未排期"));
+        assert!(
+            session
+                .sql("SELECT 'VQL_CLASSIFY(NULL, [''cat''])'")
+                .unwrap()
+                .collect()
+                .is_ok()
+        );
+
+        let error = session
+            .sql("SET vql.classify.model = 'classifier'")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidOption);
+        assert!(error.message.contains("unknown session setting"));
+    }
+
+    #[test]
+    fn resolve_rejects_a_replaced_declaration() {
+        let error = ensure_resolution_declaration_unchanged(
+            "detector",
+            "v1",
+            "original-declaration",
+            "replacement-declaration",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Catalog);
+        assert!(
+            error
+                .message
+                .contains("changed while RESOLVE MODEL was running")
+        );
+        assert!(error.message.contains("retry the statement"));
     }
 
     #[test]
@@ -2364,7 +3606,7 @@ mod tests {
         let batches = session
             .sql(
                 "SELECT f.uri, det.label
-                 FROM photos AS f, UNNEST(IMAGE_DETECTION('detector', f.image)) AS u(det)",
+                 FROM photos AS f, UNNEST(detector(f.image)) AS u(det)",
             )
             .unwrap()
             .collect()
@@ -2392,7 +3634,7 @@ mod tests {
             engine
                 .inner
                 .catalog
-                .revision_count(crate::catalog::ObjectKind::Table)
+                .history_count(crate::catalog::ObjectKind::Table)
                 .unwrap(),
             0
         );
@@ -2413,7 +3655,7 @@ mod tests {
             engine
                 .inner
                 .catalog
-                .revision_count(crate::catalog::ObjectKind::Table)
+                .history_count(crate::catalog::ObjectKind::Table)
                 .unwrap(),
             0
         );
@@ -2485,7 +3727,7 @@ mod tests {
             ))
             .unwrap();
         let statement = session
-            .sql("SELECT CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.6)) AS people FROM photos")
+            .sql("SELECT CARDINALITY(detector(image, classes => ['person'], min_confidence => 0.6)) AS people FROM photos")
             .unwrap();
         let Statement::Query(query) = &statement else {
             panic!("model SELECT must produce a query");
@@ -2504,10 +3746,37 @@ mod tests {
         assert!(physical.contains("InferenceExec"));
         statement.collect().unwrap();
 
+        session
+            .sql(
+                "CREATE FUNCTION detect_people(input IMAGE)
+                 RETURN detector(input, classes => ['person'], min_confidence => 0.6)",
+            )
+            .unwrap();
+        let preset_and_direct = session
+            .sql(
+                "SELECT detector(image, classes => ['person'], min_confidence => 0.6) AS direct,
+                        detect_people(image) AS preset
+                 FROM photos",
+            )
+            .unwrap();
+        let Statement::Query(query) = &preset_and_direct else {
+            panic!("model SELECT must produce a query");
+        };
+        assert_eq!(
+            query
+                .dataframe
+                .logical_plan()
+                .display_indent()
+                .to_string()
+                .matches("InferenceNode")
+                .count(),
+            1
+        );
+
         let deduplicated = session
             .sql(
-                "SELECT CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.6)) AS first, \
-                        CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.6)) AS second FROM photos",
+                "SELECT CARDINALITY(detector(image, classes => ['person'], min_confidence => 0.6)) AS first, \
+                        CARDINALITY(detector(image, classes => ['person'], min_confidence => 0.6)) AS second FROM photos",
             )
             .unwrap();
         let Statement::Query(query) = &deduplicated else {
@@ -2531,16 +3800,15 @@ mod tests {
         session
             .run_script(&format!(
                 "CREATE MODEL remote TYPE OBJECT_DETECTION \
-                 FROM 'http://{address}' USING TRITON_INFERENCE_SERVER \
-                 WITH (model='remote');
+                 FROM 'triton+http://{address}/remote';
                  RESOLVE MODEL remote;"
             ))
             .unwrap();
         server.join().unwrap();
         let volatile = session
             .sql(
-                "SELECT IMAGE_DETECTION('remote', image) AS first, \
-                        IMAGE_DETECTION('remote', image) AS second FROM photos",
+                "SELECT remote(image) AS first, \
+                        remote(image) AS second FROM photos",
             )
             .unwrap();
         let Statement::Query(query) = volatile else {
@@ -2591,15 +3859,12 @@ mod tests {
             .run_script(&format!(
                 "CREATE TABLE photos USING IMAGES LOCATION '{}';
                  CREATE MODEL remote TYPE OBJECT_DETECTION
-                 FROM 'http://{address}' USING TRITON_INFERENCE_SERVER
-                 WITH (model='remote');
+                 FROM 'triton+http://{address}/remote';
                  RESOLVE MODEL remote;",
                 photos.display()
             ))
             .unwrap();
-        let Statement::Query(query) = session
-            .sql("SELECT IMAGE_DETECTION('remote', image) FROM photos")
-            .unwrap()
+        let Statement::Query(query) = session.sql("SELECT remote(image) FROM photos").unwrap()
         else {
             panic!("model SELECT must produce a query");
         };
@@ -2881,8 +4146,8 @@ mod tests {
         };
         session
             .run_script(&format!(
-                "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'http://{address}' \
-                 USING TRITON_INFERENCE_SERVER WITH (model='detector');
+                "CREATE MODEL detector TYPE OBJECT_DETECTION \
+                 FROM 'triton+http://{address}/detector';
                  RESOLVE MODEL detector;"
             ))
             .unwrap();
@@ -2890,7 +4155,7 @@ mod tests {
 
         let query = session
             .sql(
-                "SELECT CARDINALITY(IMAGE_DETECTION('detector', image, classes => ['person'], min_confidence => 0.5)) AS people \
+                "SELECT CARDINALITY(detector(image, classes => ['person'], min_confidence => 0.5)) AS people \
                  FROM photos",
             )
             .unwrap();
@@ -2902,7 +4167,7 @@ mod tests {
 
         session.sql("SET vql.on_error='fail'").unwrap();
         let error = session
-            .sql("SELECT IMAGE_DETECTION('detector', image) FROM photos")
+            .sql("SELECT detector(image) FROM photos")
             .unwrap()
             .collect()
             .unwrap_err();
@@ -2946,7 +4211,6 @@ mod tests {
                 ("table_name".to_owned(), DataType::Utf8, false),
                 ("provider".to_owned(), DataType::Utf8, false),
                 ("location".to_owned(), DataType::Utf8, false),
-                ("revision".to_owned(), DataType::Int64, false),
             ]
         );
         assert_eq!(shown[0].num_rows(), 1);
@@ -2965,18 +4229,12 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let revisions = shown[0]
-            .column(3)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
         assert_eq!(table_names.value(0), "photos");
         assert_eq!(providers.value(0), "IMAGES");
         assert_eq!(
             locations.value(0),
             photos.canonicalize().unwrap().to_string_lossy()
         );
-        assert_eq!(revisions.value(0), 1);
 
         let described = session.sql("DESCRIBE photos").unwrap().collect().unwrap();
         let columns = described[0]
@@ -3405,8 +4663,7 @@ mod tests {
         let statement = session
             .sql(
                 "WITH detected AS (
-                   SELECT frame_id, CARDINALITY(IMAGE_DETECTION(
-                     'detector', frame, classes => ['person'], min_confidence => 0.5
+                   SELECT frame_id, CARDINALITY(detector(frame, classes => ['person'], min_confidence => 0.5
                    )) AS people
                    FROM people_stream
                  )
@@ -3441,8 +4698,7 @@ mod tests {
         let windowed = session
             .sql(
                 "WITH detected AS (
-                   SELECT ts, CARDINALITY(IMAGE_DETECTION(
-                     'detector', frame, classes => ['person'], min_confidence => 0.5
+                   SELECT ts, CARDINALITY(detector(frame, classes => ['person'], min_confidence => 0.5
                    )) AS people
                    FROM people_stream
                  )

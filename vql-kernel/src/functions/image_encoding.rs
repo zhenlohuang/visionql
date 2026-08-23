@@ -140,7 +140,7 @@ impl ImageEncoder {
             ));
         }
         let locator = parse_locator(locators.value(row))?;
-        let table = self.catalog.table_at_revision(locator.table_revision)?;
+        let table = self.catalog.table_at_generation(locator.table_generation)?;
         match &table.provider {
             TableProvider::Images { location, .. } => {
                 let path = resolved_media_path(location, &locator.relative_path)?;

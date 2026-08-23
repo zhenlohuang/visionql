@@ -3,23 +3,24 @@ control substitution on
 query T
 CREATE TABLE photos USING IMAGES LOCATION '${IMAGES_LOCATION}';
 ----
-created table 'photos' at revision 1
+created table 'photos'
 
 query T
-CREATE MODEL detector TYPE OBJECT_DETECTION FROM '${MODEL}' USING ONNX_RUNTIME;
+CREATE MODEL detector TYPE OBJECT_DETECTION FROM '${MODEL}'
+OPTIONS (image_size = 640, format = 'yolo_e2e', labels = 'coco80', box_format = 'xyxy');
 ----
-created model 'detector' at revision 2
+created model 'detector'
 
 query T
 RESOLVE MODEL detector;
 ----
-resolved model 'detector' at revision 3
+resolved model 'detector:v1'
 
 query IBB
 WITH inferred AS (
   SELECT
     width,
-    IMAGE_DETECTION('detector', image) AS detections
+    detector(image) AS detections
   FROM photos
   WHERE uri LIKE '%/000000000049.jpg'
      OR uri LIKE '%/000000000061.jpg'

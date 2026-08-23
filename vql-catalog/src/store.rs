@@ -49,13 +49,18 @@ pub trait CatalogBackend: Debug + Send + Sync {
     ) -> Result<i64>;
     fn drop_table(&self, catalog_name: &str, schema_name: &str, name: &str) -> Result<i64>;
     fn snapshot(&self, catalog_name: &str, schema_name: &str) -> Result<DefinitionSnapshot>;
-    fn table_at_revision(&self, revision: i64) -> Result<TableDef>;
+    fn table_at_generation(&self, generation: i64) -> Result<TableDef>;
 
     fn create_model(&self, definition: &ModelDef) -> Result<i64>;
-    fn update_model(&self, definition: &ModelDef, expected_revision: i64) -> Result<i64>;
+    fn update_model(
+        &self,
+        current_name: &str,
+        definition: &ModelDef,
+        expected_generation: i64,
+    ) -> Result<i64>;
     fn create_function(&self, definition: &FunctionDef) -> Result<i64>;
     fn drop_object(&self, kind: ObjectKind, name: &str) -> Result<i64>;
-    fn revision_count(&self, kind: ObjectKind) -> Result<i64>;
+    fn history_count(&self, kind: ObjectKind) -> Result<i64>;
 }
 
 #[derive(Debug, Clone)]
@@ -167,16 +172,22 @@ impl CatalogStore {
         self.backend.snapshot(catalog_name, schema_name)
     }
 
-    pub fn table_at_revision(&self, revision: i64) -> Result<TableDef> {
-        self.backend.table_at_revision(revision)
+    pub fn table_at_generation(&self, generation: i64) -> Result<TableDef> {
+        self.backend.table_at_generation(generation)
     }
 
     pub fn create_model(&self, definition: &ModelDef) -> Result<i64> {
         self.backend.create_model(definition)
     }
 
-    pub fn update_model(&self, definition: &ModelDef, expected_revision: i64) -> Result<i64> {
-        self.backend.update_model(definition, expected_revision)
+    pub fn update_model(
+        &self,
+        current_name: &str,
+        definition: &ModelDef,
+        expected_generation: i64,
+    ) -> Result<i64> {
+        self.backend
+            .update_model(current_name, definition, expected_generation)
     }
 
     pub fn create_function(&self, definition: &FunctionDef) -> Result<i64> {
@@ -191,8 +202,8 @@ impl CatalogStore {
         self.backend.drop_object(kind, name)
     }
 
-    pub fn revision_count(&self, kind: ObjectKind) -> Result<i64> {
-        self.backend.revision_count(kind)
+    pub fn history_count(&self, kind: ObjectKind) -> Result<i64> {
+        self.backend.history_count(kind)
     }
 }
 
@@ -214,6 +225,7 @@ mod sqlite {
     impl SqliteCatalogBackend {
         pub fn open(path: &Path) -> Result<Self> {
             let connection = Connection::open(path)?;
+            connection.busy_timeout(std::time::Duration::from_secs(5))?;
             initialize(&connection)?;
             Ok(Self {
                 connection: Mutex::new(connection),
@@ -229,10 +241,10 @@ mod sqlite {
             })
         }
 
-        fn revision_count(&self, kind: ObjectKind) -> Result<i64> {
+        fn history_count(&self, kind: ObjectKind) -> Result<i64> {
             self.lock()?
                 .query_row(
-                    "SELECT COUNT(*) FROM revisions WHERE kind=?1",
+                    "SELECT COUNT(*) FROM object_revisions WHERE kind=?1",
                     [kind.as_str()],
                     |row| row.get(0),
                 )
@@ -517,13 +529,13 @@ mod sqlite {
             Ok(DefinitionSnapshot::new(tables, models, functions))
         }
 
-        fn table_at_revision(&self, revision: i64) -> Result<TableDef> {
+        fn table_at_generation(&self, generation: i64) -> Result<TableDef> {
             let definition = self
                 .lock()?
                 .query_row(
-                    "SELECT definition_json FROM revisions
-                     WHERE id=?1 AND kind='table' AND tombstone=0",
-                    [revision],
+                    "SELECT definition_json FROM object_revisions
+                     WHERE generation=?1 AND kind='table' AND tombstone=0",
+                    [generation],
                     |row| row.get::<_, Option<String>>(0),
                 )
                 .optional()?
@@ -531,7 +543,7 @@ mod sqlite {
                 .ok_or_else(|| {
                     CatalogError::new(
                         CatalogErrorCode::NotFound,
-                        format!("table revision {revision} does not exist"),
+                        format!("table generation {generation} does not exist"),
                     )
                 })?;
             serde_json::from_str(&definition).map_err(Into::into)
@@ -541,43 +553,99 @@ mod sqlite {
             create_default_object(self, ObjectKind::Model, &definition.name, definition)
         }
 
-        fn update_model(&self, definition: &ModelDef, expected_revision: i64) -> Result<i64> {
+        fn update_model(
+            &self,
+            current_name: &str,
+            definition: &ModelDef,
+            expected_generation: i64,
+        ) -> Result<i64> {
+            let current_name = normalize_name(current_name, "model")?;
             let name = normalize_name(&definition.name, "model")?;
             let definition_json = serde_json::to_string(definition)?;
             let mut connection = self.lock()?;
-            let transaction = connection.transaction()?;
-            let current_revision = transaction
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current = transaction
                 .query_row(
-                    "SELECT head_revision FROM objects
-                     WHERE catalog_name=?1 AND schema_name=?2 AND kind='model' AND name=?3",
-                    params![DEFAULT_CATALOG, DEFAULT_SCHEMA, name],
-                    |row| row.get::<_, i64>(0),
+                    "SELECT o.object_id, o.head_generation, r.object_revision, r.definition_json FROM objects o
+                     JOIN object_revisions r ON r.generation=o.head_generation
+                     WHERE o.catalog_name=?1 AND o.schema_name=?2 AND o.kind='model' AND o.name=?3",
+                    params![DEFAULT_CATALOG, DEFAULT_SCHEMA, current_name],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            let Some(current_revision) = current_revision else {
-                return Err(not_found("model", &name));
+            let Some((object_id, current_generation, current_revision, current_json)) = current
+            else {
+                return Err(not_found("model", &current_name));
             };
-            if current_revision != expected_revision {
+            if current_generation != expected_generation {
                 return Err(CatalogError::new(
                     CatalogErrorCode::Conflict,
                     format!(
-                        "model '{name}' changed while RESOLVE MODEL was running; retry the statement"
+                        "model '{current_name}' changed while the statement was running; retry it"
                     ),
                 ));
             }
+            let current: ModelDef = serde_json::from_str(&current_json)?;
+            validate_resolved_versions_immutable(&current, definition)?;
+            if current_name != name {
+                ensure_callable_absent(
+                    &transaction,
+                    DEFAULT_CATALOG,
+                    DEFAULT_SCHEMA,
+                    &name,
+                    ObjectKind::Model,
+                    CatalogErrorCode::NameConflict,
+                )?;
+                insert_callable(
+                    &transaction,
+                    DEFAULT_CATALOG,
+                    DEFAULT_SCHEMA,
+                    &name,
+                    ObjectKind::Model,
+                )?;
+            }
             transaction.execute(
-                "INSERT INTO revisions(catalog_name, schema_name, kind, name, definition_json)
-                 VALUES (?1, ?2, 'model', ?3, ?4)",
-                params![DEFAULT_CATALOG, DEFAULT_SCHEMA, name, definition_json],
+                "INSERT INTO object_revisions(
+                     object_id, catalog_name, schema_name, kind, name, object_revision, definition_json
+                 ) VALUES (?1, ?2, ?3, 'model', ?4, ?5, ?6)",
+                params![
+                    object_id,
+                    DEFAULT_CATALOG,
+                    DEFAULT_SCHEMA,
+                    name,
+                    current_revision + 1,
+                    definition_json
+                ],
             )?;
-            let revision = transaction.last_insert_rowid();
+            let generation = transaction.last_insert_rowid();
             transaction.execute(
-                "UPDATE objects SET head_revision=?1
-                 WHERE catalog_name=?2 AND schema_name=?3 AND kind='model' AND name=?4",
-                params![revision, DEFAULT_CATALOG, DEFAULT_SCHEMA, name],
+                "UPDATE objects SET name=?1, head_generation=?2
+                 WHERE catalog_name=?3 AND schema_name=?4 AND kind='model' AND name=?5",
+                params![
+                    name,
+                    generation,
+                    DEFAULT_CATALOG,
+                    DEFAULT_SCHEMA,
+                    current_name
+                ],
             )?;
+            if current_name != name {
+                transaction.execute(
+                    "DELETE FROM callables
+                     WHERE catalog_name=?1 AND schema_name=?2 AND name=?3",
+                    params![DEFAULT_CATALOG, DEFAULT_SCHEMA, current_name],
+                )?;
+            }
             transaction.commit()?;
-            Ok(revision)
+            Ok(current_revision + 1)
         }
 
         fn create_function(&self, definition: &FunctionDef) -> Result<i64> {
@@ -598,8 +666,8 @@ mod sqlite {
             Ok(revision)
         }
 
-        fn revision_count(&self, kind: ObjectKind) -> Result<i64> {
-            SqliteCatalogBackend::revision_count(self, kind)
+        fn history_count(&self, kind: ObjectKind) -> Result<i64> {
+            SqliteCatalogBackend::history_count(self, kind)
         }
     }
 
@@ -627,24 +695,36 @@ mod sqlite {
                  updated_at INTEGER NOT NULL,
                  PRIMARY KEY(catalog_name, name)
              );
-             CREATE TABLE IF NOT EXISTS revisions (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+             CREATE TABLE IF NOT EXISTS object_revisions (
+                 generation INTEGER PRIMARY KEY AUTOINCREMENT,
+                 object_id TEXT NOT NULL,
                  catalog_name TEXT NOT NULL,
                  schema_name TEXT NOT NULL,
                  kind TEXT NOT NULL,
                  name TEXT NOT NULL,
+                 object_revision INTEGER NOT NULL CHECK(object_revision >= 1),
                  definition_json TEXT,
                  schema_ipc BLOB,
                  tombstone INTEGER NOT NULL DEFAULT 0,
                  created_at INTEGER NOT NULL DEFAULT (unixepoch('subsec') * 1000)
              );
              CREATE TABLE IF NOT EXISTS objects (
+                 object_id TEXT NOT NULL UNIQUE,
                  catalog_name TEXT NOT NULL,
                  schema_name TEXT NOT NULL,
                  kind TEXT NOT NULL,
                  name TEXT NOT NULL,
-                 head_revision INTEGER NOT NULL REFERENCES revisions(id),
+                 head_generation INTEGER NOT NULL REFERENCES object_revisions(generation),
                  PRIMARY KEY(catalog_name, schema_name, kind, name),
+                 FOREIGN KEY(catalog_name, schema_name) REFERENCES schemas(catalog_name, name)
+                     ON UPDATE CASCADE ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS callables (
+                 catalog_name TEXT NOT NULL,
+                 schema_name TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ('model', 'function')),
+                 PRIMARY KEY(catalog_name, schema_name, name),
                  FOREIGN KEY(catalog_name, schema_name) REFERENCES schemas(catalog_name, name)
                      ON UPDATE CASCADE ON DELETE CASCADE
              );",
@@ -665,6 +745,12 @@ mod sqlite {
                 now
             ],
         )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO callables(catalog_name, schema_name, name, kind)
+             SELECT catalog_name, schema_name, name, kind FROM objects
+             WHERE kind IN ('model', 'function')",
+            [],
+        )?;
         Ok(())
     }
 
@@ -675,8 +761,24 @@ mod sqlite {
         definition: &T,
     ) -> Result<i64> {
         let mut connection = backend.lock()?;
-        let transaction = connection.transaction()?;
-        ensure_absent(&transaction, DEFAULT_CATALOG, DEFAULT_SCHEMA, kind, name)?;
+        let transaction = if matches!(kind, ObjectKind::Model | ObjectKind::Function) {
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?
+        } else {
+            connection.transaction()?
+        };
+        if matches!(kind, ObjectKind::Model | ObjectKind::Function) {
+            ensure_callable_absent(
+                &transaction,
+                DEFAULT_CATALOG,
+                DEFAULT_SCHEMA,
+                name,
+                kind,
+                CatalogErrorCode::AlreadyExists,
+            )?;
+            insert_callable(&transaction, DEFAULT_CATALOG, DEFAULT_SCHEMA, name, kind)?;
+        } else {
+            ensure_absent(&transaction, DEFAULT_CATALOG, DEFAULT_SCHEMA, kind, name)?;
+        }
         let revision = insert_object(
             &transaction,
             DEFAULT_CATALOG,
@@ -692,14 +794,16 @@ mod sqlite {
 
     fn normalize_name(value: &str, kind: &str) -> Result<String> {
         let value = value.trim();
+        let qualified_callable = matches!(kind, "model" | "function" | "callable");
         if value.is_empty()
             || value.len() > 255
-            || value.contains('.')
+            || (!qualified_callable && value.contains('.'))
+            || (qualified_callable && value.split('.').any(|segment| segment.is_empty()))
             || value.chars().any(char::is_control)
         {
             return Err(CatalogError::new(
                 CatalogErrorCode::InvalidArgument,
-                format!("{kind} name must be 1-255 characters and cannot contain '.'"),
+                format!("{kind} name must be 1-255 characters with non-empty path segments"),
             ));
         }
         Ok(value.to_ascii_lowercase())
@@ -731,6 +835,98 @@ mod sqlite {
         Ok(())
     }
 
+    fn ensure_callable_absent(
+        transaction: &Transaction<'_>,
+        catalog_name: &str,
+        schema_name: &str,
+        name: &str,
+        requested_kind: ObjectKind,
+        same_kind_code: CatalogErrorCode,
+    ) -> Result<()> {
+        let name = normalize_name(name, "callable")?;
+        let existing = transaction
+            .query_row(
+                "SELECT kind FROM callables
+                 WHERE catalog_name=?1 AND schema_name=?2
+                   AND name=?3",
+                params![catalog_name, schema_name, name],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(kind) = existing {
+            let code = if kind == requested_kind.as_str() {
+                same_kind_code
+            } else {
+                CatalogErrorCode::NameConflict
+            };
+            return Err(CatalogError::new(
+                code,
+                format!("callable name '{name}' conflicts with existing {kind}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn insert_callable(
+        transaction: &Transaction<'_>,
+        catalog_name: &str,
+        schema_name: &str,
+        name: &str,
+        kind: ObjectKind,
+    ) -> Result<()> {
+        let name = normalize_name(name, "callable")?;
+        let result = transaction.execute(
+            "INSERT INTO callables(catalog_name, schema_name, name, kind)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![catalog_name, schema_name, name, kind.as_str()],
+        );
+        match result {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                let existing = transaction
+                    .query_row(
+                        "SELECT kind FROM callables
+                         WHERE catalog_name=?1 AND schema_name=?2 AND name=?3",
+                        params![catalog_name, schema_name, name],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .unwrap_or_else(|| "callable".to_owned());
+                Err(CatalogError::new(
+                    CatalogErrorCode::NameConflict,
+                    format!("callable name '{name}' conflicts with existing {existing}"),
+                ))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn validate_resolved_versions_immutable(
+        current: &ModelDef,
+        replacement: &ModelDef,
+    ) -> Result<()> {
+        for old_version in &current.versions {
+            if old_version.resolved.is_none() {
+                continue;
+            }
+            let Some(new_version) = replacement.version(&old_version.name) else {
+                continue;
+            };
+            if new_version != old_version {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::Conflict,
+                    format!(
+                        "resolved model version '{}:{}' is immutable",
+                        current.name, old_version.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn insert_object<T: serde::Serialize>(
         transaction: &Transaction<'_>,
@@ -743,10 +939,13 @@ mod sqlite {
     ) -> Result<i64> {
         let name = normalize_name(name, kind.as_str())?;
         let definition_json = serde_json::to_string(definition)?;
+        let object_id = uuid::Uuid::new_v4().to_string();
         transaction.execute(
-            "INSERT INTO revisions(catalog_name, schema_name, kind, name, definition_json, schema_ipc)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO object_revisions(
+                 object_id, catalog_name, schema_name, kind, name, object_revision, definition_json, schema_ipc
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
             params![
+                object_id,
                 catalog_name,
                 schema_name,
                 kind.as_str(),
@@ -755,13 +954,20 @@ mod sqlite {
                 schema_ipc
             ],
         )?;
-        let revision = transaction.last_insert_rowid();
+        let generation = transaction.last_insert_rowid();
         transaction.execute(
-            "INSERT INTO objects(catalog_name, schema_name, kind, name, head_revision)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![catalog_name, schema_name, kind.as_str(), name, revision],
+            "INSERT INTO objects(object_id, catalog_name, schema_name, kind, name, head_generation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                object_id,
+                catalog_name,
+                schema_name,
+                kind.as_str(),
+                name,
+                generation
+            ],
         )?;
-        Ok(revision)
+        Ok(1)
     }
 
     fn drop_object_in_transaction(
@@ -774,20 +980,43 @@ mod sqlite {
         let catalog_name = normalize_name(catalog_name, "catalog")?;
         let schema_name = normalize_name(schema_name, "schema")?;
         let name = normalize_name(name, kind.as_str())?;
-        let deleted = transaction.execute(
+        let (object_id, current_revision) = transaction
+            .query_row(
+                "SELECT o.object_id, r.object_revision FROM objects o
+                 JOIN object_revisions r ON r.generation=o.head_generation
+                 WHERE o.catalog_name=?1 AND o.schema_name=?2 AND o.kind=?3 AND o.name=?4",
+                params![catalog_name, schema_name, kind.as_str(), name],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| not_found(kind.as_str(), &name))?;
+        transaction.execute(
             "DELETE FROM objects
              WHERE catalog_name=?1 AND schema_name=?2 AND kind=?3 AND name=?4",
             params![catalog_name, schema_name, kind.as_str(), name],
         )?;
-        if deleted == 0 {
-            return Err(not_found(kind.as_str(), &name));
+        if matches!(kind, ObjectKind::Model | ObjectKind::Function) {
+            transaction.execute(
+                "DELETE FROM callables
+                 WHERE catalog_name=?1 AND schema_name=?2 AND name=?3",
+                params![catalog_name, schema_name, name],
+            )?;
         }
+        let revision = current_revision + 1;
         transaction.execute(
-            "INSERT INTO revisions(catalog_name, schema_name, kind, name, tombstone)
-             VALUES (?1, ?2, ?3, ?4, 1)",
-            params![catalog_name, schema_name, kind.as_str(), name],
+            "INSERT INTO object_revisions(
+                 object_id, catalog_name, schema_name, kind, name, object_revision, tombstone
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+            params![
+                object_id,
+                catalog_name,
+                schema_name,
+                kind.as_str(),
+                name,
+                revision
+            ],
         )?;
-        Ok(transaction.last_insert_rowid())
+        Ok(revision)
     }
 
     fn load_tables(
@@ -796,8 +1025,8 @@ mod sqlite {
         schema_name: &str,
     ) -> Result<BTreeMap<String, SnapshotTable>> {
         let mut statement = transaction.prepare(
-            "SELECT o.name, o.head_revision, r.definition_json, r.schema_ipc
-             FROM objects o JOIN revisions r ON r.id=o.head_revision
+            "SELECT o.name, o.object_id, o.head_generation, r.object_revision, r.definition_json, r.schema_ipc
+             FROM objects o JOIN object_revisions r ON r.generation=o.head_generation
              WHERE o.catalog_name=?1 AND o.schema_name=?2 AND o.kind='table'
              ORDER BY o.name",
         )?;
@@ -805,12 +1034,14 @@ mod sqlite {
         let mut tables = BTreeMap::new();
         while let Some(row) = rows.next()? {
             let name: String = row.get(0)?;
-            let definition_json: String = row.get(2)?;
-            let schema_ipc: Vec<u8> = row.get(3)?;
+            let definition_json: String = row.get(4)?;
+            let schema_ipc: Vec<u8> = row.get(5)?;
             tables.insert(
                 name,
                 SnapshotTable {
-                    revision: row.get(1)?,
+                    object_id: row.get(1)?,
+                    generation: row.get(2)?,
+                    revision: row.get(3)?,
                     definition: serde_json::from_str(&definition_json)?,
                     schema: decode_schema(&schema_ipc)?,
                 },
@@ -826,19 +1057,21 @@ mod sqlite {
         kind: ObjectKind,
     ) -> Result<BTreeMap<String, SnapshotObject<T>>> {
         let mut statement = transaction.prepare(
-            "SELECT o.name, o.head_revision, r.definition_json
-             FROM objects o JOIN revisions r ON r.id=o.head_revision
+            "SELECT o.name, o.object_id, o.head_generation, r.object_revision, r.definition_json
+             FROM objects o JOIN object_revisions r ON r.generation=o.head_generation
              WHERE o.catalog_name=?1 AND o.schema_name=?2 AND o.kind=?3 ORDER BY o.name",
         )?;
         let mut rows = statement.query(params![catalog_name, schema_name, kind.as_str()])?;
         let mut values = BTreeMap::new();
         while let Some(row) = rows.next()? {
             let name: String = row.get(0)?;
-            let json: String = row.get(2)?;
+            let json: String = row.get(4)?;
             values.insert(
                 name,
                 SnapshotObject {
-                    revision: row.get(1)?,
+                    object_id: row.get(1)?,
+                    generation: row.get(2)?,
+                    revision: row.get(3)?,
                     definition: serde_json::from_str(&json)?,
                 },
             );
@@ -925,7 +1158,57 @@ mod sqlite {
         use tempfile::tempdir;
 
         use super::*;
-        use crate::{TableProvider, TableProviderKind};
+        use crate::{
+            FunctionDef, FunctionImplementation, ModelDef, ModelInterface, ModelParameter,
+            ModelType, ModelVersion, ResolvedExecutionSpec, ResolvedModelSpec, RuntimeSpec,
+            TableProvider, TableProviderKind,
+        };
+
+        fn model(name: &str) -> ModelDef {
+            ModelDef {
+                name: name.to_owned(),
+                interface: ModelInterface {
+                    capability: Some(ModelType::ObjectDetection),
+                    parameters: vec![ModelParameter {
+                        name: "image".to_owned(),
+                        data_type: "IMAGE".to_owned(),
+                        constant: false,
+                        optional: false,
+                    }],
+                    semantic_arguments: Vec::new(),
+                    return_type: "ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>"
+                        .to_owned(),
+                    processing_family: "vision.object_detection".to_owned(),
+                    deterministic: true,
+                },
+                versions: vec![ModelVersion {
+                    name: "v1".to_owned(),
+                    source: "mock://person".to_owned(),
+                    runtime_kind: "onnx-runtime".to_owned(),
+                    options: BTreeMap::new(),
+                    declaration_fingerprint: "declaration".to_owned(),
+                    resolved: None,
+                    created_at: 1,
+                }],
+                initial_version_fingerprint: "declaration".to_owned(),
+                default_version: None,
+                comment: None,
+                builtin: false,
+            }
+        }
+
+        fn function(name: &str) -> FunctionDef {
+            FunctionDef {
+                name: name.to_owned(),
+                implementation: FunctionImplementation::SqlMacro {
+                    expression: "$1".to_owned(),
+                },
+                parameters: vec![("value".to_owned(), "BIGINT".to_owned())],
+                constant_parameters: Vec::new(),
+                return_type: "BIGINT".to_owned(),
+                semantic_fingerprint: "function".to_owned(),
+            }
+        }
 
         #[test]
         fn default_namespace_and_revisioned_table_reopen() {
@@ -952,7 +1235,7 @@ mod sqlite {
                         .unwrap(),
                     1
                 );
-                assert_eq!(backend.revision_count(ObjectKind::Table).unwrap(), 1);
+                assert_eq!(backend.history_count(ObjectKind::Table).unwrap(), 1);
             }
             let backend = SqliteCatalogBackend::open(&path).unwrap();
             let table = backend
@@ -987,7 +1270,167 @@ mod sqlite {
                     .code,
                 CatalogErrorCode::AlreadyExists
             );
-            assert_eq!(backend.revision_count(ObjectKind::Table).unwrap(), 1);
+            assert_eq!(backend.history_count(ObjectKind::Table).unwrap(), 1);
+        }
+
+        #[test]
+        fn revisions_are_monotonic_per_object_not_global() {
+            let temp = tempdir().unwrap();
+            let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
+            let schema = Arc::new(Schema::empty());
+            let photos = TableDef::new(
+                "photos",
+                TableProvider::Images {
+                    location: temp.path().to_string_lossy().into_owned(),
+                    recursive: false,
+                },
+            );
+            let clips = TableDef::new(
+                "clips",
+                TableProvider::Videos {
+                    location: temp.path().to_string_lossy().into_owned(),
+                    recursive: false,
+                    fps: Some(1.0),
+                    start_time_ms: None,
+                },
+            );
+
+            assert_eq!(backend.create_model(&model("detector")).unwrap(), 1);
+            assert_eq!(
+                backend
+                    .create_table(DEFAULT_CATALOG, DEFAULT_SCHEMA, &photos, &schema)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                backend
+                    .create_table(DEFAULT_CATALOG, DEFAULT_SCHEMA, &clips, &schema)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(backend.create_function(&function("identity")).unwrap(), 1);
+
+            let snapshot = backend.snapshot(DEFAULT_CATALOG, DEFAULT_SCHEMA).unwrap();
+            let detector = snapshot.model("detector").unwrap();
+            let detector_id = detector.object_id.clone();
+            let mut definition = detector.definition.clone();
+            definition.comment = Some("updated".to_owned());
+            assert_eq!(
+                backend
+                    .update_model("detector", &definition, detector.generation)
+                    .unwrap(),
+                2
+            );
+            let snapshot = backend.snapshot(DEFAULT_CATALOG, DEFAULT_SCHEMA).unwrap();
+            assert_eq!(snapshot.table("photos").unwrap().revision, 1);
+            assert_eq!(snapshot.table("clips").unwrap().revision, 1);
+            assert_eq!(snapshot.model("detector").unwrap().revision, 2);
+            assert_eq!(snapshot.function("identity").unwrap().revision, 1);
+            assert_eq!(snapshot.model("detector").unwrap().object_id, detector_id);
+            assert_ne!(
+                snapshot.table("photos").unwrap().object_id,
+                snapshot.table("clips").unwrap().object_id
+            );
+        }
+
+        #[test]
+        fn models_and_functions_share_one_callable_namespace() {
+            let temp = tempdir().unwrap();
+            let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
+            backend.create_model(&model("shared")).unwrap();
+            let error = backend.create_function(&function("shared")).unwrap_err();
+            assert_eq!(error.code, CatalogErrorCode::NameConflict);
+            assert!(error.message.contains("model"));
+
+            backend.create_function(&function("other")).unwrap();
+            let error = backend.create_model(&model("other")).unwrap_err();
+            assert_eq!(error.code, CatalogErrorCode::NameConflict);
+            assert!(error.message.contains("function"));
+        }
+
+        #[test]
+        fn concurrent_cross_kind_create_commits_exactly_one_callable() {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("catalog.db");
+            let model_backend = Arc::new(SqliteCatalogBackend::open(&path).unwrap());
+            let function_backend = Arc::new(SqliteCatalogBackend::open(&path).unwrap());
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let model_barrier = Arc::clone(&barrier);
+            let model = std::thread::spawn(move || {
+                model_barrier.wait();
+                model_backend.create_model(&model("shared"))
+            });
+            let function_barrier = Arc::clone(&barrier);
+            let function = std::thread::spawn(move || {
+                function_barrier.wait();
+                function_backend.create_function(&function("shared"))
+            });
+            barrier.wait();
+            let results = [model.join().unwrap(), function.join().unwrap()];
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            let error = results
+                .iter()
+                .find_map(|result| result.as_ref().err())
+                .expect("one create must lose the callable namespace race");
+            assert_eq!(error.code, CatalogErrorCode::NameConflict);
+        }
+
+        #[test]
+        fn rename_uses_the_callable_namespace_constraint() {
+            let temp = tempdir().unwrap();
+            let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
+            backend.create_model(&model("detector")).unwrap();
+            backend.create_function(&function("occupied")).unwrap();
+            let mut renamed = model("occupied");
+            let generation = backend
+                .snapshot(DEFAULT_CATALOG, DEFAULT_SCHEMA)
+                .unwrap()
+                .model("detector")
+                .unwrap()
+                .generation;
+            let error = backend
+                .update_model("detector", &renamed, generation)
+                .unwrap_err();
+            assert_eq!(error.code, CatalogErrorCode::NameConflict);
+            renamed.name = "free".to_owned();
+            backend
+                .update_model("detector", &renamed, generation)
+                .unwrap();
+        }
+
+        #[test]
+        fn resolved_model_versions_are_immutable_across_aggregate_updates() {
+            let temp = tempdir().unwrap();
+            let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
+            let mut definition = model("detector");
+            definition.versions[0].resolved = Some(ResolvedModelSpec {
+                resolved_source: "mock://person".to_owned(),
+                artifact_hash: Some("hash".to_owned()),
+                execution: ResolvedExecutionSpec::Generic {
+                    runtime: RuntimeSpec {
+                        kind: "onnx-runtime".to_owned(),
+                        protocol: None,
+                        options: BTreeMap::new(),
+                    },
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                },
+                semantic_fingerprint: "resolved".to_owned(),
+                volatile: false,
+            });
+            backend.create_model(&definition).unwrap();
+            let generation = backend
+                .snapshot(DEFAULT_CATALOG, DEFAULT_SCHEMA)
+                .unwrap()
+                .model("detector")
+                .unwrap()
+                .generation;
+            definition.versions[0].source = "mock://changed".to_owned();
+            let error = backend
+                .update_model("detector", &definition, generation)
+                .unwrap_err();
+            assert_eq!(error.code, CatalogErrorCode::Conflict);
+            assert!(error.message.contains("immutable"));
         }
     }
 }

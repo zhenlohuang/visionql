@@ -4,7 +4,7 @@ use tokio::runtime::Runtime;
 
 use crate::catalog::CatalogStore;
 use crate::media::MediaRuntime;
-use crate::models::{ModelRuntime, PipelineRegistry};
+use crate::models::{BuiltinModels, ModelRuntime, PipelineRegistry};
 use crate::{EngineConfig, Result, SessionBuilder};
 
 #[derive(Debug, Clone)]
@@ -19,6 +19,7 @@ pub(crate) struct EngineInner {
     pub(crate) catalog: Arc<CatalogStore>,
     pub(crate) media: Arc<MediaRuntime>,
     pub(crate) pipelines: Arc<PipelineRegistry>,
+    pub(crate) builtins: Arc<BuiltinModels>,
     pub(crate) models: Arc<ModelRuntime>,
 }
 
@@ -29,6 +30,11 @@ impl Engine {
         let runtime = Arc::new(Runtime::new()?);
         let media = Arc::new(MediaRuntime::new());
         let pipelines = Arc::new(PipelineRegistry::builtins());
+        let builtins = Arc::new(BuiltinModels::new(
+            config.vql_home().join("models"),
+            config.model_cache_dir().to_path_buf(),
+            Arc::clone(&pipelines),
+        ));
         let models = Arc::new(ModelRuntime::new(
             Arc::clone(&catalog),
             Arc::clone(&media),
@@ -41,6 +47,7 @@ impl Engine {
                 catalog,
                 media,
                 pipelines,
+                builtins,
                 models,
             }),
         })

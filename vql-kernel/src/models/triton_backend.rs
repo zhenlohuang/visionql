@@ -14,7 +14,9 @@ use super::postprocess::canonical_detection_output;
 use super::registry::{
     RuntimeFactory, RuntimeResolution, deserialize_model_options, invalid_option,
 };
-use crate::catalog::{ModelDef, ModelType, ResolvedExecutionSpec, ResolvedModelDef, RuntimeSpec};
+use crate::catalog::{
+    ModelInterface, ModelType, ModelVersion, ResolvedExecutionSpec, ResolvedModelDef, RuntimeSpec,
+};
 use crate::resources::{QueryBudget, QueryReservation};
 use crate::{ErrorCode, Result, VqlError};
 
@@ -33,9 +35,9 @@ struct TritonOptions {
 impl TritonOptions {
     fn parse(options: &BTreeMap<String, serde_json::Value>) -> Result<Self> {
         let options: Self = deserialize_model_options("TRITON_INFERENCE_SERVER", options)?;
-        validate_path_segment("WITH.model", &options.model)?;
+        validate_path_segment("OPTIONS.model", &options.model)?;
         if let Some(version) = &options.version {
-            validate_path_segment("WITH.version", version)?;
+            validate_path_segment("OPTIONS.version", version)?;
         }
         Ok(options)
     }
@@ -66,21 +68,26 @@ impl RuntimeFactory for TritonRuntimeFactory {
         SUPPORTED_TYPES
     }
 
-    fn validate_declaration(&self, model: &ModelDef) -> Result<()> {
-        validate_endpoint(&model.source)?;
-        TritonOptions::parse(&model.options).map(|_| ())
+    fn validate_declaration(
+        &self,
+        _interface: &ModelInterface,
+        version: &ModelVersion,
+    ) -> Result<()> {
+        validate_endpoint(&version.source)?;
+        TritonOptions::parse(&version.options).map(|_| ())
     }
 
     async fn resolve(
         &self,
-        model: &ModelDef,
+        interface: &ModelInterface,
+        version: &ModelVersion,
         _cache_dir: &std::path::Path,
         cancel: CancellationToken,
     ) -> Result<RuntimeResolution> {
-        self.validate_declaration(model)?;
-        let options = TritonOptions::parse(&model.options)?;
+        self.validate_declaration(interface, version)?;
+        let options = TritonOptions::parse(&version.options)?;
         let backend =
-            TritonServiceBackend::new(&model.source, &options.model, options.version.as_deref())?;
+            TritonServiceBackend::new(&version.source, &options.model, options.version.as_deref())?;
         tokio::select! {
             _ = cancel.cancelled() => {
                 return Err(VqlError::new(ErrorCode::QueryCancelled, "model resolve cancelled"));
@@ -88,12 +95,12 @@ impl RuntimeFactory for TritonRuntimeFactory {
             result = backend.validate_metadata() => result?,
         }
         Ok(RuntimeResolution {
-            resolved_source: model.source.clone(),
+            resolved_source: version.source.clone(),
             artifact_hash: None,
             execution: ResolvedExecutionSpec::Service {
                 runtime: options.runtime_spec(),
             },
-            volatile: options.version.is_none(),
+            volatile: true,
         })
     }
 
@@ -188,9 +195,9 @@ impl TritonServiceBackend {
         metadata_validated: bool,
     ) -> Result<Self> {
         validate_endpoint(endpoint)?;
-        validate_path_segment("WITH.model", model)?;
+        validate_path_segment("OPTIONS.model", model)?;
         if let Some(version) = version {
-            validate_path_segment("WITH.version", version)?;
+            validate_path_segment("OPTIONS.version", version)?;
         }
         let endpoint = endpoint.trim_end_matches('/');
         let metadata_url = if let Some(version) = version {

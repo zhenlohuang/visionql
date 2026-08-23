@@ -70,8 +70,7 @@ fn sql_behavior_results_keep_names_types_and_nullability() {
         &session,
         "SELECT COUNT(*) > 0 AS found
          FROM photos,
-              UNNEST(IMAGE_DETECTION(
-                'detector', image, classes => ['person'], min_confidence => 0.25
+              UNNEST(detector(image, classes => ['person'], min_confidence => 0.25
               )) AS u(detection)",
         &[("found", DataType::Boolean, false)],
     );
@@ -88,7 +87,7 @@ fn sql_behavior_results_keep_names_types_and_nullability() {
     assert_query_schema(
         &session,
         "WITH inferred AS (
-           SELECT width, IMAGE_DETECTION('detector', image) AS detections
+           SELECT width, detector(image) AS detections
            FROM photos
          )
          SELECT
@@ -107,8 +106,7 @@ fn sql_behavior_results_keep_names_types_and_nullability() {
         "WITH per_window AS (
            SELECT
              TUMBLE(ts, INTERVAL '5' SECOND) AS window_start,
-             SUM(CARDINALITY(IMAGE_DETECTION(
-               'detector', frame, classes => ['person'], min_confidence => 0.5
+             SUM(CARDINALITY(detector(frame, classes => ['person'], min_confidence => 0.5
              ))) AS people
            FROM clips
            GROUP BY 1

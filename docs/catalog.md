@@ -22,15 +22,27 @@ The default namespace is `vql.default`:
 - `default` is the default Schema;
 - an unqualified SQL name such as `photos` resolves as `vql.default.photos`.
 
-Every relation provider occupies the Table namespace. Models and Functions have separate namespaces. Object names are case-insensitive and normalize to lowercase, including names written as quoted SQL identifiers. `RESOLVE MODEL detector` is the explicit transition from a Model declaration to a resolved execution contract.
+Every relation provider occupies the Table namespace. Models and Functions share one callable namespace, while their Catalog kinds and lifecycle remain distinct. SQLite stores callable identity in a table whose primary key is `(catalog_name, schema_name, name)` and records the owning kind separately, so the database constraint prevents concurrent creates or renames from claiming one callable name. Object names are case-insensitive and normalize to lowercase, including names written as quoted SQL identifiers. `VQL_*` and the `vql.builtin` schema are release-managed reservations.
 
 | Object | Stored definition |
 |---|---|
 | Table | Provider variant with its options, location or sanitized endpoint, optional credential reference, comment/properties/owner metadata, and the Arrow schema; capabilities are derived from the provider rather than stored |
-| Model | Type, raw `FROM` location, Runtime kind, Runtime-scoped `WITH` options, declaration fingerprint, plus an optional resolved specification holding the resolved source, artifact hash, execution mode, semantic fingerprint, and volatility |
-| Function | Parameter names and types, return type, normalized SQL-macro expression or Python `module:function` entry point, and a semantic fingerprint |
+| Model | Immutable expanded interface, comment, live named versions, the initial version declaration fingerprint, and one optional default pointer. Each version stores raw source, Runtime, flat options, declaration fingerprint, creation time, and an optional resolved contract with source/hash, execution, semantic fingerprint, and volatility |
+| Function | Parameter names and types, inferred constant-only parameter names, return type, normalized SQL-macro expression or Python `module:function` entry point, and a semantic fingerprint |
 
-Typed inference calls are query syntax, not Function objects. Their constant Model names resolve from the statement's immutable definition snapshot.
+Model calls are query syntax, not Function objects. The call target and selected version resolve from the statement's immutable definition snapshot.
+
+### Callable Objects and Model Versions
+
+Callable object identity is case-insensitive, but Model version names are case-sensitive strings. The version name `default` is reserved case-insensitively because `default_version` is the aggregate's publication pointer, not a version alias.
+
+`CREATE MODEL` persists the expanded interface and an initial version declaration. Later `ADD VERSION` mutations inherit that exact interface and cannot re-expand a capability preset or declare another signature. Resolving a version pins its execution contract; later revisions of that Model must preserve the resolved entry byte-for-byte. Local and cached artifacts are immutable by digest. Service-backed versions are recorded as volatile because their routing version cannot prove that the server will retain the same weights.
+
+Resolving the exact initial declaration establishes the first default. An added version never publishes itself, and dropping then reusing the initial version name does not restore that right. Moving the default is an explicit atomic mutation that may target only a live resolved version. The default version and the last live version cannot be dropped; callers must publish another version first or drop the whole Model.
+
+Function bodies store computation rather than Model ownership. Model references in SQL functions resolve from the query snapshot when the body expands, so dropping a referenced Model does not cascade into Function deletion. Function definitions also persist parameters inferred to occupy constant-only Model positions.
+
+The `vql.builtin` schema is reserved for release-managed identities. User DDL cannot create, alter, rename, or drop objects in that schema. The v0.1 YOLO26 classifier and detector used by `VQL_CLASSIFY` and `VQL_EXTRACT` are kernel-owned rather than Catalog Models, so they do not appear in Catalog snapshots, Unity Catalog responses, `SHOW MODELS`, or internal object-revision history.
 
 ## Tables and Provider Capabilities
 
@@ -128,11 +140,11 @@ The Catalog owns only `catalog/vql.db` in this layout. Hosts own `config.toml` l
 
 `CatalogBackend` is the storage port. `CatalogStore` provides default-namespace operations over any `Arc<dyn CatalogBackend>`. The `sqlite` feature implements the port at `$VQL_HOME/catalog/vql.db`. Other backends must preserve the same domain, transaction, snapshot, and wire-translation contracts.
 
-Every definition mutation commits atomically. The SQLite backend keeps `catalogs` and `schemas` rows for the namespace, an append-only `revisions` log holding each definition as JSON plus its Arrow IPC schema, and an `objects` table pointing every live `(catalog, schema, kind, name)` at its head revision. Revision rows are never rewritten; `DROP` appends a tombstone revision and removes the object head so new planning cannot resolve the name. Table generations referenced by media locators remain identifiable, but a new media read must still reauthorize against current Catalog state.
+Every definition mutation commits atomically. The SQLite backend keeps `catalogs` and `schemas` rows for the namespace, an append-only `object_revisions` log holding each definition as JSON plus its Arrow IPC schema, and an `objects` table pointing every live `(catalog, schema, kind, name)` at its head generation. Each newly created Table, Model, or Function starts at object revision 1; only mutations of that same live object increment its revision. A separate global generation is an opaque storage key used for exact historical lookup and compare-and-swap, never a SQL or Unity Catalog field. Revision rows are never rewritten; `DROP` appends a tombstone revision and removes the object head so new planning cannot resolve the name. Model mutations compare-and-swap the opaque head generation and verify that every already-resolved version is carried forward byte-for-byte. Dropping a version removes it from the live head while history retains it; a later explicit add may reuse the version name.
 
-A reader captures one `DefinitionSnapshot` containing the current Tables, Models, and Functions. The snapshot is immutable and detached from the store, so later mutations are invisible to everything already holding one. That is the whole consistency contract the Catalog offers; how a planned statement pins and consumes a snapshot belongs to the [Kernel Design](./kernel.md#immutable-query-definition-snapshot).
+A reader captures one `DefinitionSnapshot` containing current Tables, Model aggregates, and Functions. The snapshot is immutable and detached from the store, so later mutations—including moving a Model default—are invisible to everything already holding one. That is the whole consistency contract the Catalog offers; how a planned statement pins and consumes a snapshot belongs to the [Kernel Design](./kernel.md#immutable-query-definition-snapshot).
 
-Internal revisions support consistent execution and compare-and-swap Model resolution. They are not a public object-versioning API. SQLite initializes the current schema directly and defines no legacy import or migration chain.
+Object revisions and storage generations are internal Catalog state and do not appear in DDL results or `SHOW` output. Public Model versions are named entries inside the Model aggregate and are independent of internal object revisions. SQLite initializes the current schema directly and defines no legacy import or migration chain.
 
 Schemas are stored as Arrow IPC. Secrets, tokens, signed URLs, and plaintext credentials are never persisted; definitions contain only opaque secret references. Catalog output and `SHOW CREATE` sanitize endpoint information and secret references.
 

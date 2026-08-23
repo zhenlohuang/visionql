@@ -9,7 +9,9 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 **Goal:** Install VisionQL with `pip` and run visual queries locally, without a VisionQL service.
 
 - [x] Query image and video directories with native `IMAGE`, `VIDEO`, and `BOX2D` types.
-- [x] Run typed object detection with `CREATE MODEL`, `RESOLVE MODEL`, and `IMAGE_DETECTION` using local ONNX or remote Triton models.
+- [x] Run direct, version-bound Model calls with minimal `CREATE MODEL`, resolve-time introspection, local ONNX or remote Triton execution, and callable-namespace lifecycle statements.
+- [x] Provide generic `VECTOR`/`TENSOR` signatures and inferred constant-only Function parameters.
+- [x] Provide `VQL_CLASSIFY` and `VQL_EXTRACT` IMAGE execution through release-managed YOLO26n classification and detection models, with typed STRING/BINARY overloads returning `FEATURE_NOT_AVAILABLE`.
 - [x] Extend queries with SQL functions and in-process Python UDFs.
 - [x] Analyze recorded video and live RTSP streams with the same SQL, including event time, watermarks, `TUMBLE` windows, and reconnects.
 - [x] Return foreground query results directly or write them to Kafka tables with bounded backpressure.
@@ -44,6 +46,7 @@ These capabilities are not yet scheduled:
 - Lower-cost queries through model cascades, inference reuse, cost estimates, sampling, and ROI cropping.
 - More streaming workloads through tracking, additional window types, VLM predicates, Kafka input, and cross-stream joins.
 - Agent and workflow integrations through MCP and reusable scenario packages.
+- General semantic image classification, text/document execution for the AI built-ins, and user-defined image-classification capability Models.
 - Cluster deployment, exactly-once delivery, multi-tenancy, auditing, and WASM UDFs.
 - Edge-to-cloud query partitioning and edge fleet management.
 - Reproducible datasets, benchmarks, and performance regression gates.

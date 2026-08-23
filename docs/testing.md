@@ -47,7 +47,7 @@ Run or list the cases with:
 ```bash
 cargo test -p vql-testing --test sql --locked
 cargo test -p vql-testing --test sql --locked -- --list
-VQL_TEST_CASE=functions/image_detection cargo test -p vql-testing --test sql --locked
+VQL_TEST_CASE=functions/model_call cargo test -p vql-testing --test sql --locked
 ```
 
 Every `.slt` file is a separate Cargo test and receives a fresh `Engine`, catalog, and temporary
@@ -77,17 +77,30 @@ Cases may enable substitution and use:
 | `${IMAGES_LOCATION}` | `data/datasets/images/coco128/images` |
 | `${VIDEOS_LOCATION}` | `data/datasets/videos/sample-videos` |
 | `${MODEL}` | `data/models/yolo26n.onnx` |
+| `${BUILTIN_DETECTION_MODEL}` | Copies `data/models/yolo26n.onnx` to the isolated Engine's `$VQL_HOME/models/yolo26n.onnx` |
+| `${BUILTIN_CLASSIFICATION_MODEL}` | Copies `data/models/yolo26n-cls.onnx` to the isolated Engine's `$VQL_HOME/models/yolo26n-cls.onnx` |
 
 Fetch real fixtures with:
 
 ```bash
 python scripts/fetch_datasets.py
-python scripts/export_yolo26.py --size n
+python scripts/export_yolo26.py --task detect --size n
+python scripts/export_yolo26.py --task classify --size n
 ```
 
 Keep one behavior per `.slt` file. Put prerequisite statements before the assertion they support.
 Explicit teardown is unnecessary because every file owns an isolated temporary catalog; lifecycle
 behavior such as `DROP` belongs in its own case or a kernel owner test.
+
+## Model and Function contract coverage
+
+Model and Function redesign contracts are split by owning boundary:
+
+- Catalog owner tests pin the cross-kind callable-name constraint under concurrent creates and renames, immutable resolved versions, initial/default publication rules, version tombstones and reuse, and snapshot isolation from concurrent aggregate mutations.
+- Kernel parser and DDL tests pin both `CREATE MODEL` interface forms, flat option ownership, Runtime inference, every `ALTER MODEL` lifecycle constraint, sanitized multi-version `SHOW CREATE MODEL`, and the schemas of `SHOW MODELS`, `SHOW MODEL VERSIONS`, `SHOW FUNCTIONS`, and `DESCRIBE`.
+- Planner tests prove direct Model-call extraction, constant `version =>` selection, per-version deduplication, volatile-call preservation, constant lifting, SQL-wrapper expansion, inferred constant-only parameters through nested Functions, built-in AI lowering, and stable non-IMAGE overload failures.
+- ONNX Runtime owner tests use synthetic graphs for introspected names and static shapes, ambiguous output formats and labels, generic multi-input binding, scalar `[N]` inputs, input-processing union errors, `VECTOR`/`TENSOR` metadata, dynamic-shape rejection, and NULL-row compaction and scatter.
+- Shared SQL conformance keeps one direct Model call and the two YOLO26-backed built-in AI functions visible through the public engine adapter. Real ONNX and Triton fixtures remain system evidence rather than substitutes for the owner tests above.
 
 ## Docker Compose, RTSP, and Kafka
 

@@ -16,7 +16,7 @@ use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::tokenizer::{Location, Token, Tokenizer, Whitespace};
 use tokio_util::sync::CancellationToken;
 
-use crate::models::ModelRuntime;
+use crate::models::{BuiltinModels, ModelRuntime};
 use crate::resources::QueryBudget;
 use crate::stream::TumblePlan;
 
@@ -27,7 +27,15 @@ pub(crate) fn normalize_function_ddl(
     sql: &str,
     snapshot: &crate::catalog::DefinitionSnapshot,
 ) -> crate::Result<String> {
-    normalize::expand_macros(sql, snapshot)
+    normalize::normalize_function_ddl(sql, snapshot)
+}
+
+pub(crate) fn infer_constant_parameters(
+    expression: &str,
+    parameters: &[(String, String)],
+    snapshot: &crate::catalog::DefinitionSnapshot,
+) -> crate::Result<Vec<String>> {
+    normalize::infer_constant_parameters(expression, parameters, snapshot)
 }
 
 pub(crate) struct PlannedStatement {
@@ -43,6 +51,7 @@ pub(crate) async fn plan_statement(
     context: &SessionContext,
     snapshot: &crate::catalog::DefinitionSnapshot,
     sql: &str,
+    builtins: Arc<BuiltinModels>,
     models: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -58,8 +67,16 @@ pub(crate) async fn plan_statement(
     } else {
         (plan, 0, None)
     };
-    let plan =
-        inference::extract_inference(plan, snapshot, models, fail_on_error, cancellation, budget)?;
+    let plan = inference::extract_inference(
+        plan,
+        snapshot,
+        builtins,
+        models,
+        fail_on_error,
+        cancellation,
+        budget,
+    )
+    .await?;
     let plan = annotate_explain(plan, snapshot)?;
     let dataframe = DataFrame::new(state, plan);
     let tumble = if stream_name.is_some() {

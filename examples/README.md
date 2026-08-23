@@ -74,7 +74,7 @@ with Maturin, run:
 python examples/python/image_filtering.py
 ```
 
-All examples use the same `yolo26n.onnx` export. `CREATE MODEL ... USING ONNX_RUNTIME WITH (...)`
+All examples use the same metadata-bearing `yolo26n.onnx` export. Minimal `CREATE MODEL`
 declares the Runtime-scoped input and output contract, and `RESOLVE MODEL` validates the artifact
-before use. Each `IMAGE_DETECTION` call supplies query-specific classes and confidence. Remove
+before use. Each direct Model call supplies query-specific classes and confidence. Remove
 `data/.vql/` when you intentionally want a fresh development catalog.

@@ -3,7 +3,7 @@ control substitution on
 query T
 CREATE TABLE photos USING IMAGES LOCATION '${IMAGES_LOCATION}';
 ----
-created table 'photos' at revision 1
+created table 'photos'
 
 query II
 SELECT width, height

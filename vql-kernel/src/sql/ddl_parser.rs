@@ -3,7 +3,9 @@ use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 
 use std::collections::BTreeMap;
 
-use super::ast::{CreateModel, CreateTable, ShowKind, TableColumn, VqlStatement};
+use super::ast::{
+    AlterModel, CreateModel, CreateTable, ModelInterfaceSpec, ShowKind, TableColumn, VqlStatement,
+};
 use crate::catalog::{
     EventTimePolicy, KafkaTableConfig, ModelType, RtspTableConfig, RtspTransport, TableProvider,
 };
@@ -24,7 +26,7 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
         }),
         "CREATE" => parse_create(&tokens),
         "RESOLVE" => parse_resolve(&tokens),
-        "ALTER" => invalid("ALTER is not supported; DROP and recreate the object"),
+        "ALTER" => parse_alter(&tokens),
         "DROP" => parse_drop(&tokens),
         "SHOW" => parse_show(&tokens),
         "DESCRIBE" | "DESC" => parse_describe(&tokens),
@@ -49,13 +51,21 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
 }
 
 fn parse_resolve(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() != 3 {
-        return invalid("expected RESOLVE MODEL <name>");
-    }
     expect_word(tokens.get(1), "MODEL")?;
-    Ok(VqlStatement::ResolveModel {
-        name: identifier(tokens.get(2), "model name")?,
-    })
+    let mut index = 2;
+    let name = qualified_identifier(tokens, &mut index, "model name")?;
+    let version = if token_is(tokens.get(index), "VERSION") {
+        index += 1;
+        let version = string_literal(tokens.get(index))?;
+        index += 1;
+        Some(version)
+    } else {
+        None
+    };
+    if index != tokens.len() {
+        return invalid("expected RESOLVE MODEL <name> [VERSION '<version>']");
+    }
+    Ok(VqlStatement::ResolveModel { name, version })
 }
 
 fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
@@ -492,51 +502,302 @@ fn parse_duration_ms(value: &str) -> Result<i64> {
 }
 
 fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() < 9 {
-        return invalid(
-            "expected CREATE MODEL <name> TYPE OBJECT_DETECTION FROM '<source>' USING <runtime>",
-        );
-    }
-    let name = identifier(tokens.get(2), "model name")?;
-    expect_word(tokens.get(3), "TYPE")?;
-    let model_type = match word(tokens.get(4)).as_deref() {
-        Some("OBJECT_DETECTION") => ModelType::ObjectDetection,
-        Some("IMAGE_EMBEDDING") | Some("TEXT_EMBEDDING") => {
-            return Err(VqlError::feature(
-                "embedding Model types are not available",
-                "v0.3",
-            ));
-        }
-        Some("IMAGE_CLASSIFICATION") | Some("TEXT_GENERATION") => {
-            return Err(VqlError::feature(
-                "this Model type is not available",
-                "未排期",
-            ));
-        }
-        _ => return invalid("the only supported Model TYPE is OBJECT_DETECTION"),
+    let mut index = 2;
+    let if_not_exists = if token_is(tokens.get(index), "IF") {
+        index += 1;
+        expect_word(tokens.get(index), "NOT")?;
+        index += 1;
+        expect_word(tokens.get(index), "EXISTS")?;
+        index += 1;
+        true
+    } else {
+        false
     };
-    expect_word(tokens.get(5), "FROM")?;
-    let source = string_literal(tokens.get(6))?;
-    expect_word(tokens.get(7), "USING")?;
-    let runtime_kind = identifier(tokens.get(8), "Runtime")?
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    let mut index = 9;
+    let name = qualified_identifier(tokens, &mut index, "model name")?;
+    let interface = if token_is(tokens.get(index), "TYPE") {
+        index += 1;
+        let model_type = match word(tokens.get(index)).as_deref() {
+            Some("OBJECT_DETECTION") => ModelType::ObjectDetection,
+            Some("IMAGE_CLASSIFICATION") => {
+                return Err(VqlError::feature(
+                    "the IMAGE_CLASSIFICATION Model capability is not available",
+                    "未排期",
+                ));
+            }
+            Some("IMAGE_EMBEDDING" | "TEXT_EMBEDDING") => {
+                return Err(VqlError::feature(
+                    "embedding Model capability presets are not available",
+                    "v0.3",
+                ));
+            }
+            Some("TEXT_GENERATION") => {
+                return Err(VqlError::feature(
+                    "the TEXT_GENERATION Model capability is not available",
+                    "未排期",
+                ));
+            }
+            _ => {
+                return invalid("the only supported Model TYPE is OBJECT_DETECTION");
+            }
+        };
+        index += 1;
+        ModelInterfaceSpec::Capability(model_type)
+    } else if tokens.get(index) == Some(&Token::LParen) {
+        ModelInterfaceSpec::Signature {
+            parameters: parse_model_parameters(tokens, &mut index)?,
+            return_type: {
+                expect_word(tokens.get(index), "RETURNS")?;
+                index += 1;
+                parse_type_until_clause(tokens, &mut index, &["VERSION", "FROM"])?
+            },
+        }
+    } else {
+        return invalid("CREATE MODEL requires TYPE <capability> or (<parameters>) RETURNS <type>");
+    };
+    let version = if token_is(tokens.get(index), "VERSION") {
+        index += 1;
+        let version = string_literal(tokens.get(index))?;
+        index += 1;
+        version
+    } else {
+        "v1".to_owned()
+    };
+    expect_word(tokens.get(index), "FROM")?;
+    index += 1;
+    let source = string_literal(tokens.get(index))?;
+    index += 1;
+    let runtime_kind = if token_is(tokens.get(index), "USING") {
+        index += 1;
+        let runtime = identifier(tokens.get(index), "Runtime")?
+            .to_ascii_lowercase()
+            .replace('_', "-");
+        index += 1;
+        Some(runtime)
+    } else {
+        None
+    };
     let mut options = BTreeMap::new();
-    if index < tokens.len() {
-        expect_word(tokens.get(index), "WITH")?;
+    if token_is(tokens.get(index), "OPTIONS") {
         parse_model_options(tokens, &mut index, &mut options)?;
     }
+    let comment = if token_is(tokens.get(index), "COMMENT") {
+        index += 1;
+        let comment = string_literal(tokens.get(index))?;
+        index += 1;
+        Some(comment)
+    } else {
+        None
+    };
     if index != tokens.len() {
         return invalid("unexpected tokens after CREATE MODEL");
     }
     Ok(VqlStatement::CreateModel(CreateModel {
+        if_not_exists,
         name,
-        model_type,
+        interface,
+        version,
         source,
         runtime_kind,
         options,
+        comment,
     }))
+}
+
+fn parse_model_parameters(tokens: &[Token], index: &mut usize) -> Result<Vec<(String, String)>> {
+    expect_token(
+        tokens.get(*index),
+        Token::LParen,
+        "'(' before Model parameters",
+    )?;
+    *index += 1;
+    let mut parameters = Vec::new();
+    while tokens.get(*index) != Some(&Token::RParen) {
+        let name = identifier(tokens.get(*index), "Model parameter name")?.to_ascii_lowercase();
+        *index += 1;
+        let data_type = parse_type_until_delimiter(tokens, index)?;
+        if parameters.iter().any(|(existing, _)| existing == &name) {
+            return invalid(format!("duplicate Model parameter '{name}'"));
+        }
+        parameters.push((name, data_type));
+        match tokens.get(*index) {
+            Some(Token::Comma) => *index += 1,
+            Some(Token::RParen) => {}
+            _ => return invalid("expected ',' or ')' after Model parameter"),
+        }
+    }
+    *index += 1;
+    if parameters.is_empty() {
+        return invalid("a generic Model requires at least one parameter");
+    }
+    Ok(parameters)
+}
+
+fn parse_type_until_delimiter(tokens: &[Token], index: &mut usize) -> Result<String> {
+    let start = *index;
+    let mut parens = 0usize;
+    let mut angles = 0usize;
+    while let Some(token) = tokens.get(*index) {
+        let spelling = token.to_string();
+        if parens == 0 && angles == 0 && matches!(token, Token::Comma | Token::RParen) {
+            break;
+        }
+        match spelling.as_str() {
+            "(" => parens += 1,
+            ")" => parens = parens.saturating_sub(1),
+            "<" => angles += 1,
+            ">" => angles = angles.saturating_sub(1),
+            _ => {}
+        }
+        *index += 1;
+    }
+    canonical_type_tokens(&tokens[start..*index])
+}
+
+fn parse_type_until_clause(
+    tokens: &[Token],
+    index: &mut usize,
+    clauses: &[&str],
+) -> Result<String> {
+    let start = *index;
+    let mut parens = 0usize;
+    let mut angles = 0usize;
+    while let Some(token) = tokens.get(*index) {
+        if parens == 0
+            && angles == 0
+            && word(Some(token)).is_some_and(|word| clauses.contains(&word.as_str()))
+        {
+            break;
+        }
+        match token.to_string().as_str() {
+            "(" => parens += 1,
+            ")" => parens = parens.saturating_sub(1),
+            "<" => angles += 1,
+            ">" => angles = angles.saturating_sub(1),
+            _ => {}
+        }
+        *index += 1;
+    }
+    canonical_type_tokens(&tokens[start..*index])
+}
+
+fn canonical_type_tokens(tokens: &[Token]) -> Result<String> {
+    if tokens.is_empty() {
+        return invalid("expected SQL type");
+    }
+    let mut value = tokens
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    for (from, to) in [
+        (" (", "("),
+        ("( ", "("),
+        (" )", ")"),
+        (" <", "<"),
+        (" >", ">"),
+        (" ,", ","),
+        (", ", ", "),
+    ] {
+        value = value.replace(from, to);
+    }
+    Ok(value)
+}
+
+fn parse_alter(tokens: &[Token]) -> Result<VqlStatement> {
+    expect_word(tokens.get(1), "MODEL")?;
+    let mut index = 2;
+    let name = qualified_identifier(tokens, &mut index, "model name")?;
+    let action = match word(tokens.get(index)).as_deref() {
+        Some("ADD") => {
+            index += 1;
+            expect_word(tokens.get(index), "VERSION")?;
+            index += 1;
+            let if_not_exists = if token_is(tokens.get(index), "IF") {
+                index += 1;
+                expect_word(tokens.get(index), "NOT")?;
+                index += 1;
+                expect_word(tokens.get(index), "EXISTS")?;
+                index += 1;
+                true
+            } else {
+                false
+            };
+            let version = string_literal(tokens.get(index))?;
+            index += 1;
+            expect_word(tokens.get(index), "FROM")?;
+            index += 1;
+            let source = string_literal(tokens.get(index))?;
+            index += 1;
+            let runtime_kind = if token_is(tokens.get(index), "USING") {
+                index += 1;
+                let runtime = identifier(tokens.get(index), "Runtime")?
+                    .to_ascii_lowercase()
+                    .replace('_', "-");
+                index += 1;
+                Some(runtime)
+            } else {
+                None
+            };
+            let mut options = BTreeMap::new();
+            if token_is(tokens.get(index), "OPTIONS") {
+                parse_model_options(tokens, &mut index, &mut options)?;
+            }
+            AlterModel::AddVersion {
+                if_not_exists,
+                version,
+                source,
+                runtime_kind,
+                options,
+            }
+        }
+        Some("DROP") => {
+            index += 1;
+            expect_word(tokens.get(index), "VERSION")?;
+            index += 1;
+            let version = string_literal(tokens.get(index))?;
+            index += 1;
+            AlterModel::DropVersion { version }
+        }
+        Some("SET") => {
+            index += 1;
+            match word(tokens.get(index)).as_deref() {
+                Some("DEFAULT_VERSION") => {
+                    index += 1;
+                    expect_token(tokens.get(index), Token::Eq, "'=' after DEFAULT_VERSION")?;
+                    index += 1;
+                    let version = string_literal(tokens.get(index))?;
+                    index += 1;
+                    AlterModel::SetDefaultVersion { version }
+                }
+                Some("COMMENT") => {
+                    index += 1;
+                    expect_token(tokens.get(index), Token::Eq, "'=' after COMMENT")?;
+                    index += 1;
+                    let comment = string_literal(tokens.get(index))?;
+                    index += 1;
+                    AlterModel::SetComment { comment }
+                }
+                _ => return invalid("expected SET DEFAULT_VERSION or SET COMMENT"),
+            }
+        }
+        Some("RENAME") => {
+            index += 1;
+            expect_word(tokens.get(index), "TO")?;
+            index += 1;
+            let name = qualified_identifier(tokens, &mut index, "new model name")?;
+            AlterModel::RenameTo { name }
+        }
+        _ => {
+            return invalid(
+                "expected ALTER MODEL <name> ADD VERSION, DROP VERSION, SET, or RENAME TO",
+            );
+        }
+    };
+    if index != tokens.len() {
+        return invalid("unexpected tokens after ALTER MODEL");
+    }
+    Ok(VqlStatement::AlterModel { name, action })
 }
 
 fn parse_model_options(
@@ -545,7 +806,7 @@ fn parse_model_options(
     options: &mut BTreeMap<String, serde_json::Value>,
 ) -> Result<()> {
     *index += 1;
-    expect_token(tokens.get(*index), Token::LParen, "'(' after WITH")?;
+    expect_token(tokens.get(*index), Token::LParen, "'(' after OPTIONS")?;
     *index += 1;
     while tokens.get(*index) != Some(&Token::RParen) {
         let key = dotted_identifier(tokens, index, "Model option")?;
@@ -712,25 +973,34 @@ fn validate_kafka_topic(topic: &str) -> Result<()> {
 }
 
 fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() != 3 {
+    let kind = singular_kind(tokens.get(1))?;
+    let mut index = 2;
+    let name = qualified_identifier(tokens, &mut index, "object name")?;
+    if index != tokens.len() {
         return invalid("expected DROP <object kind> <name>");
     }
-    let kind = singular_kind(tokens.get(1))?;
-    Ok(VqlStatement::Drop {
-        kind,
-        name: identifier(tokens.get(2), "object name")?,
-    })
+    Ok(VqlStatement::Drop { kind, name })
 }
 
 fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
     if token_is(tokens.get(1), "CREATE") {
-        if tokens.len() != 4 {
+        let mut index = 3;
+        let name = qualified_identifier(tokens, &mut index, "object name")?;
+        if index != tokens.len() {
             return invalid("expected SHOW CREATE <object kind> <name>");
         }
         return Ok(VqlStatement::ShowCreate {
             kind: singular_kind(tokens.get(2))?,
-            name: identifier(tokens.get(3), "object name")?,
+            name,
         });
+    }
+    if token_is(tokens.get(1), "MODEL") && token_is(tokens.get(2), "VERSIONS") {
+        let mut index = 3;
+        let name = qualified_identifier(tokens, &mut index, "model name")?;
+        if index != tokens.len() {
+            return invalid("expected SHOW MODEL VERSIONS <name>");
+        }
+        return Ok(VqlStatement::ShowModelVersions { name });
     }
     if tokens.len() != 2 {
         return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or SHOW CREATE <kind> <name>");
@@ -754,12 +1024,20 @@ fn singular_kind(token: Option<&Token>) -> Result<ShowKind> {
 }
 
 fn parse_describe(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() == 2 {
-        Ok(VqlStatement::Describe {
-            name: identifier(tokens.get(1), "table name")?,
-        })
+    let mut index = 1;
+    let kind = match word(tokens.get(index)).as_deref() {
+        Some("TABLE" | "MODEL" | "FUNCTION") => {
+            let kind = singular_kind(tokens.get(index))?;
+            index += 1;
+            kind
+        }
+        _ => ShowKind::Tables,
+    };
+    let name = qualified_identifier(tokens, &mut index, "object name")?;
+    if index == tokens.len() {
+        Ok(VqlStatement::Describe { kind, name })
     } else {
-        invalid("expected DESCRIBE <table>")
+        invalid("expected DESCRIBE [TABLE | MODEL | FUNCTION] <name>")
     }
 }
 
@@ -800,6 +1078,18 @@ fn identifier(token: Option<&Token>, label: &str) -> Result<String> {
         Some(Token::Word(word)) => Ok(word.value.clone()),
         _ => invalid(format!("expected {label}")),
     }
+}
+
+fn qualified_identifier(tokens: &[Token], index: &mut usize, label: &str) -> Result<String> {
+    let mut name = identifier(tokens.get(*index), label)?;
+    *index += 1;
+    while tokens.get(*index) == Some(&Token::Period) {
+        *index += 1;
+        name.push('.');
+        name.push_str(&identifier(tokens.get(*index), label)?);
+        *index += 1;
+    }
+    Ok(name)
 }
 
 fn string_literal(token: Option<&Token>) -> Result<String> {
@@ -992,27 +1282,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_runtime_scoped_model_options() {
+    fn parses_flat_model_options_and_optional_runtime() {
         let parsed = parse_statement(
             "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'file:///model.onnx' \
              USING ONNX_RUNTIME \
-             WITH (input={name='images', width=32, height=24}, \
-                   output={name='output0', format='yolo_e2e', labels=['person']})",
+             OPTIONS (input_name='images', image_size=[32, 24], \
+                      output_name='output0', format='yolo_e2e', labels=['person'])",
         )
         .unwrap();
         let VqlStatement::CreateModel(create) = parsed else {
             panic!("expected CREATE MODEL")
         };
 
-        assert_eq!(create.runtime_kind, "onnx-runtime");
-        assert_eq!(
-            create.options["input"],
-            serde_json::json!({"name": "images", "width": 32, "height": 24})
-        );
-        assert_eq!(
-            create.options["output"],
-            serde_json::json!({"name": "output0", "format": "yolo_e2e", "labels": ["person"]})
-        );
+        assert_eq!(create.runtime_kind.as_deref(), Some("onnx-runtime"));
+        assert_eq!(create.options["image_size"], serde_json::json!([32, 24]));
+        assert_eq!(create.options["labels"], serde_json::json!(["person"]));
     }
 
     #[test]
@@ -1021,7 +1305,72 @@ mod tests {
             parse_statement("RESOLVE MODEL detector").unwrap(),
             VqlStatement::ResolveModel {
                 name: "detector".to_owned(),
+                version: None,
             }
+        );
+        assert_eq!(
+            parse_statement("RESOLVE MODEL detector VERSION 'blue'").unwrap(),
+            VqlStatement::ResolveModel {
+                name: "detector".to_owned(),
+                version: Some("blue".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_generic_models_and_version_lifecycle() {
+        let VqlStatement::CreateModel(create) = parse_statement(
+            "CREATE MODEL features(image IMAGE, scale FLOAT) \
+             RETURNS TENSOR(FLOAT32, 2, 3) VERSION 'release-1' \
+             FROM './features.onnx' OPTIONS (image.preprocess='imagenet', \
+                                              scale.input_name='gain')",
+        )
+        .unwrap() else {
+            panic!("expected CREATE MODEL")
+        };
+        assert_eq!(create.version, "release-1");
+        assert_eq!(
+            create.options["image.preprocess"],
+            serde_json::json!("imagenet")
+        );
+        assert_eq!(
+            create.interface,
+            ModelInterfaceSpec::Signature {
+                parameters: vec![
+                    ("image".to_owned(), "IMAGE".to_owned()),
+                    ("scale".to_owned(), "FLOAT".to_owned()),
+                ],
+                return_type: "TENSOR(FLOAT32, 2, 3)".to_owned(),
+            }
+        );
+        assert!(matches!(
+            parse_statement(
+                "ALTER MODEL features ADD VERSION IF NOT EXISTS 'release-2' FROM './v2.onnx'"
+            )
+            .unwrap(),
+            VqlStatement::AlterModel {
+                action: AlterModel::AddVersion { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_statement("SHOW MODEL VERSIONS features").unwrap(),
+            VqlStatement::ShowModelVersions {
+                name: "features".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_statement("DESCRIBE MODEL features").unwrap(),
+            VqlStatement::Describe {
+                kind: ShowKind::Models,
+                name: "features".to_owned()
+            }
+        );
+        assert!(
+            parse_statement(
+                "ALTER MODEL features ADD VERSION 'bad' TYPE OBJECT_DETECTION FROM './bad.onnx'"
+            )
+            .is_err()
         );
     }
 
@@ -1059,7 +1408,7 @@ mod tests {
                 "v0.3",
             ),
             (
-                "CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'model.onnx' USING ONNX_RUNTIME",
+                "CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'model.onnx'",
                 "未排期",
             ),
             (

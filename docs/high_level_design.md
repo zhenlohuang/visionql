@@ -77,11 +77,11 @@ DataFusion `ExecutionPlan::execute` yields only `RecordBatch`. Watermarks, sourc
 
 ### Typed, optimizer-visible inference
 
-A Model `TYPE` owns its built-in inference function, input domain, semantic arguments, and result schema. Planning resolves the constant Model name and extracts the call into an explicit inference extension node. Runtime-specific loading, batching, and device behavior remain behind kernel registries.
+A Model is a callable Catalog object whose immutable interface comes from a capability preset or an explicit tensor signature. Planning binds the call target and version from one definition snapshot, then extracts the typed marker into an explicit inference extension node. The two v0.1 release-managed AI functions lower their IMAGE overloads through the same node: `VQL_CLASSIFY` binds the kernel-owned YOLO26n ImageNet classifier, while `VQL_EXTRACT` binds the YOLO26n COCO detector. Their STRING and BINARY overloads are typed but return `FEATURE_NOT_AVAILABLE`. Runtime-specific introspection, loading, batching, and device behavior remain behind kernel registries.
 
 ### Immutable definitions during execution
 
-Planning captures one Catalog definition snapshot. Replacing or dropping a Table, Model, or Function affects newly planned statements but does not change a running statement. The snapshot is process-local; a durable, serializable Query Manifest belongs to the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md).
+Planning captures one Catalog definition snapshot. Changing a Table, Model default/version aggregate, or Function affects newly planned statements but does not change a running statement. Model versions are immutable once resolved; publishing is the explicit default-version pointer. The snapshot is process-local; a durable, serializable Query Manifest belongs to the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md).
 
 ### Bounded resources and honest delivery
 
@@ -95,7 +95,9 @@ Multimodal values use standard Arrow storage with extension metadata. An unaware
 
 ### Extension boundaries
 
-Model types, PreProcessors, Runtimes, PostProcessors, Table providers, and logical extension nodes are registered behind narrow kernel interfaces. Unsupported syntax and configuration fail explicitly; parameters the implementation does not consume are rejected rather than stored silently.
+Capability presets, generic inference contracts, PreProcessors, Runtimes, PostProcessors, Table providers, and logical extension nodes are registered behind narrow kernel interfaces. Models and Functions share one callable namespace while retaining distinct lifecycle kinds; Tables remain separate. Unsupported syntax and configuration fail explicitly; parameters the implementation does not consume are rejected rather than stored silently.
+
+Engine construction performs no model I/O. Model declarations retain the explicit `RESOLVE MODEL` boundary before planning can bind them.
 
 Optimization follows the same order across providers: prune columns and time ranges, apply explicit sampling, eliminate identical immutable inference calls, batch remaining inference, then specialize for hardware.
 
@@ -159,7 +161,9 @@ Boundary rules:
 | One logical plan with bounded or epoch execution | Preserves shared SQL semantics without forcing control messages through `RecordBatch`. |
 | Epoch-scoped frame leases | Frame lifetime does not depend on whether rows survive filtering. |
 | Standard Arrow storage for multimodal values | Preserves ecosystem readability while keeping process-local state private. |
-| Explicit inference nodes | Enables type checking, deduplication, batching, and cancellation. |
+| Model names as direct call targets and explicit inference nodes | Keeps identity out of row data while enabling type checking, per-version deduplication, batching, and cancellation. |
+| Named immutable Model versions and an explicit default pointer | Makes publishing, rollback, snapshot pinning, and A/B calls visible and atomic. |
+| One callable namespace for Models and Functions | Makes collisions deterministic at DDL commit while preserving kind-specific lifecycle. |
 | One immutable definition snapshot per planned statement | Prevents concurrent DDL from changing a running result. |
 | SQLite behind `CatalogBackend` | Preserves zero-service startup without coupling the domain to one backend. |
 | In-memory allowlisted `TUMBLE` state | Gives attached execution bounded state without defining a recovery ABI. |

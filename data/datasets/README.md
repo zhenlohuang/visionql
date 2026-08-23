@@ -55,8 +55,8 @@ plausible. `manifest.json` carries the per-image counts by class name, so a quer
 
 ```sql
 SELECT uri,
-       CARDINALITY(IMAGE_DETECTION(
-         'yolo26n', image,
+       CARDINALITY(yolo26n(
+         image,
          classes => ['person'], min_confidence => 0.6
        )) AS people
 FROM photos

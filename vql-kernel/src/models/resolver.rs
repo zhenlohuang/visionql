@@ -40,7 +40,7 @@ pub(super) fn validate_onnx_source(source: &str, expected_sha256: Option<&str>) 
         let expected = expected_sha256.ok_or_else(|| {
             VqlError::new(
                 ErrorCode::InvalidOption,
-                "ONNX_RUNTIME requires WITH (sha256 = '...') for HTTP(S) artifacts",
+                "ONNX_RUNTIME requires OPTIONS (sha256 = '...') for HTTP(S) artifacts",
             )
         })?;
         validate_sha256(expected)?;

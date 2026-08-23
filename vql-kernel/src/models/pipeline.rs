@@ -268,6 +268,10 @@ impl TensorBatch {
         let length = self.values.len() * self.values.value_length() as usize;
         Ok(&values.values()[start..start + length])
     }
+
+    pub(super) fn into_array(self) -> ArrayRef {
+        Arc::new(self.values)
+    }
 }
 
 #[derive(Debug)]

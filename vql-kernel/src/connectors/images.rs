@@ -40,7 +40,7 @@ impl ImagesScanMetrics {
 #[derive(Debug)]
 pub(crate) struct ImagesTableProvider {
     root: PathBuf,
-    table_revision: i64,
+    table_generation: i64,
     recursive: bool,
     schema: SchemaRef,
     metrics: Arc<ImagesScanMetrics>,
@@ -49,7 +49,7 @@ pub(crate) struct ImagesTableProvider {
 impl ImagesTableProvider {
     pub(crate) fn try_new(
         root: impl Into<PathBuf>,
-        table_revision: i64,
+        table_generation: i64,
         recursive: bool,
     ) -> crate::Result<Self> {
         let root = root.into();
@@ -64,7 +64,7 @@ impl ImagesTableProvider {
         }
         Ok(Self {
             root,
-            table_revision,
+            table_generation,
             recursive,
             schema: images_schema(),
             metrics: Arc::new(ImagesScanMetrics::default()),
@@ -96,7 +96,7 @@ impl TableProvider for ImagesTableProvider {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(ImagesExec::new(
             self.root.clone(),
-            self.table_revision,
+            self.table_generation,
             self.recursive,
             Arc::clone(&self.schema),
             projection.cloned(),
@@ -108,7 +108,7 @@ impl TableProvider for ImagesTableProvider {
 
 struct ImagesExec {
     root: PathBuf,
-    table_revision: i64,
+    table_generation: i64,
     recursive: bool,
     source_schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -120,7 +120,7 @@ struct ImagesExec {
 impl ImagesExec {
     fn new(
         root: PathBuf,
-        table_revision: i64,
+        table_generation: i64,
         recursive: bool,
         source_schema: SchemaRef,
         projection: Option<Vec<usize>>,
@@ -136,7 +136,7 @@ impl ImagesExec {
         ));
         Self {
             root,
-            table_revision,
+            table_generation,
             recursive,
             source_schema,
             projection,
@@ -227,7 +227,7 @@ impl ExecutionPlan for ImagesExec {
         }
 
         let root = self.root.clone();
-        let table_revision = self.table_revision;
+        let table_generation = self.table_generation;
         let recursive = self.recursive;
         let source_schema = Arc::clone(&self.source_schema);
         let output_schema = self.output_schema();
@@ -255,7 +255,7 @@ impl ExecutionPlan for ImagesExec {
             if objects.is_empty() {
                 yield build_batch(
                     &root,
-                    table_revision,
+                    table_generation,
                     &source_schema,
                     &output_schema,
                     projection.as_deref(),
@@ -266,7 +266,7 @@ impl ExecutionPlan for ImagesExec {
             for chunk in objects.chunks(BATCH_SIZE) {
                 yield build_batch(
                     &root,
-                    table_revision,
+                    table_generation,
                     &source_schema,
                     &output_schema,
                     projection.as_deref(),
@@ -309,7 +309,7 @@ fn is_supported_image(relative: &str) -> bool {
 
 fn build_batch(
     root: &Path,
-    table_revision: i64,
+    table_generation: i64,
     source_schema: &SchemaRef,
     output_schema: &SchemaRef,
     projection: Option<&[usize]>,
@@ -342,7 +342,7 @@ fn build_batch(
         let (width, height) = dimensions.unzip();
         images.append(ImageRef::referenced(
             uri.clone(),
-            make_locator(table_revision, relative, None),
+            make_locator(table_generation, relative, None),
             width,
             height,
         ));

@@ -3,24 +3,24 @@ control substitution on
 query T
 CREATE TABLE clips USING VIDEOS LOCATION '${VIDEOS_LOCATION}' OPTIONS (fps = 1);
 ----
-created table 'clips' at revision 1
+created table 'clips'
 
 query T
-CREATE MODEL detector TYPE OBJECT_DETECTION FROM '${MODEL}' USING ONNX_RUNTIME;
+CREATE MODEL detector TYPE OBJECT_DETECTION FROM '${MODEL}'
+OPTIONS (image_size = 640, format = 'yolo_e2e', labels = 'coco80', box_format = 'xyxy');
 ----
-created model 'detector' at revision 2
+created model 'detector'
 
 query T
 RESOLVE MODEL detector;
 ----
-resolved model 'detector' at revision 3
+resolved model 'detector:v1'
 
 query IB
 WITH per_window AS (
   SELECT
     TUMBLE(ts, INTERVAL '5' SECOND) AS window_start,
-    SUM(CARDINALITY(IMAGE_DETECTION(
-      'detector', frame,
+    SUM(CARDINALITY(detector(frame,
       classes => ['person'], min_confidence => 0.5
     ))) AS people
   FROM clips

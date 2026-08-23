@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrow::array::{Array, StringArray, StructArray};
-use arrow::datatypes::{Field, Fields, SchemaRef};
+use arrow::datatypes::{Fields, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -30,8 +30,9 @@ use tokio_util::sync::CancellationToken;
 use crate::catalog::{
     DefinitionSnapshot, ModelType, ResolvedExecutionSpec, ResolvedModelDef, RuntimeSpec,
 };
+use crate::functions::BuiltinAiFunction;
 use crate::models::{
-    BoundInferenceParams, ModelRuntime, bind_inference_params, semantic_fingerprint,
+    BoundInferenceParams, BuiltinModels, ModelRuntime, bind_inference_params, semantic_fingerprint,
 };
 use crate::planner::sink::SinkExtensionPlanner;
 use crate::resources::QueryBudget;
@@ -39,13 +40,14 @@ use crate::resources::QueryBudget;
 #[derive(Clone)]
 struct InferenceNode {
     input: LogicalPlan,
-    input_expr: Expr,
+    input_exprs: Vec<Expr>,
     output_name: String,
     schema: DFSchemaRef,
     operation: String,
     model: ResolvedModelDef,
     invocation: BoundInferenceParams,
     invocation_fingerprint: String,
+    invocation_volatile: bool,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -56,35 +58,36 @@ impl InferenceNode {
     #[allow(clippy::too_many_arguments)]
     fn try_new(
         input: LogicalPlan,
-        input_expr: Expr,
+        input_exprs: Vec<Expr>,
         output_name: String,
         operation: String,
         model: ResolvedModelDef,
         invocation: BoundInferenceParams,
         invocation_fingerprint: String,
+        invocation_volatile: bool,
         runtime: Arc<ModelRuntime>,
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
         budget: QueryBudget,
     ) -> DataFusionResult<Self> {
         let result = DFSchema::from_unqualified_fields(
-            Fields::from(vec![Arc::new(Field::new(
-                &output_name,
-                crate::models::canonical_output_type(model.model_type),
-                true,
-            ))]),
+            Fields::from(vec![
+                crate::models::interface_output_field(&output_name, &model.interface, true)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            ]),
             HashMap::new(),
         )?;
         let schema = Arc::new(input.schema().join(&result)?);
         Ok(Self {
             input,
-            input_expr,
+            input_exprs,
             output_name,
             schema,
             operation,
             model,
             invocation,
             invocation_fingerprint,
+            invocation_volatile,
             runtime,
             fail_on_error,
             cancellation,
@@ -92,12 +95,12 @@ impl InferenceNode {
         })
     }
 
-    fn comparison_key(&self) -> (&str, &str, &str, &Expr) {
+    fn comparison_key(&self) -> (&str, &str, &str, &[Expr]) {
         (
             &self.output_name,
             &self.invocation_fingerprint,
             &self.model.semantic_fingerprint,
-            &self.input_expr,
+            &self.input_exprs,
         )
     }
 }
@@ -110,6 +113,7 @@ fn execution_summary(model: &ResolvedModelDef) -> (&RuntimeSpec, &str, &str) {
             post_processor,
         } => (runtime, &pre_processor.kind, &post_processor.kind),
         ResolvedExecutionSpec::Service { runtime } => (runtime, "service", "service"),
+        ResolvedExecutionSpec::Generic { runtime, .. } => (runtime, "generic", "generic"),
     }
 }
 
@@ -117,14 +121,20 @@ fn model_identity(model: &ResolvedModelDef) -> String {
     model
         .artifact_hash
         .as_ref()
-        .map(|hash| format!("artifact:{hash}"))
-        .unwrap_or_else(|| format!("semantic:{}", model.semantic_fingerprint))
+        .map(|hash| format!("{}@{}:artifact:{hash}", model.name, model.version))
+        .unwrap_or_else(|| {
+            format!(
+                "{}@{}:semantic:{}",
+                model.name, model.version, model.semantic_fingerprint
+            )
+        })
 }
 
 fn batching_owner(model: &ResolvedModelDef) -> &'static str {
     match model.execution {
         ResolvedExecutionSpec::Embedded { .. } => "visionql",
         ResolvedExecutionSpec::Service { .. } => "service",
+        ResolvedExecutionSpec::Generic { .. } => "visionql",
     }
 }
 
@@ -143,7 +153,7 @@ impl Debug for InferenceNode {
             .field("operation", &self.operation)
             .field("model", &self.model.name)
             .field("output", &self.output_name)
-            .field("input_expr", &self.input_expr)
+            .field("input_exprs", &self.input_exprs)
             .finish()
     }
 }
@@ -184,7 +194,7 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![self.input_expr.clone()]
+        self.input_exprs.clone()
     }
 
     fn prevent_predicate_push_down_columns(&self) -> HashSet<String> {
@@ -204,8 +214,8 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
             pre_processor,
             post_processor,
             batching_owner(&self.model),
-            self.model.volatile,
-            if self.model.volatile {
+            self.invocation_volatile,
+            if self.invocation_volatile {
                 "disabled"
             } else {
                 "enabled"
@@ -217,22 +227,23 @@ impl UserDefinedLogicalNodeCore for InferenceNode {
 
     fn with_exprs_and_inputs(
         &self,
-        mut exprs: Vec<Expr>,
+        exprs: Vec<Expr>,
         mut inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if exprs.len() != 1 || inputs.len() != 1 {
+        if exprs.is_empty() || inputs.len() != 1 {
             return Err(DataFusionError::Internal(
-                "InferenceNode requires one expression and one input".to_owned(),
+                "InferenceNode requires at least one expression and one input".to_owned(),
             ));
         }
         Self::try_new(
             inputs.remove(0),
-            exprs.remove(0),
+            exprs,
             self.output_name.clone(),
             self.operation.clone(),
             self.model.clone(),
             self.invocation.clone(),
             self.invocation_fingerprint.clone(),
+            self.invocation_volatile,
             Arc::clone(&self.runtime),
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
@@ -281,8 +292,8 @@ fn collect_explain_annotations(
             runtime.kind,
             post_processor,
             batching_owner(&node.model),
-            node.model.volatile,
-            if node.model.volatile { "disabled" } else { "enabled" },
+            node.invocation_volatile,
+            if node.invocation_volatile { "disabled" } else { "enabled" },
             decode_summary(&node.model),
             image_payload,
         ));
@@ -292,19 +303,33 @@ fn collect_explain_annotations(
     }
 }
 
-pub(crate) fn extract_inference(
+pub(crate) async fn extract_inference(
     plan: LogicalPlan,
     snapshot: &DefinitionSnapshot,
+    builtins: Arc<BuiltinModels>,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
 ) -> crate::Result<LogicalPlan> {
+    let requirements = validate_builtin_ai_inputs(&plan)?;
+    let mut builtin_models = ResolvedBuiltinModels::default();
+    if requirements.contains(&BuiltinAiFunction::Classify) {
+        let model = builtins.classifier(cancellation.clone()).await?;
+        runtime.register_builtin(&model)?;
+        builtin_models.classifier = Some(model);
+    }
+    if requirements.contains(&BuiltinAiFunction::Extract) {
+        let model = builtins.detector(cancellation.clone()).await?;
+        runtime.register_builtin(&model)?;
+        builtin_models.detector = Some(model);
+    }
     let mut volatile_id = 0_u64;
     plan.transform_up(|plan| {
         rewrite_plan_node(
             plan,
             snapshot,
+            &builtin_models,
             Arc::clone(&runtime),
             Arc::clone(&fail_on_error),
             cancellation.clone(),
@@ -316,10 +341,114 @@ pub(crate) fn extract_inference(
     .map_err(Into::into)
 }
 
+#[derive(Default)]
+struct ResolvedBuiltinModels {
+    classifier: Option<ResolvedModelDef>,
+    detector: Option<ResolvedModelDef>,
+}
+
+impl ResolvedBuiltinModels {
+    fn get(&self, function: BuiltinAiFunction) -> Option<&ResolvedModelDef> {
+        match function {
+            BuiltinAiFunction::Classify => self.classifier.as_ref(),
+            BuiltinAiFunction::Extract => self.detector.as_ref(),
+        }
+    }
+}
+
+fn validate_builtin_ai_inputs(plan: &LogicalPlan) -> crate::Result<HashSet<BuiltinAiFunction>> {
+    let mut requirements = HashSet::new();
+    validate_builtin_ai_node(plan, &mut requirements)?;
+    Ok(requirements)
+}
+
+fn validate_builtin_ai_node(
+    plan: &LogicalPlan,
+    requirements: &mut HashSet<BuiltinAiFunction>,
+) -> crate::Result<()> {
+    for input in plan.inputs() {
+        validate_builtin_ai_node(input, requirements)?;
+    }
+    let inputs = plan.inputs();
+    for expression in plan.expressions() {
+        let mut validation_error = None;
+        expression
+            .transform_up(|expression| {
+                let Expr::ScalarFunction(call) = &expression else {
+                    return Ok(Transformed::no(expression));
+                };
+                let Some(function) = BuiltinAiFunction::from_name(call.name()) else {
+                    return Ok(Transformed::no(expression));
+                };
+                if call.args.len() != 3 {
+                    validation_error = Some(crate::VqlError::new(
+                        crate::ErrorCode::Internal,
+                        format!(
+                            "{} was not normalized to three arguments",
+                            function.name().to_ascii_uppercase()
+                        ),
+                    ));
+                    return Ok(Transformed::no(expression));
+                }
+                let Some(input_plan) = inputs.first().filter(|_| inputs.len() == 1) else {
+                    validation_error = Some(crate::VqlError::new(
+                        crate::ErrorCode::InvalidSql,
+                        format!(
+                            "{} is only supported on a single-input plan",
+                            function.name().to_ascii_uppercase()
+                        ),
+                    ));
+                    return Ok(Transformed::no(expression));
+                };
+                let data_type = call.args[0].get_type(input_plan.schema())?;
+                if crate::types::is_image_storage(&data_type) {
+                    requirements.insert(function);
+                    return Ok(Transformed::no(expression));
+                }
+                let logical_type = builtin_input_type(&data_type);
+                if logical_type.is_some() || matches!(data_type, arrow::datatypes::DataType::Null) {
+                    validation_error = Some(crate::VqlError::feature(
+                        format!(
+                            "{} accepts {} input, but execution for that type is not implemented",
+                            function.name().to_ascii_uppercase(),
+                            logical_type.unwrap_or("non-IMAGE")
+                        ),
+                        "未排期",
+                    ));
+                } else {
+                    validation_error = Some(crate::VqlError::new(
+                        crate::ErrorCode::InvalidSql,
+                        format!(
+                            "{} input must be IMAGE, STRING, or BINARY; got {data_type}",
+                            function.name().to_ascii_uppercase()
+                        ),
+                    ));
+                }
+                Ok(Transformed::no(expression))
+            })
+            .data()
+            .map_err(crate::VqlError::from)?;
+        if let Some(error) = validation_error {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn builtin_input_type(data_type: &arrow::datatypes::DataType) -> Option<&'static str> {
+    use arrow::datatypes::DataType;
+    match data_type {
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Some("STRING"),
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => Some("BINARY"),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rewrite_plan_node(
     plan: LogicalPlan,
     snapshot: &DefinitionSnapshot,
+    builtin_models: &ResolvedBuiltinModels,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -340,56 +469,139 @@ fn rewrite_plan_node(
             let Expr::ScalarFunction(call) = &expr else {
                 return Ok(Transformed::no(expr));
             };
-            if !call.name().eq_ignore_ascii_case("image_detection") {
+            let builtin_function = BuiltinAiFunction::from_name(call.name());
+            if builtin_function.is_none() && snapshot.model(call.name()).is_none() {
                 return Ok(Transformed::no(expr));
             }
             if inputs.len() != 1 {
-                return Err(DataFusionError::Plan(
-                    "IMAGE_DETECTION is only supported on single-input plans".to_owned(),
-                ));
-            }
-            if !(2..=4).contains(&call.args.len()) {
                 return Err(DataFusionError::Plan(format!(
-                    "IMAGE_DETECTION expects model, image, and optional classes/min_confidence; got {} arguments",
-                    call.args.len()
+                    "callable '{}' is only supported on single-input plans",
+                    call.name()
                 )));
             }
-            let model_name = model_literal(&call.args[0])?;
-            let model = snapshot.model(&model_name).ok_or_else(|| {
-                DataFusionError::Plan(format!("model '{model_name}' does not exist"))
-            })?;
-            if model.definition.model_type != ModelType::ObjectDetection {
-                return Err(DataFusionError::Plan(format!(
-                    "IMAGE_DETECTION requires an OBJECT_DETECTION Model; '{}' has type {:?}",
-                    model.definition.name, model.definition.model_type
-                )));
-            }
-            let input_expr = call.args[1].clone();
-            let input_type = input_expr.get_type(inputs[0].schema())?;
-            if !crate::types::is_image_storage(&input_type) {
-                return Err(DataFusionError::Plan(format!(
-                    "IMAGE_DETECTION image argument must be IMAGE, got {input_type}"
-                )));
-            }
-            let classes = classes_literal(call.args.get(2))?;
-            let min_confidence = probability_literal(call.args.get(3))?;
-            let invocation = bind_inference_params(classes, min_confidence)
-                .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+            let (operation, model, input_exprs, invocation) =
+                if let Some(function) = builtin_function {
+                    if call.args.len() != 3 {
+                        return Err(DataFusionError::Plan(format!(
+                            "{} marker expects 3 normalized arguments; got {}",
+                            function.name().to_ascii_uppercase(),
+                            call.args.len()
+                        )));
+                    }
+                    let model = builtin_models.get(function).cloned().ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "built-in AI call was not resolved after input validation".to_owned(),
+                        )
+                    })?;
+                    let classes = classes_literal(call.args.get(1))?;
+                    let min_confidence = probability_literal(call.args.get(2))?;
+                    let invocation = bind_inference_params(classes, min_confidence)
+                        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+                    (
+                        function.name().to_ascii_uppercase(),
+                        model,
+                        vec![call.args[0].clone()],
+                        invocation,
+                    )
+                } else {
+                    let Some(model_object) = snapshot.model(call.name()) else {
+                        return Ok(Transformed::no(expr));
+                    };
+                    let expected_arguments = model_object.definition.interface.parameters.len()
+                        + model_object.definition.interface.semantic_arguments.len()
+                        + 1;
+                    if call.args.len() != expected_arguments {
+                        return Err(DataFusionError::Plan(format!(
+                            "model '{}' marker expects {expected_arguments} normalized arguments; got {}",
+                            call.name(),
+                            call.args.len()
+                        )));
+                    }
+                    let input_exprs = call.args
+                        [..model_object.definition.interface.parameters.len()]
+                        .to_vec();
+                    for (expression, parameter) in input_exprs
+                        .iter()
+                        .zip(&model_object.definition.interface.parameters)
+                    {
+                        let actual = expression.get_type(inputs[0].schema())?;
+                        let expected = crate::models::parse_boundary_type(&parameter.data_type)
+                            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                        let compatible = if parameter.data_type.eq_ignore_ascii_case("IMAGE") {
+                            crate::types::is_image_storage(&actual)
+                        } else {
+                            actual == expected
+                        };
+                        if !compatible {
+                            return Err(DataFusionError::Plan(format!(
+                                "model '{}' argument '{}' expects {}, got {actual}",
+                                model_object.definition.name, parameter.name, parameter.data_type
+                            )));
+                        }
+                    }
+                    let invocation = match model_object.definition.interface.capability {
+                        None => BoundInferenceParams::default(),
+                        Some(ModelType::ObjectDetection | ModelType::ImageClassification) => {
+                            let classes = classes_literal(call.args.get(1))?;
+                            let min_confidence = probability_literal(call.args.get(2))?;
+                            bind_inference_params(classes, min_confidence)
+                                .map_err(|error| DataFusionError::Plan(error.to_string()))?
+                        }
+                    };
+                    let version =
+                        version_literal(call.args.last().expect("version marker argument"))?
+                            .or_else(|| model_object.definition.default_version.clone())
+                            .ok_or_else(|| {
+                                DataFusionError::Plan(format!(
+                                    "model '{}' has no published default; run RESOLVE MODEL {}",
+                                    model_object.definition.name, model_object.definition.name
+                                ))
+                            })?;
+                    if model_object.definition.version(&version).is_none() {
+                        return Err(DataFusionError::Plan(format!(
+                            "unknown version '{version}' for model '{}'; known versions: {}",
+                            model_object.definition.name,
+                            model_object
+                                .definition
+                                .versions
+                                .iter()
+                                .map(|version| version.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )));
+                    }
+                    let model = model_object
+                        .definition
+                        .resolved_definition(&version)
+                        .ok_or_else(|| {
+                            DataFusionError::Plan(format!(
+                                "model '{}:{}' is not resolved; run RESOLVE MODEL {} VERSION '{}'",
+                                model_object.definition.name,
+                                version,
+                                model_object.definition.name,
+                                version
+                            ))
+                        })?;
+                    (
+                        model.name.clone(),
+                        model,
+                        input_exprs,
+                        invocation,
+                    )
+                };
             let invocation_fingerprint = semantic_fingerprint(&invocation);
-            let model = model.definition.resolved_definition().ok_or_else(|| {
-                DataFusionError::Plan(format!(
-                    "model '{}' is not resolved; run RESOLVE MODEL {}",
-                    model.definition.name, model.definition.name
-                ))
-            })?;
+            let invocation_volatile = model.volatile
+                || !model.interface.deterministic
+                || input_exprs.iter().any(Expr::is_volatile);
             let output_name = inference_output_name(
-                "IMAGE_DETECTION",
+                &operation,
                 &model,
                 &invocation_fingerprint,
-                &input_expr,
+                &input_exprs,
+                invocation_volatile,
                 volatile_id,
             );
-            let already_extracted = !model.volatile
+            let already_extracted = !invocation_volatile
                 && inputs[0]
                     .schema()
                     .field_with_unqualified_name(&output_name)
@@ -399,12 +611,13 @@ fn rewrite_plan_node(
                 inputs.push(LogicalPlan::Extension(Extension {
                     node: Arc::new(InferenceNode::try_new(
                         input,
-                        input_expr,
+                        input_exprs,
                         output_name.clone(),
-                        "IMAGE_DETECTION".to_owned(),
+                        operation,
                         model,
                         invocation,
                         invocation_fingerprint,
+                        invocation_volatile,
                         Arc::clone(&runtime),
                         Arc::clone(&fail_on_error),
                         cancellation.clone(),
@@ -430,15 +643,16 @@ fn inference_output_name(
     operation: &str,
     model: &ResolvedModelDef,
     invocation_fingerprint: &str,
-    input: &Expr,
+    inputs: &[Expr],
+    invocation_volatile: bool,
     volatile_id: &mut u64,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(operation.as_bytes());
     digest.update(model.semantic_fingerprint.as_bytes());
     digest.update(invocation_fingerprint.as_bytes());
-    digest.update(format!("{input:?}").as_bytes());
-    if model.volatile {
+    digest.update(format!("{inputs:?}").as_bytes());
+    if invocation_volatile {
         digest.update(volatile_id.to_le_bytes());
         *volatile_id += 1;
     }
@@ -450,22 +664,23 @@ fn inference_output_name(
     format!("__vql_inference_{suffix}")
 }
 
-fn model_literal(expr: &Expr) -> DataFusionResult<String> {
+fn version_literal(expr: &Expr) -> DataFusionResult<Option<String>> {
     let Expr::Literal(value, _) = strip_cast(expr) else {
         return Err(DataFusionError::Plan(
-            "IMAGE_DETECTION model must be a non-NULL string literal".to_owned(),
+            "model version must be a constant string".to_owned(),
         ));
     };
     match value {
+        ScalarValue::Null => Ok(None),
         ScalarValue::Utf8(Some(value))
         | ScalarValue::Utf8View(Some(value))
         | ScalarValue::LargeUtf8(Some(value))
             if !value.is_empty() =>
         {
-            Ok(value.to_ascii_lowercase())
+            Ok(Some(value.clone()))
         }
         _ => Err(DataFusionError::Plan(
-            "IMAGE_DETECTION model must be a non-NULL string literal".to_owned(),
+            "model version must be a non-NULL constant string".to_owned(),
         )),
     }
 }
@@ -484,7 +699,7 @@ fn classes_literal(expr: Option<&Expr>) -> DataFusionResult<Option<Vec<String>>>
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| {
                     DataFusionError::Plan(
-                        "IMAGE_DETECTION classes must be a constant array of strings".to_owned(),
+                        "Model classes/categories must be a constant array of strings".to_owned(),
                     )
                 })?;
             Ok(Some(
@@ -500,7 +715,7 @@ fn classes_literal(expr: Option<&Expr>) -> DataFusionResult<Option<Vec<String>>>
             .collect::<DataFusionResult<Vec<_>>>()
             .map(Some),
         _ => Err(DataFusionError::Plan(
-            "IMAGE_DETECTION classes must be a constant array of strings".to_owned(),
+            "Model classes/categories must be a constant array of strings".to_owned(),
         )),
     }
 }
@@ -511,7 +726,7 @@ fn string_literal(expr: &Expr) -> DataFusionResult<String> {
         | Expr::Literal(ScalarValue::Utf8View(Some(value)), _)
         | Expr::Literal(ScalarValue::LargeUtf8(Some(value)), _) => Ok(value.clone()),
         _ => Err(DataFusionError::Plan(
-            "IMAGE_DETECTION classes must be a constant array of strings".to_owned(),
+            "Model classes/categories must be a constant array of strings".to_owned(),
         )),
     }
 }
@@ -522,7 +737,7 @@ fn probability_literal(expr: Option<&Expr>) -> DataFusionResult<Option<f32>> {
     };
     let Expr::Literal(value, _) = strip_cast(expr) else {
         return Err(DataFusionError::Plan(
-            "IMAGE_DETECTION min_confidence must be a constant number".to_owned(),
+            "Model score threshold must be a constant number".to_owned(),
         ));
     };
     let value = match value {
@@ -548,7 +763,7 @@ fn probability_literal(expr: Option<&Expr>) -> DataFusionResult<Option<f32>> {
         ScalarValue::UInt64(Some(value)) => *value as f64,
         _ => {
             return Err(DataFusionError::Plan(
-                "IMAGE_DETECTION min_confidence must be a constant number".to_owned(),
+                "Model score threshold must be a constant number".to_owned(),
             ));
         }
     };
@@ -605,19 +820,22 @@ impl ExtensionPlanner for InferenceExtensionPlanner {
                 "InferenceNode planner requires one input".to_owned(),
             ));
         }
-        let input_expr = planner.create_physical_expr(
-            &node.input_expr,
-            logical_inputs[0].schema(),
-            session_state,
-        )?;
+        let input_exprs = node
+            .input_exprs
+            .iter()
+            .map(|expression| {
+                planner.create_physical_expr(expression, logical_inputs[0].schema(), session_state)
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
         Ok(Some(Arc::new(InferenceExec::new(
             Arc::clone(&physical_inputs[0]),
-            input_expr,
+            input_exprs,
             node.schema.inner().clone(),
             node.output_name.clone(),
             node.operation.clone(),
             node.model.clone(),
             node.invocation.clone(),
+            node.invocation_volatile,
             Arc::clone(&node.runtime),
             Arc::clone(&node.fail_on_error),
             node.cancellation.clone(),
@@ -628,12 +846,13 @@ impl ExtensionPlanner for InferenceExtensionPlanner {
 
 struct InferenceExec {
     input: Arc<dyn ExecutionPlan>,
-    input_expr: Arc<dyn PhysicalExpr>,
+    input_exprs: Vec<Arc<dyn PhysicalExpr>>,
     schema: SchemaRef,
     output_name: String,
     operation: String,
     model: ResolvedModelDef,
     invocation: BoundInferenceParams,
+    invocation_volatile: bool,
     runtime: Arc<ModelRuntime>,
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
@@ -645,12 +864,13 @@ impl InferenceExec {
     #[allow(clippy::too_many_arguments)]
     fn new(
         input: Arc<dyn ExecutionPlan>,
-        input_expr: Arc<dyn PhysicalExpr>,
+        input_exprs: Vec<Arc<dyn PhysicalExpr>>,
         schema: SchemaRef,
         output_name: String,
         operation: String,
         model: ResolvedModelDef,
         invocation: BoundInferenceParams,
+        invocation_volatile: bool,
         runtime: Arc<ModelRuntime>,
         fail_on_error: Arc<AtomicBool>,
         cancellation: CancellationToken,
@@ -664,12 +884,13 @@ impl InferenceExec {
         ));
         Self {
             input,
-            input_expr,
+            input_exprs,
             schema,
             output_name,
             operation,
             model,
             invocation,
+            invocation_volatile,
             runtime,
             fail_on_error,
             cancellation,
@@ -705,8 +926,8 @@ impl DisplayAs for InferenceExec {
             model_identity(&self.model),
             runtime.kind,
             batching_owner(&self.model),
-            self.model.volatile,
-            if self.model.volatile {
+            self.invocation_volatile,
+            if self.invocation_volatile {
                 "disabled"
             } else {
                 "enabled"
@@ -741,12 +962,13 @@ impl ExecutionPlan for InferenceExec {
         }
         Ok(Arc::new(Self::new(
             children.remove(0),
-            Arc::clone(&self.input_expr),
+            self.input_exprs.clone(),
             Arc::clone(&self.schema),
             self.output_name.clone(),
             self.operation.clone(),
             self.model.clone(),
             self.invocation.clone(),
+            self.invocation_volatile,
             Arc::clone(&self.runtime),
             Arc::clone(&self.fail_on_error),
             self.cancellation.clone(),
@@ -760,7 +982,7 @@ impl ExecutionPlan for InferenceExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let mut input = self.input.execute(partition, context)?;
-        let input_expr = Arc::clone(&self.input_expr);
+        let input_exprs = self.input_exprs.clone();
         let schema = Arc::clone(&self.schema);
         let stream_schema = Arc::clone(&schema);
         let operation = self.operation.clone();
@@ -778,25 +1000,42 @@ impl ExecutionPlan for InferenceExec {
                     ))?;
                 }
                 let batch = batch?;
-                let value = input_expr.evaluate(&batch)?.into_array(batch.num_rows())?;
-                let images = value
-                    .as_any()
-                    .downcast_ref::<StructArray>()
-                    .ok_or_else(|| DataFusionError::Execution(format!(
-                        "{} expects IMAGE",
-                        operation
-                    )))?;
-                let output = runtime
-                    .infer(
-                        &model,
-                        &invocation,
-                        images,
-                        fail_on_error.load(Ordering::Relaxed),
-                        cancellation.clone(),
-                        &budget,
-                    )
-                    .await
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                let values = input_exprs
+                    .iter()
+                    .map(|expression| expression.evaluate(&batch)?.into_array(batch.num_rows()))
+                    .collect::<DataFusionResult<Vec<_>>>()?;
+                let output = if model.interface.capability.is_none() {
+                    runtime
+                        .infer_generic(
+                            &model,
+                            &values,
+                            batch.num_rows(),
+                            fail_on_error.load(Ordering::Relaxed),
+                            cancellation.clone(),
+                            &budget,
+                        )
+                        .await
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?
+                } else {
+                    let images = values[0]
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .ok_or_else(|| DataFusionError::Execution(format!(
+                            "{} expects IMAGE",
+                            operation
+                        )))?;
+                    runtime
+                        .infer(
+                            &model,
+                            &invocation,
+                            images,
+                            fail_on_error.load(Ordering::Relaxed),
+                            cancellation.clone(),
+                            &budget,
+                        )
+                        .await
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?
+                };
                 let mut columns = batch.columns().to_vec();
                 columns.push(output);
                 yield RecordBatch::try_new(Arc::clone(&schema), columns)?;

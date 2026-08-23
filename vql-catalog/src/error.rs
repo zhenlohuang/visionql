@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogErrorCode {
     AlreadyExists,
+    NameConflict,
     NotFound,
     InvalidArgument,
     Conflict,

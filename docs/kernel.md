@@ -184,7 +184,7 @@ value = aggregate_states
 - Advance the watermark after data processing. Emit and delete a window when `window_end <= watermark`.
 - Rows where `event_time < current_watermark` are dropped and increment the query's `late_rows` counter. `allowed_lateness` is not supported.
 - Stopping a query does not emit windows that have not closed.
-- State and group keys cannot contain `buffer_id` or `buffer_slot`. Convert media to a persistent locator or encoded value first. `IMAGE` and `VIDEO` are rejected by default in window state.
+- State and group keys cannot contain `buffer_id` or `buffer_slot`. Convert media to a persistent locator or encoded value first. `IMAGE`, `VIDEO`, and `TENSOR` are rejected in window state; materialize a bounded result before aggregating them.
 - Batch mode lowers `TUMBLE` to time bucketing and ordinary aggregation. Differential batch/stream tests cover NULL, grouping, overflow, and final values for each allowlisted aggregate.
 
 Window state is charged to the Session memory pool through its own `MemoryConsumer` and additionally capped at 64 MiB, or at the Session limit when that is smaller. Exceeding the cap fails the query rather than spilling.
@@ -211,6 +211,7 @@ VQL logical types use standard Arrow storage and field metadata.
 | `BOX2D` | `Struct<x: Float32, y: Float32, w: Float32, h: Float32>` | Top-left origin and normalized `[0,1]` coordinates |
 | `POINT2D` | `Struct<x: Float32, y: Float32>` | Internal logical type for spatial functions |
 | `POLYGON` | `List<POINT2D>` | Normalized two-dimensional polygons only |
+| `VECTOR(n)` / `TENSOR(dtype, dims...)` | Non-nullable `FixedSizeList` with `arrow.fixed_shape_tensor` extension metadata | One fixed-shape value per row; the Field records element dtype, shape, and optional dimension names |
 | Detection result | `List<Struct<label: Utf8, confidence: Float32, box: BOX2D>>` | One list per frame; `UNNEST` produces rows |
 | `AUDIO` / `MASK` | Reserved logical types | Registration and execution return an unsupported-feature error |
 
@@ -243,7 +244,7 @@ Invariants:
 
 1. `buffer_id` and `buffer_slot` never cross a process boundary, reach persistent storage, or enter the Catalog.
 2. `uri` is sanitized and display-only. It may be logged or exported but is never used by the runtime to read media.
-3. `locator` is an opaque `vql://media/v1/...` value bound to a source revision and frame coordinates. Resolution accepts only registered sources and reauthorizes as the current caller.
+3. `locator` is an opaque `vql://media/v1/...` value bound to an internal source generation and frame coordinates. The generation is not a Catalog revision exposed through SQL. Resolution accepts only registered sources and reauthorizes as the current caller.
 4. A live RTSP frame is not replayable and has no durable `locator`. Encode or persist it before later retrieval.
 5. Field metadata distinguishes original encoded bytes from thumbnail bytes.
 
@@ -286,8 +287,9 @@ Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs 
 |---|---|
 | `CREATE TABLE ... USING IMAGES/VIDEOS/RTSP` | Create a readable provider table as defined by [Table Providers](#table-providers) |
 | `CREATE TABLE ... USING KAFKA` | Create a writable Kafka table as defined by [Kafka Table](#kafka-table) |
-| `CREATE MODEL ... TYPE ... FROM ... USING ... WITH (...)` | Store one unresolved typed Model declaration without network I/O |
-| `RESOLVE MODEL <name>` | Download/cache an artifact or validate a service and persist its resolved execution contract |
+| `CREATE MODEL ... { TYPE ... \| (...) RETURNS ... } FROM ... [USING ...] [OPTIONS (...)]` | Store an unresolved Model with its immutable interface and first named version, without network I/O |
+| `ALTER MODEL ... ADD\|DROP VERSION`, `SET DEFAULT_VERSION`, `SET COMMENT`, `RENAME TO` | Mutate the versioned Model aggregate through Catalog compare-and-swap |
+| `RESOLVE MODEL <name> [VERSION '...']` | Introspect and pin one immutable version; bare form requires exactly one live version |
 | `CREATE FUNCTION ... RETURN <expression>` | Create a DataFusion-backed SQL expression function |
 | `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` | Create a batched Python function; executable only from a Python host |
 | `SET vql.on_error = 'null' \| 'fail'` | Switch row-level failures between NULL results and hard errors for this Session, returning the new value as a one-column result |
@@ -297,26 +299,22 @@ Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs 
 
 ### Typed Model Contract
 
-A MODEL is one typed inference capability backed by an artifact bundle or endpoint. `TYPE` is the sole authority for its built-in SQL function, domain input, semantic arguments, and canonical Arrow result. There is no generic CV or LLM type.
+A MODEL is a versioned callable backed by an artifact or endpoint. Capability form expands `TYPE` into a persisted interface; explicit-signature form declares tensor-mappable parameters and return type directly. The interface is model-level and immutable.
 
-| Model `TYPE` | Built-in function | Domain input | Canonical result | Availability |
-|---|---|---|---|---|
-| `OBJECT_DETECTION` | `IMAGE_DETECTION` | `IMAGE` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | Implemented |
-| `IMAGE_CLASSIFICATION` | `IMAGE_CLASSIFICATION` | `IMAGE` | `ARRAY<STRUCT<label STRING, score FLOAT>>` | Unscheduled |
-| `IMAGE_EMBEDDING(n)` | `IMAGE_EMBEDDING` | `IMAGE` | `VECTOR(n)` | Roadmap v0.3 |
-| `TEXT_EMBEDDING(n)` | `TEXT_EMBEDDING` | `STRING` | `VECTOR(n)` | Roadmap v0.3 |
-| `TEXT_GENERATION` | `TEXT_GENERATION` | `STRING` | `STRING` | Unscheduled |
+| Model `TYPE` | Callable interface | Canonical result |
+|---|---|---|
+| `OBJECT_DETECTION` | `model(image IMAGE, classes => CONST ARRAY<STRING>?, min_confidence => CONST FLOAT?)` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` |
 
-`OBJECT_DETECTION` is the only Model type the Catalog can store today. Every other row is reserved: its `TYPE` name is recognized, its built-in function name is reserved, and `CREATE MODEL` fails with `FEATURE_NOT_AVAILABLE` carrying the target release shown above rather than a generic parse error. The [Roadmap](../ROADMAP.md) remains the source of truth for when a reserved capability ships.
+`IMAGE_CLASSIFICATION`, `IMAGE_EMBEDDING`, `TEXT_EMBEDDING`, and text-generation Model presets remain roadmap-gated. Generic Model signatures expose `IMAGE`, numeric scalars, `VECTOR(n)`, `TENSOR(dtype, dims...)`, and structured tensor output without introducing generic selector functions. Supported tensor elements are `FLOAT32`, `FLOAT64`, `INT8`, `INT16`, `INT32`, `INT64`, and `UINT8`; `STRING`, `FLOAT16`, and `MODEL` are rejected at an embedded generic boundary. The release-managed `VQL_CLASSIFY` and `VQL_EXTRACT` contracts are specified separately under [Built-in Functions](#built-in-functions).
+
+Generic signatures use embedded ONNX Runtime. `RESOLVE MODEL` binds declared parameters to graph inputs positionally unless `<parameter>.input_name` overrides the binding, matches structured outputs by field name, validates one dynamic leading batch axis plus static per-row shapes, and persists the resolved tensor contracts. Numeric scalar parameters map only to graph inputs shaped `[N]`. An `IMAGE` parameter requires exactly one processing form: either the `imagenet` preset or the complete inline set `mean`, `std`, `scale`, `resize`, and `pad_value`; incomplete inline processing or mixing the two forms fails resolution. Multi-input options use a parameter-name prefix such as `image.preprocess`, while a single-input Model may use flat keys. Execution compacts rows for which every argument is non-NULL, preprocesses IMAGE inputs, runs all graph inputs and outputs together, and scatters results back so any row with a NULL or failed argument remains NULL.
 
 One source bundle may be registered under multiple compatible capability types. For example, CLIP image and text embedding are two Models with different fixed interfaces; artifact-cache or Runtime-session reuse is an internal optimization.
 
-Required inference arguments are positional: the Model name comes first, followed by the Model type's domain inputs. Optional semantic arguments use DataFusion's `=>` named-argument notation and must follow every positional argument:
+The Model identifier is the call target. Required domain inputs are positional; semantic arguments and the reserved `version =>` selector are named constants:
 
 ```sql
-SELECT IMAGE_DETECTION(
-  'yolo',
-  image,
+SELECT yolo(image,
   classes => ['person'],
   min_confidence => 0.5
 )
@@ -325,31 +323,33 @@ FROM photos;
 
 Planning enforces these rules:
 
-- The first positional argument is a non-NULL Model-name string literal resolved in the current Catalog transaction. Its resolved specification is copied into the `InferenceNode` and never enters an Arrow batch or Runtime request. Prepared parameters, expressions, column references, and per-row Model selection are rejected.
-- Remaining required positional arguments are type-owned domain inputs such as `image` or `prompt` and may be arbitrary row expressions.
-- Optional type-owned semantic arguments such as `classes`, thresholds, and generation controls use `name => constant` notation after all positional arguments. The VQL normalizer binds them against the type-owned schema, fills omitted defaults, and emits a fully ordered marker before DataFusion type planning.
-- The built-in function, Model type, domain argument types, and canonical output must match exactly. Unknown or duplicate arguments fail planning.
-- Built-in inference functions are typed planner markers. Planning must extract them into `InferenceNode`; their scalar execution method fails defensively if an unextracted call reaches execution.
+- The call target resolves from the statement's immutable definition snapshot and the selected version is copied into `InferenceNode`; Model identity never enters an Arrow batch.
+- Required positional parameters may be row expressions and are type-checked against the persisted interface.
+- Optional interface-owned semantic arguments such as `classes`, thresholds, and generation controls use `name => constant` notation after all positional arguments. The VQL normalizer binds them against the persisted interface, fills omitted defaults, and emits a fully ordered marker before DataFusion type planning.
+- Every Model registers a volatile typed marker so DataFusion cannot fold or CSE it before extraction. Per-invocation deduplication requires an immutable version, a deterministic resolved interface, and deterministic inputs.
+- Unknown, duplicate, nonconstant semantic arguments, nonconstant versions, and unknown versions fail planning.
 
-Model declarations use one Runtime-owned option schema:
+Model declarations use one flat, deny-unknown option surface:
 
 ```text
 CREATE MODEL identifier
-  TYPE model_type
-  FROM string_literal
-  USING runtime_identifier
-  [WITH (runtime_option ('=' constant_value) [, ...])]
+  { TYPE capability | (parameter type [, ...]) RETURNS type }
+  [VERSION 'version'] FROM string_literal
+  [USING runtime_identifier]
+  [OPTIONS (option = constant_value [, ...])]
 ```
 
-`USING` is the only public Runtime selector. SQL identifiers such as `ONNX_RUNTIME` and `TRITON_INFERENCE_SERVER` normalize to internal registry IDs `onnx-runtime` and `triton-inference-server`. `WITH` is not a global Model schema: the selected Runtime deserializes the complete map with unknown fields denied. `ONNX_RUNTIME` owns `sha256`, `input={...}`, and `output={...}`. `TRITON_INFERENCE_SERVER` owns `model` and optional immutable `version`. No public `runtime.*`, `pre_processor.*`, `post_processor.*`, Profile, or Adapter layer exists.
+`.onnx` and `mock://` infer `ONNX_RUNTIME`; `triton+http(s)://host/model[@server_version]` infers `TRITON_INFERENCE_SERVER`. Other sources require `USING`. Flat deny-unknown `OPTIONS` are classified as artifact, Runtime, input, or output facts. ONNX resolution discovers tensor names, layout, static image size, output convention, and labels from graph structure and metadata; when a fact is undecidable, the error names the exact fallback option.
 
 `CREATE MODEL` is deliberately fast. It validates only facts available locally—the `TYPE`/Runtime pairing, source shape, option schema, and embedded processor options—and commits an unresolved definition without downloading or contacting a service. `RESOLVE MODEL` is the explicit potentially slow operation. For an embedded artifact it resolves the source, streams remote bytes to a temporary file, checks cancellation and checksum while downloading, atomically installs a content-addressed cache entry, and persists the resolved path/hash. For a service it contacts the endpoint, validates the typed service contract, and persists the binding. A query cannot plan against an unresolved Model.
 
-Re-running `RESOLVE MODEL` refreshes the resolved revision. Pinned artifacts and versioned services have stable semantic fingerprints. An unversioned service is `volatile`; it cannot be constant-lifted, deduplicated, or cached as if immutable.
+Resolved versions are immutable. Version names are case-sensitive string identities; `default` is reserved case-insensitively. The first version is `v1` unless named explicitly; successful resolution of that exact initial declaration establishes the first default. Dropping and reusing its name does not recreate that publication right, and added versions never auto-publish. A service-backed version is always volatile because the service can change weights behind routing metadata.
 
-Device selection, queue capacity, batch size, maximum wait, request concurrency, timeouts, and credentials are not Model semantics. They remain scheduler configuration or secret-provider state. Public Profiles, Adapters, Model revisions, and Deployment objects are deliberately absent.
+`ALTER MODEL ... ADD VERSION` inherits the persisted interface and requires a new explicit version name. `SET DEFAULT_VERSION` accepts only a live resolved version. Dropping the default or last live version fails with guidance to move the default or use `DROP MODEL`; dropping another version removes it from new snapshots and permits a later explicit reuse of its name. Bare `RESOLVE MODEL` is accepted only when exactly one live version exists, so concurrent additions cannot redirect an operator's request.
 
-The declaration fingerprint includes Model type, raw source, selected Runtime, and Runtime-owned options. The resolved semantic fingerprint additionally includes resolved source/hash, execution mode, internal embedded processor specifications or service protocol binding, and determinism. Scheduler configuration does not enter semantic identity.
+`SHOW MODELS` exposes aggregate identity, interface, live version count, default, and comment. `SHOW MODEL VERSIONS` exposes per-version state, volatility, fingerprint, creation time, and default marker. `DESCRIBE MODEL` renders the callable interface; `SHOW CREATE MODEL` emits sanitized aggregate DDL.
+
+The declaration fingerprint includes the persisted interface, version name, source, Runtime, and user options. The resolved semantic fingerprint additionally includes the resolved source/hash and derived execution contract. Scheduler configuration does not enter semantic identity.
 
 ### User-defined Functions and DataFusion Reuse
 
@@ -362,11 +362,15 @@ The declaration fingerprint includes Model type, raw source, selected Runtime, a
 
 The statement router uses DataFusion's PostgreSQL-style function grammar, `CreateFunction` representation, named-argument support, and UDF registry. A VisionQL `FunctionFactory` validates the supported language or body, constructs the UDF, and persists the normalized definition. Planning recreates equivalent DataFusion UDFs from the definition snapshot, so session-local registration is never durable state.
 
-Python functions require an explicit `RETURNS` type. SQL expression functions may omit it when DataFusion can derive the body type from positional parameter types and registered built-ins. This permits a compact inference preset such as `CREATE FUNCTION detect_people(IMAGE) RETURN IMAGE_DETECTION('yolo', $1, classes => ['person'])`; macro expansion still exposes the typed inference marker to the planner.
+Python functions require an explicit `RETURNS` type. SQL expression functions may omit it when DataFusion can derive the body type from positional parameter types and registered built-ins. This permits a compact inference preset such as `CREATE FUNCTION detect_people(IMAGE) RETURN yolo($1, classes => ['person'])`; macro expansion still exposes the typed inference marker to the planner.
+
+Function creation expands the body once and records parameters that flow into a Model's constant-only semantic or version position. Nested wrappers propagate the same constraint. Call sites reject nonconstant values before expansion with the parameter name and position; `SHOW FUNCTIONS` and `DESCRIBE FUNCTION` render inferred parameters with the display-only `CONST` marker.
+
+Model references in SQL functions are late-bound at body expansion. Dropping a Model does not cascade to Functions; a later call fails planning if the referenced Model is absent or unresolved, and `DESCRIBE FUNCTION` reports the reference status. `MODEL` is not a SQL parameter type because Model identity is legal only in call position.
 
 A Python function is invoked through the injected host as one Arrow array per argument, and its result must be an equal-length, type-compatible array. `IMAGE` is materialized into encoded form before it crosses the boundary. Row-at-a-time callbacks are not supported, and a Python function reached without an installed host fails with `PYTHON_HOST_REQUIRED`. The [Python Binding Design](./python_binding.md#python-udf-host) defines the Python-side contract.
 
-Model inference does not use `FunctionFactory`, `ScalarUDF`, or `AsyncUDF`. A SQL expression function may wrap a typed inference call to provide a reusable name or constant-argument preset; after expansion, the call still becomes an explicit `InferenceNode`.
+Model inference uses a defensive typed `ScalarUDF` marker only as a DataFusion planning bridge; execution always extracts it into `InferenceNode`. A SQL expression function may wrap a Model call, and expansion exposes the same marker.
 
 ### Syntax Normalization
 
@@ -377,23 +381,23 @@ Model inference does not use `FunctionFactory`, `ScalarUDF`, or `AsyncUDF`. A SQ
 | `FROM t, UNNEST(expr)` | Native DataFusion unnest node; the only row-expansion mechanism |
 | `CREATE ...` | Catalog or runtime operation, absent from the relational plan |
 
-Inference-call parameters such as `classes` and `min_confidence` are owned by the Model type and filter elements within one detection result. They are not processor DDL options and are not converted into a row-level Filter that could discard the frame.
+Inference-call parameters such as `classes` and `min_confidence` are owned by the persisted Model interface and filter elements within one detection result. They are not processor DDL options and are not converted into a row-level Filter that could discard the frame.
 
 ### Built-in Functions
 
-The names `IMAGE_DETECTION`, `IMAGE_CLASSIFICATION`, `IMAGE_EMBEDDING`, `TEXT_EMBEDDING`, and `TEXT_GENERATION` are reserved case-insensitively, including the Roadmap-gated ones; `CREATE FUNCTION` cannot redefine them.
+Public generic inference selectors are absent. Model names remain direct call targets. The v0.1 release-managed AI surface contains exactly `VQL_CLASSIFY` and `VQL_EXTRACT`; neither Models nor Functions may claim any `VQL_*` name.
 
 | Function | Signature | Contract |
 |---|---|---|
-| `IMAGE_DETECTION` | `(model STRING, image IMAGE [, named options])` → canonical detection array | Implemented typed planner marker; the first argument resolves to an `OBJECT_DETECTION` Model and the call must become `InferenceNode` |
-| `IMAGE_CLASSIFICATION` | `(model STRING, image IMAGE [, named options])` → canonical classification array | Roadmap-gated typed planner marker |
-| `IMAGE_EMBEDDING` / `TEXT_EMBEDDING` | `(model STRING, IMAGE)` / `(model STRING, STRING)` → `VECTOR(n)` | Roadmap-gated typed planner markers; dimension comes from Model `TYPE` |
-| `TEXT_GENERATION` | `(model STRING, prompt STRING [, named options])` → `STRING` | Roadmap-gated bounded final-text marker |
+| `VQL_CLASSIFY` | `(input IMAGE\|STRING\|BINARY, categories CONST ARRAY<STRING> [, min_score => CONST FLOAT]) -> ARRAY<STRUCT<label STRING, score FLOAT>>` | IMAGE execution uses the installed YOLO26n-cls classifier, filters its ImageNet label vocabulary by `categories`, and sorts matches by descending score. STRING and BINARY are accepted interface overloads whose use returns `FEATURE_NOT_AVAILABLE` with target `未排期` |
+| `VQL_EXTRACT` | `(input IMAGE\|STRING\|BINARY [, classes => CONST ARRAY<STRING>, min_confidence => CONST FLOAT]) -> ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` | IMAGE execution returns YOLO26n detections. STRING and BINARY cover text, encoded files, and documents at the interface boundary but return `FEATURE_NOT_AVAILABLE` with target `未排期` when used |
 | `BOX_CENTER` | `(BOX2D) -> POINT2D` | Function form of `box.center` |
 | `POLYGON` / `ST_POLYGON` | `(STRING) -> POLYGON` | Parse constants during planning; require closure, finite values, and `[0,1]` coordinates |
 | `ST_CONTAINS` | `(POLYGON, POINT2D) -> BOOLEAN` | Boundary points count as contained |
 
-VisionQL built-ins use SQL NULL propagation.
+The AI functions bind separate release-owned inference identities. `VQL_CLASSIFY` uses `vql.builtin.yolo26n-cls@v0.1` at `$VQL_HOME/models/yolo26n-cls.onnx`; `VQL_EXTRACT` uses `vql.builtin.yolo26n@v0.1` at `$VQL_HOME/models/yolo26n.onnx`. Install them with `python scripts/export_yolo26.py --task classify --install` and `python scripts/export_yolo26.py --task detect --install`. Each identity is an internal model definition, not a Catalog Model, and therefore has no DDL, object revision, `SHOW` row, or user-selectable version. Planning resolves only the artifact required by the invoked function and returns `INVALID_LOCATION` with the corresponding install command when it is absent. The default score threshold is `0.25`. Unknown requested labels produce no matching result rather than expanding the installed model vocabulary.
+
+VisionQL built-ins use SQL NULL propagation. Function markers are planning-only and must be extracted into `InferenceNode`; scalar execution is an internal error.
 
 ---
 
@@ -517,11 +521,11 @@ Window size never implies a sample rate. User-declared fps is part of result sem
 
 ### Extracting Inference
 
-After expanding SQL expression functions, the planner scans Projection, Filter, and aggregate inputs for type-owned inference markers:
+After expanding SQL expression functions, the planner scans Projection, Filter, and aggregate inputs for per-Model markers:
 
-1. Require constant Model and semantic arguments, require a previously resolved Model, validate its typed embedded-pipeline or service contract, and copy the resolved specification into the `InferenceNode`.
+1. Resolve the call target and constant semantic/version arguments from the snapshot, require a resolved selected version, and copy its resolved specification into `InferenceNode`.
 2. Replace each marker with an internal column reference and insert `InferenceNode` at the earliest point where every domain input exists and semantics remain unchanged.
-3. Deduplicate only when the built-in operation, Model semantic fingerprint, all domain input expressions, and semantic arguments match exactly and determinism is `deterministic` or `stable_within_query`. Preserve every `volatile` call and its order.
+3. Deduplicate only when the Model semantic fingerprint, all domain input expressions, and semantic arguments match exactly, the selected version is immutable, the interface is deterministic, and every input expression is deterministic. Preserve every volatile invocation and its order.
 4. Evaluate a constant-domain-input inference call, such as a text query embedding, once as a query-init expression only under the same determinism rule.
 5. Never share raw Runtime output across different resolved processor contracts; only canonical, semantically identical inference results are shareable.
 
@@ -547,22 +551,22 @@ After expanding SQL expression functions, the planner scans Projection, Filter, 
 
 ### Compiled Pipeline and Interfaces
 
-Every resolved typed call selects one of two execution modes. Embedded Runtimes use the VisionQL-owned tensor pipeline:
+Every resolved Model call selects one of two execution modes. Embedded Runtimes use the VisionQL-owned tensor pipeline:
 
 ```text
-TYPE canonical input RecordBatch
+Model-interface input RecordBatch
   → PreProcessor
   → RuntimeRequestBatch
   → RuntimeSession
   → RuntimeResponseBatch
   → PostProcessor
-  → TYPE canonical Arrow result
+  → Model-interface canonical Arrow result
 ```
 
 Service Runtimes own the full model-facing pipeline:
 
 ```text
-TYPE canonical input
+Model-interface canonical input
   → VisionQL transport codec
   → typed service request
   → service-owned preprocessing → inference → postprocessing
@@ -602,7 +606,7 @@ trait PreProcessorFactory: Send + Sync {
 
 Each factory owns a serde option type with unknown fields denied. A PreProcessor receives only its input options; a PostProcessor receives only decoding and result-construction options; a Runtime receives only source, protocol, and binding options. Deserialization failures are rendered through the existing `INVALID_OPTION` contract with the complete option path. Options are deserialized once while compiling a pipeline, not once per input batch.
 
-For embedded execution, resolution and compilation validate every adjacent contract: Model-type input against PreProcessor input, PreProcessor output against Runtime input, Runtime output against PostProcessor input, and PostProcessor output against the canonical Model-type result. For service execution, `RESOLVE MODEL` validates the service's typed request and response contract. No component may rely on an unchecked tensor name, dtype, shape, or response field.
+For embedded execution, resolution and compilation validate every adjacent contract: Model-interface input against PreProcessor input, PreProcessor output against Runtime input, Runtime output against PostProcessor input, and PostProcessor output against the canonical Model-interface result. For service execution, `RESOLVE MODEL` validates the service's typed request and response contract. No component may rely on an unchecked tensor name, dtype, shape, or response field.
 
 Runtime tensors use Arrow's canonical `arrow.fixed_shape_tensor` extension type instead of a private dtype-and-buffer enum. The outer Arrow array length is the batch dimension; each slot is one equal-shape tensor backed by a non-nullable `FixedSizeList`, while the extension `Field` records element dtype, per-row shape, optional dimension names, and layout permutation. `TensorBatch` therefore carries the `FieldRef` together with its array so extension metadata cannot be separated from the buffer. Concrete batches contain only positive fixed dimensions after the batch axis; wildcard dimensions remain a contract-only concept.
 
@@ -610,7 +614,7 @@ The image PreProcessor emits `Float32` tensors with `C`, `H`, and `W` dimension 
 
 A CV PreProcessor resolves and decodes `IMAGE`, converts color and dtype, resizes/crops/pads, normalizes, changes layout, and constructs named tensor batches. It returns row-aligned context such as original dimensions and letterbox transforms.
 
-A PostProcessor converts Runtime output to the canonical Arrow result. Detection implementations decode tensors, apply activation or NMS only when required, resolve labels, and restore coordinates. Inference-call parameters are defined by Model `TYPE`; processors may consume only that allowlist.
+A PostProcessor converts Runtime output to the canonical Arrow result. Detection implementations decode tensors, apply activation or NMS only when required, resolve labels, and restore coordinates. Capability presets define their semantic-argument allowlist; processors may consume only that allowlist.
 
 The compiled embedded pipeline or service backend plus scheduler forms one cache entry keyed by the resolved Model semantic fingerprint. `ModelRuntime` removes entries whose fingerprints are no longer present in the Catalog head; in-flight queries retain their snapshot-owned `Arc`, while removing the cache owner closes the scheduler queue and releases the Runtime session after the last query finishes. Dropping, re-resolving, and recreating a Model therefore cannot reuse an obsolete session.
 
@@ -627,12 +631,12 @@ models/
 
 ### Runtime Registry and Batching Ownership
 
-A Runtime loads an artifact or binds a service endpoint. The Model `TYPE` fixes the semantic capability; the Runtime owns how that capability is executed.
+A Runtime loads an artifact or binds a service endpoint. The persisted Model interface fixes call semantics; the Runtime owns how that interface is executed.
 
 | `USING` Runtime | Source | Execution ownership | Batching owner | Delivery |
 |---|---|---|---|---|
 | `ONNX_RUNTIME` | Local, cached HTTP(S), or pinned Hugging Face ONNX artifact | VisionQL PreProcessor → ONNX Runtime → VisionQL PostProcessor | VisionQL queues requests; ONNX Runtime executes tensor batches | Implemented |
-| `TRITON_INFERENCE_SERVER` | Plain absolute HTTP(S) service URL plus `WITH.model/version` | Triton owns preprocessing, inference, and postprocessing; VisionQL owns the typed KServe V2 codec | Triton owns model instances and dynamic batching; VisionQL owns bounded concurrency and backpressure | Implemented over HTTP |
+| `TRITON_INFERENCE_SERVER` | `triton+http(s)://host/model[@server_version]` | Triton owns preprocessing, inference, and postprocessing; VisionQL owns the typed KServe V2 codec | Triton owns model instances and dynamic batching; VisionQL owns bounded concurrency and backpressure | Implemented over HTTP; always volatile |
 
 ONNX Runtime validates graph input/output names, dtypes, and static dimensions against the compiled processor contracts when the session is built. Its blocking `run` executes through Tokio's blocking pool and retains one session mutex because VisionQL-owned batching already serializes calls per session.
 
@@ -642,9 +646,9 @@ Each Runtime reports whether batching is VisionQL-owned or service-owned. Vision
 
 ### ONNX Artifacts and Open-source Models
 
-`FROM` preserves the Runtime's raw location. `ONNX_RUNTIME` accepts a local path, `file://` path, pinned `hf://owner/repository@revision[/artifact.onnx]`, or an HTTP(S) `.onnx` URL accompanied by `WITH.sha256`. `TRITON_INFERENCE_SERVER` accepts a plain absolute HTTP(S) service URL; there is no `endpoint://` wrapper. A resolver never guesses task or tensor semantics.
+`FROM` preserves the Runtime's raw location. `ONNX_RUNTIME` accepts a local path, `file://` path, pinned `hf://owner/repository@revision[/artifact.onnx]`, or an HTTP(S) `.onnx` URL accompanied by `OPTIONS.sha256`. `TRITON_INFERENCE_SERVER` accepts the `triton+http(s)` form above. A resolver never guesses task or label semantics.
 
-The embedded artifact is an ONNX graph plus explicit input, output, label, and processor options. Other weight formats and arbitrary repository code are outside this design; they require a future Runtime proposal or an external inference service.
+The embedded artifact is an ONNX graph whose metadata carries discoverable tensor, output-format, image-size, and label facts. Flat options override or provide only facts that inspection cannot decide. Other weight formats and arbitrary repository code require a future Runtime or an external inference service.
 
 Remote ONNX files are downloaded to a temporary path and atomically installed under `$VQL_HOME/cache/models/<sha256>/<filename>`, with a source index mapping the declared location to the verified digest. Local files remain in place and endpoints create no cache entry. The Catalog stores source identity and the resolved digest rather than model bytes. Offline execution uses local files or a prewarmed cache. `HF_TOKEN` is read only while resolving private Hugging Face artifacts and is never persisted.
 
@@ -652,7 +656,7 @@ Integrating an embedded open-source model follows five steps:
 
 1. Pin its source revision or SHA-256 digest.
 2. Export or select an ONNX graph compatible with `ONNX_RUNTIME`.
-3. Declare the Runtime-owned input and output options.
+3. Attach standard metadata during export and declare only required fallback options.
 4. Run `RESOLVE MODEL` to materialize and validate it.
 5. Pass processor contract tests and one real-model conformance fixture.
 
@@ -733,6 +737,7 @@ Stable codes are separate from prose messages. Clients react to codes, never err
 | `INVALID_SQL` | Syntax, allowlist, or statement-shape rejection |
 | `INVALID_OPTION` | Bad DDL option, Runtime option, or configuration value, reported with its full option path |
 | `INVALID_LOCATION` | Unusable table location or path |
+| `NAME_CONFLICT` | A Model, Function, or reserved built-in already owns a callable name; identifies the existing kind |
 | `CATALOG_ERROR` | Catalog storage or consistency failure |
 | `ALREADY_EXISTS` / `NOT_FOUND` | Object lifecycle conflicts |
 | `QUERY_CANCELLED` | Cancellation or graceful stop observed by the caller |

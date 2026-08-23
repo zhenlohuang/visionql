@@ -14,13 +14,15 @@ use crate::catalog::{ModelType, ProcessorSpec};
 use crate::{ErrorCode, Result, VqlError};
 
 const KIND: &str = "vision.image_tensor@1";
-const SUPPORTED_TYPES: &[ModelType] = &[ModelType::ObjectDetection];
+const SUPPORTED_TYPES: &[ModelType] = &[ModelType::ObjectDetection, ModelType::ImageClassification];
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ResizeMode {
     #[default]
     Letterbox,
+    #[serde(rename = "center_crop")]
+    CenterCrop,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -30,11 +32,12 @@ enum ColorSpace {
     Rgb,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum TensorLayout {
     #[default]
     Nchw,
+    Nhwc,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,17 +49,28 @@ struct ImageTensorOptions {
     width: u32,
     #[serde(default = "default_side")]
     height: u32,
-    #[serde(default, rename = "resize")]
-    _resize: ResizeMode,
+    #[serde(default)]
+    resize: ResizeMode,
     #[serde(default, rename = "color_space")]
     _color_space: ColorSpace,
     #[serde(default, rename = "layout")]
-    _layout: TensorLayout,
+    layout: TensorLayout,
+    #[serde(default)]
+    preprocess: Option<String>,
+    #[serde(default)]
+    mean: Option<Vec<f32>>,
+    #[serde(default)]
+    std: Option<Vec<f32>>,
+    #[serde(default)]
+    scale: Option<f32>,
+    #[serde(default)]
+    pad_value: Option<f32>,
 }
 
 impl ImageTensorOptions {
     fn parse(spec: &ProcessorSpec) -> Result<Self> {
-        let options: Self = deserialize_processor_options("pre_processor.options", &spec.options)?;
+        let mut options: Self =
+            deserialize_processor_options("pre_processor.options", &spec.options)?;
         if options.input_name.is_empty() {
             return super::super::registry::invalid_option(
                 "pre_processor.options.input_name",
@@ -73,6 +87,49 @@ impl ImageTensorOptions {
             return super::super::registry::invalid_option(
                 "pre_processor.options.height",
                 "must be a positive integer",
+            );
+        }
+        match options.preprocess.as_deref() {
+            Some(value) if value.eq_ignore_ascii_case("imagenet") => {
+                options.mean = Some(vec![0.485, 0.456, 0.406]);
+                options.std = Some(vec![0.229, 0.224, 0.225]);
+                options.scale = Some(1.0 / 255.0);
+                options.pad_value = Some(0.0);
+            }
+            Some(_) => {
+                return super::super::registry::invalid_option(
+                    "pre_processor.options.preprocess",
+                    "must be the supported 'imagenet' preset",
+                );
+            }
+            None => {}
+        }
+        let mean = options.mean.get_or_insert_with(|| vec![0.0; 3]);
+        let std = options.std.get_or_insert_with(|| vec![1.0; 3]);
+        if mean.len() != 3 || mean.iter().any(|value| !value.is_finite()) {
+            return super::super::registry::invalid_option(
+                "pre_processor.options.mean",
+                "must contain three finite channel values",
+            );
+        }
+        if std.len() != 3 || std.iter().any(|value| !value.is_finite() || *value == 0.0) {
+            return super::super::registry::invalid_option(
+                "pre_processor.options.std",
+                "must contain three finite non-zero channel values",
+            );
+        }
+        let scale = options.scale.get_or_insert(1.0 / 255.0);
+        if !scale.is_finite() || *scale <= 0.0 {
+            return super::super::registry::invalid_option(
+                "pre_processor.options.scale",
+                "must be a positive finite number",
+            );
+        }
+        let pad_value = options.pad_value.get_or_insert(114.0);
+        if !pad_value.is_finite() || !(0.0..=255.0).contains(pad_value) {
+            return super::super::registry::invalid_option(
+                "pre_processor.options.pad_value",
+                "must be a finite pixel value between 0 and 255",
             );
         }
         Ok(options)
@@ -121,7 +178,14 @@ impl ImageTensorPreProcessor {
         let output_contract = TensorContract {
             name: options.input_name.clone(),
             dtype: DataType::Float32,
-            shape: vec![-1, 3, i64::from(options.height), i64::from(options.width)],
+            shape: match options.layout {
+                TensorLayout::Nchw => {
+                    vec![-1, 3, i64::from(options.height), i64::from(options.width)]
+                }
+                TensorLayout::Nhwc => {
+                    vec![-1, i64::from(options.height), i64::from(options.width), 3]
+                }
+            },
         };
         Self {
             options,
@@ -163,14 +227,37 @@ impl PreProcessor for ImageTensorPreProcessor {
             .ok_or_else(|| VqlError::new(ErrorCode::Execution, "input tensor size overflow"))?;
         let mut input = vec![0_f32; elements];
         let mut transforms = Vec::with_capacity(batch_size);
+        let mean = self.options.mean.as_deref().expect("validated image mean");
+        let std = self.options.std.as_deref().expect("validated image std");
+        let scale_factor = self.options.scale.expect("validated image scale");
+        let pad_value = self.options.pad_value.expect("validated pad value").round() as u8;
         for (batch_index, image) in images.iter().enumerate() {
-            let (pixels, scale, pad_x, pad_y) =
-                letterbox(image, self.options.width, self.options.height)?;
+            let (pixels, scale, pad_x, pad_y) = match self.options.resize {
+                ResizeMode::Letterbox => {
+                    letterbox(image, self.options.width, self.options.height, pad_value)?
+                }
+                ResizeMode::CenterCrop => {
+                    center_crop(image, self.options.width, self.options.height)
+                }
+            };
             let offset = batch_index * 3 * plane;
             for (index, pixel) in pixels.pixels().enumerate() {
-                input[offset + index] = f32::from(pixel[0]) / 255.0;
-                input[offset + plane + index] = f32::from(pixel[1]) / 255.0;
-                input[offset + 2 * plane + index] = f32::from(pixel[2]) / 255.0;
+                let normalized = [
+                    (f32::from(pixel[0]) * scale_factor - mean[0]) / std[0],
+                    (f32::from(pixel[1]) * scale_factor - mean[1]) / std[1],
+                    (f32::from(pixel[2]) * scale_factor - mean[2]) / std[2],
+                ];
+                match self.options.layout {
+                    TensorLayout::Nchw => {
+                        input[offset + index] = normalized[0];
+                        input[offset + plane + index] = normalized[1];
+                        input[offset + 2 * plane + index] = normalized[2];
+                    }
+                    TensorLayout::Nhwc => {
+                        let pixel_offset = offset + index * 3;
+                        input[pixel_offset..pixel_offset + 3].copy_from_slice(&normalized);
+                    }
+                }
             }
             transforms.push(ImageTransform {
                 original_width: image.width() as f32,
@@ -185,14 +272,25 @@ impl PreProcessor for ImageTensorPreProcessor {
         Ok(PreprocessedBatch {
             input: TensorBatch::from_f32(
                 self.options.input_name.clone(),
-                vec![
-                    i64::try_from(batch_size).map_err(|_| {
+                {
+                    let batch_size = i64::try_from(batch_size).map_err(|_| {
                         VqlError::new(ErrorCode::Execution, "batch size is too large")
-                    })?,
-                    3,
-                    i64::from(self.options.height),
-                    i64::from(self.options.width),
-                ],
+                    })?;
+                    match self.options.layout {
+                        TensorLayout::Nchw => vec![
+                            batch_size,
+                            3,
+                            i64::from(self.options.height),
+                            i64::from(self.options.width),
+                        ],
+                        TensorLayout::Nhwc => vec![
+                            batch_size,
+                            i64::from(self.options.height),
+                            i64::from(self.options.width),
+                            3,
+                        ],
+                    }
+                },
                 input,
                 Some(vec!["C".to_owned(), "H".to_owned(), "W".to_owned()]),
             )?,
@@ -201,7 +299,27 @@ impl PreProcessor for ImageTensorPreProcessor {
     }
 }
 
-fn letterbox(image: &DynamicImage, width: u32, height: u32) -> Result<(RgbImage, f32, f32, f32)> {
+fn center_crop(image: &DynamicImage, width: u32, height: u32) -> (RgbImage, f32, f32, f32) {
+    let scale = (width as f32 / image.width() as f32).max(height as f32 / image.height() as f32);
+    let resized_width = image.width() as f32 * scale;
+    let resized_height = image.height() as f32 * scale;
+    let pixels = image
+        .resize_to_fill(width, height, image::imageops::FilterType::Triangle)
+        .to_rgb8();
+    (
+        pixels,
+        scale,
+        -((resized_width - width as f32) / 2.0),
+        -((resized_height - height as f32) / 2.0),
+    )
+}
+
+fn letterbox(
+    image: &DynamicImage,
+    width: u32,
+    height: u32,
+    pad_value: u8,
+) -> Result<(RgbImage, f32, f32, f32)> {
     let scale = (width as f32 / image.width() as f32).min(height as f32 / image.height() as f32);
     let resized_width = (image.width() as f32 * scale).round() as u32;
     let resized_height = (image.height() as f32 * scale).round() as u32;
@@ -233,7 +351,7 @@ fn letterbox(image: &DynamicImage, width: u32, height: u32) -> Result<(RgbImage,
         .ok_or_else(|| VqlError::new(ErrorCode::Internal, "resized RGB image is invalid"))?;
     let pad_x = (width - resized_width) / 2;
     let pad_y = (height - resized_height) / 2;
-    let mut output = RgbImage::from_pixel(width, height, Rgb([114, 114, 114]));
+    let mut output = RgbImage::from_pixel(width, height, Rgb([pad_value; 3]));
     output
         .copy_from(&resized, pad_x, pad_y)
         .expect("letterbox dimensions fit");
