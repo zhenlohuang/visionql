@@ -4,14 +4,46 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_pyarrow::{IntoPyArrow, Table};
+use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use vql_kernel::{Engine, EngineConfig, Session, Statement};
+use vql_kernel::{Engine, EngineConfig, Session, Statement, VqlError};
 
 use udf_host::PyArrowUdfHost;
 
-fn py_error(error: impl std::fmt::Display) -> PyErr {
+create_exception!(
+    _visionql,
+    VisionQLError,
+    PyRuntimeError,
+    "A structured VisionQL error. Inspect code, symbol, message, and target_version."
+);
+
+fn py_runtime_error(error: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
+}
+
+fn py_vql_error(error: VqlError) -> PyErr {
+    let code = error.code.as_str();
+    let symbol = error.code.symbol();
+    let message = error.message.clone();
+    let target_version = error.target_version.clone();
+    let exception = VisionQLError::new_err(error.to_string());
+    Python::attach(|py| {
+        let value = exception.value(py);
+        if let Err(attribute_error) = value.setattr("code", code) {
+            return attribute_error;
+        }
+        if let Err(attribute_error) = value.setattr("symbol", symbol) {
+            return attribute_error;
+        }
+        if let Err(attribute_error) = value.setattr("message", message) {
+            return attribute_error;
+        }
+        if let Err(attribute_error) = value.setattr("target_version", target_version) {
+            return attribute_error;
+        }
+        exception
+    })
 }
 
 #[pyclass(name = "Session")]
@@ -23,7 +55,7 @@ struct PySession {
 impl PySession {
     fn sql(&self, sql: &str) -> PyResult<PyQueryHandle> {
         Ok(PyQueryHandle {
-            statement: self.session.sql(sql).map_err(py_error)?,
+            statement: self.session.sql(sql).map_err(py_vql_error)?,
         })
     }
 
@@ -36,7 +68,7 @@ impl PySession {
                     .map(|statement| PyQueryHandle { statement })
                     .collect()
             })
-            .map_err(py_error)
+            .map_err(py_vql_error)
     }
 }
 
@@ -48,7 +80,9 @@ struct PyQueryHandle {
 #[pymethods]
 impl PyQueryHandle {
     fn collect(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let batches = py.detach(|| self.statement.collect()).map_err(py_error)?;
+        let batches = py
+            .detach(|| self.statement.collect())
+            .map_err(py_vql_error)?;
         let schema = batches
             .first()
             .map(|batch| batch.schema())
@@ -63,7 +97,7 @@ impl PyQueryHandle {
                     .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty())),
             });
         Table::try_new(batches, schema)
-            .map_err(py_error)?
+            .map_err(py_runtime_error)?
             .into_pyarrow(py)
             .map(|table| table.unbind())
     }
@@ -96,20 +130,20 @@ fn connect(
     catalog: Option<PathBuf>,
     session_memory_limit_bytes: Option<usize>,
 ) -> PyResult<PySession> {
-    let mut config = EngineConfig::load().map_err(py_error)?;
+    let mut config = EngineConfig::load().map_err(py_vql_error)?;
     if let Some(path) = catalog {
         config = config.with_catalog_path(path);
     }
     if let Some(limit) = session_memory_limit_bytes {
         config = config.with_session_memory_limit_bytes(limit);
     }
-    let engine = Engine::new(config).map_err(py_error)?;
+    let engine = Engine::new(config).map_err(py_vql_error)?;
     let host = Arc::new(PyArrowUdfHost::default());
     let session = engine
         .session()
         .with_python_udf_host(host)
         .build()
-        .map_err(py_error)?;
+        .map_err(py_vql_error)?;
     Ok(PySession { session })
 }
 
@@ -118,6 +152,7 @@ fn _visionql(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(connect, module)?)?;
     module.add_class::<PySession>()?;
     module.add_class::<PyQueryHandle>()?;
+    module.add("VisionQLError", module.py().get_type::<VisionQLError>())?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

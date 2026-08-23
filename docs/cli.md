@@ -49,7 +49,7 @@ Any read, parse, planning, or execution error terminates the command with a non-
 
 Bounded and continuous paths share one Arrow `RecordBatch` renderer, and an empty result prints `(no rows)`. Process-local `IMAGE` buffer identifiers never appear in terminal output: an `IMAGE` column is replaced by a text summary of the form `<image uri=URI WIDTHxHEIGHT>`, with `?` standing in for missing parts. Every other column keeps its Arrow field and value. The CLI does not decode thumbnails or introduce an alternative result schema.
 
-Error output preserves stable kernel error codes. Shell behavior must not depend on matching human-readable error strings.
+Error output uses the stable `[VQL-CCDDD] SYMBOL: message` kernel format. Shell behavior must not depend on matching human-readable error strings; the complete registry is defined by the [Error Code Design](./error_codes.md).
 
 ## Verification
 

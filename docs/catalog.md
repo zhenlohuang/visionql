@@ -158,6 +158,6 @@ Wire models and paths follow the [Unity Catalog OpenAPI v0.6.0](https://github.c
 | Schema | create, get, list, update, delete |
 | Table | create, get, list, delete |
 
-List operations use `max_results`, `page_token`, and `next_page_token`. Errors use the UC `{ "error_code", "message" }` envelope and corresponding HTTP statuses. The Axum router is available as `vql_catalog::uc::http::router` when the `http` feature is enabled.
+List operations use `max_results`, `page_token`, and `next_page_token`. Catalog domain errors use the shared [`VQL-CCDDD` identifiers](./error_codes.md). The compatibility adapter translates them to the UC `{ "error_code", "message" }` envelope and corresponding HTTP statuses; UC wire codes remain protocol values rather than VisionQL identifiers. The Axum router is available as `vql_catalog::uc::http::router` when the `http` feature is enabled.
 
 Credentials, grants, volumes, temporary table credentials, and registered-model versions are outside this compatibility surface.

@@ -63,5 +63,26 @@ def test_session_memory_limit_override(tmp_path):
         tmp_path / "catalog.db", session_memory_limit_bytes=128
     )
 
-    with pytest.raises(RuntimeError, match="session memory limit"):
+    with pytest.raises(visionql.VisionQLError, match="session memory limit") as caught:
         session.sql(f"SELECT '{'x' * 1024}' AS value").collect()
+
+    error = caught.value
+    assert isinstance(error, RuntimeError)
+    assert error.code == "VQL-53001"
+    assert error.symbol == "RESOURCE_EXHAUSTED"
+    assert "session memory limit" in error.message
+    assert error.target_version is None
+
+
+def test_feature_error_preserves_target_version(tmp_path):
+    session = visionql.connect(tmp_path / "catalog.db")
+
+    with pytest.raises(visionql.VisionQLError) as caught:
+        session.sql("CREATE INDEX future_index")
+
+    error = caught.value
+    assert error.code == "VQL-0A001"
+    assert error.symbol == "FEATURE_NOT_AVAILABLE"
+    assert error.message == "vector indexes are not available"
+    assert error.target_version == "v0.3"
+    assert str(error).endswith("(target: v0.3)")

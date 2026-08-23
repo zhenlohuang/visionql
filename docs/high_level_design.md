@@ -1,6 +1,6 @@
 # VisionQL High-Level Design
 
-> This document turns the [VisionQL PRD](./prd.md) into the system boundaries shared by every component. Detailed contracts live in the [Kernel](./kernel.md), [Catalog](./catalog.md), [CLI](./cli.md), [Python binding](./python_binding.md), and [Testing](./testing.md) designs.
+> This document turns the [VisionQL PRD](./prd.md) into the system boundaries shared by every component. Detailed contracts live in the [Kernel](./kernel.md), [Catalog](./catalog.md), [Error codes](./error_codes.md), [CLI](./cli.md), [Python binding](./python_binding.md), and [Testing](./testing.md) designs.
 
 ## Scope
 
@@ -175,6 +175,7 @@ Boundary rules:
 |---|---|
 | [Kernel](./kernel.md) | Planning, streaming, types, providers, inference, resources, and security |
 | [Catalog](./catalog.md) | Namespaces, definitions, provider capabilities, snapshots, backend, and UC API |
+| [Error codes](./error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI](./cli.md) | `shell` and `run`, terminal behavior, rendering, and signals |
 | [Python binding](./python_binding.md) | PyO3 API, PyArrow results, and Python UDF execution |
 | [Testing](./testing.md) | Test ownership, SQL conformance, fixtures, and external-service scenarios |

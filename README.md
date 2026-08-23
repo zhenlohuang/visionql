@@ -262,6 +262,16 @@ Relative paths are resolved from `VQL_HOME`. Configuration is strict: an unsuppo
 
 An explicit host-side Catalog override changes only the SQLite Catalog path; configuration, shell history, and the model cache remain under the same `VQL_HOME`.
 
+## Errors
+
+Hard failures have a stable `VQL-CCDDD` identifier, a readable symbol, and a diagnostic message:
+
+```text
+[VQL-42001] INVALID_SQL: expected a statement
+```
+
+CLI output uses that form. Python raises `visionql.VisionQLError`, a `RuntimeError` subclass whose `code`, `symbol`, `message`, and `target_version` attributes avoid error-string matching. See the [Error Code Design](docs/error_codes.md) for the registry and compatibility rules.
+
 ## Architecture
 
 ```mermaid
@@ -287,6 +297,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [High-level design](docs/high_level_design.md) | System boundaries, data paths, invariants, and dependency direction |
 | [Kernel design](docs/kernel.md) | Planning, streaming, media, inference, resources, and security |
 | [Catalog design](docs/catalog.md) | Namespaces, definitions, snapshots, providers, backends, and UC API |
+| [Error code design](docs/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI design](docs/cli.md) | Shell, script execution, rendering, and signal behavior |
 | [Python binding design](docs/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |
 | [Testing design](docs/testing.md) | Test ownership, sqllogictest cases, fixtures, and Compose services |

@@ -337,9 +337,9 @@ impl QueryHandle {
                     next = input.next() => next,
                 };
                 if cancellation.is_cancelled() {
-                    Err(datafusion::error::DataFusionError::Execution(
-                        "[VQL:QUERY_CANCELLED] query cancelled".to_owned(),
-                    ))?;
+                    Err(datafusion::error::DataFusionError::External(Box::new(
+                        VqlError::new(ErrorCode::QueryCancelled, "query cancelled"),
+                    )))?;
                 }
                 let Some(batch) = next else { break; };
                 let batch = batch?;
@@ -411,9 +411,9 @@ impl QueryHandle {
                     datafusion::error::DataFusionError::External(Box::new(error))
                 })?;
                 if cancellation.is_cancelled() {
-                    Err(datafusion::error::DataFusionError::Execution(
-                        "[VQL:QUERY_CANCELLED] query cancelled".to_owned(),
-                    ))?;
+                    Err(datafusion::error::DataFusionError::External(Box::new(
+                        VqlError::new(ErrorCode::QueryCancelled, "query cancelled"),
+                    )))?;
                 }
                 let Some(epoch) = next else { break; };
                 let dataframe = bind_stream_epoch(

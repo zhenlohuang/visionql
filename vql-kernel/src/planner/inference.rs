@@ -1210,9 +1210,10 @@ impl ExecutionPlan for InferenceExec {
         let stream = async_stream::try_stream! {
             while let Some(batch) = input.next().await {
                 if cancellation.is_cancelled() {
-                    Err(DataFusionError::Execution(
-                        "[VQL:QUERY_CANCELLED] query cancelled".to_owned(),
-                    ))?;
+                    Err(DataFusionError::External(Box::new(crate::VqlError::new(
+                        crate::ErrorCode::QueryCancelled,
+                        "query cancelled",
+                    ))))?;
                 }
                 let batch = batch?;
                 let values = input_exprs

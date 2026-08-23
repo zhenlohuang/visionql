@@ -741,25 +741,9 @@ A benchmark records the measured rates, window latency, and frame-drop rate toge
 | External-system error | RTSP disconnect, Kafka unavailable | Retry by connector policy; eventually fail or remain Disconnected |
 | Engine defect | Broken invariant, frame-buffer bounds violation | Fail immediately with diagnostics; never downgrade to NULL |
 
-Stable codes are separate from prose messages. Clients react to codes, never error-string matching. Every kernel error renders as `[VQL:CODE] message` over this closed set:
+Stable identifiers are separate from prose messages. Clients react to identifiers, never error-string matching. Every kernel error follows the [`VQL-CCDDD` registry](./error_codes.md) and renders as `[VQL-CCDDD] SYMBOL: message`.
 
-| Code | Meaning |
-|---|---|
-| `FEATURE_NOT_AVAILABLE` | Parseable but unavailable syntax; carries a target release or states that it is unscheduled, and registers no Catalog object |
-| `INVALID_SQL` | Syntax, allowlist, or statement-shape rejection |
-| `INVALID_ARGUMENT` | A function argument violates its task contract or requires an explicit migration rewrite |
-| `INVALID_OPTION` | Bad DDL option, Runtime option, or configuration value, reported with its full option path |
-| `INVALID_LOCATION` | Unusable table location or path |
-| `NAME_CONFLICT` | A Model, Function, or reserved built-in already owns a callable name; identifies the existing kind |
-| `CATALOG_ERROR` | Catalog storage or consistency failure |
-| `ALREADY_EXISTS` / `NOT_FOUND` | Object lifecycle conflicts |
-| `QUERY_CANCELLED` | Cancellation or graceful stop observed by the caller |
-| `RESOURCE_EXHAUSTED` | A reservation exceeded the Session budget or a state cap |
-| `PYTHON_HOST_REQUIRED` | A Python UDF was reached without an installed Python UDF host |
-| `EXECUTION_ERROR` | Runtime, connector, or media failure during execution |
-| `INTERNAL_ERROR` | Broken engine invariant |
-
-Adding, removing, or renaming a code is a contract change: unit tests assert on these values directly.
+`ErrorCode::as_str()` returns the identifier, while `ErrorCode::symbol()` returns the readable symbolic name. Known errors retain their identifier when they pass through DataFusion or an asynchronous execution boundary. Adding an identifier is additive; removing, reusing, or changing the meaning of an identifier or symbol is a breaking contract change. Owner tests assert on identifiers and symbols directly.
 
 ---
 

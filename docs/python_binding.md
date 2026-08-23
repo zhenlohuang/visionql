@@ -14,7 +14,7 @@
 
 It does not reimplement SQL planning, result schemas, cancellation, resource accounting, or model execution. DataFusion types do not appear in the public Python API.
 
-The package and import name are `visionql`; the native module is `visionql._visionql`. The package re-exports `connect`, `Session`, `QueryHandle`, `__version__`, and the pure-Python `visionql.images` helper module.
+The package and import name are `visionql`; the native module is `visionql._visionql`. The package re-exports `connect`, `Session`, `QueryHandle`, `VisionQLError`, `__version__`, and the pure-Python `visionql.images` helper module.
 
 ## Public API
 
@@ -44,7 +44,7 @@ For an uncollected query or `EXPLAIN` statement, `QueryHandle` is a lazy host ha
 
 `show(n)` collects, slices to at most `n` rows, and returns the PyArrow text representation; `n` defaults to 20. `_repr_html_()` shows the same 20-row view inside an escaped `<pre>` block. The binding never implicitly fetches original media or renders notebook thumbnails; explicit encoding is required before media crosses the process boundary.
 
-`cancel()` forwards to the kernel cancellation token. `collect()` releases the Python GIL while blocking in the kernel. `run_script()` is a synchronous Python call, and an invoked Python UDF necessarily runs under the GIL. A kernel failure becomes `RuntimeError` while preserving its stable `[VQL:CODE]` representation in the message.
+`cancel()` forwards to the kernel cancellation token. `collect()` releases the Python GIL while blocking in the kernel. `run_script()` is a synchronous Python call, and an invoked Python UDF necessarily runs under the GIL. A kernel failure becomes `VisionQLError`, a `RuntimeError` subclass. Its `code`, `symbol`, `message`, and `target_version` attributes preserve the [structured error contract](./error_codes.md); `str(error)` uses `[VQL-CCDDD] SYMBOL: message`.
 
 ## Arrow Boundary
 

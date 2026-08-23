@@ -94,7 +94,7 @@ Optional host capabilities are injected, never discovered: `EngineConfig::with_s
 
 ### Error contract
 
-`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL:CODE] message`. Row-level failures (bad image, failed inference) produce NULL result columns; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change.
+`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL-CCDDD] SYMBOL: message`; `as_str()` returns the identifier and `symbol()` returns the readable name. Row-level failures (bad image, failed inference) produce NULL result columns; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change. The registry and extension rules live in `docs/error_codes.md`.
 
 ## Testing model
 
