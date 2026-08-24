@@ -344,17 +344,19 @@ pre-commit run --all-files
 pre-commit run --hook-stage pre-push --all-files
 ```
 
-The feature-gated system suite owns real datasets, models, RTSP, and Kafka. Run one real-model SQL
-scenario after installing the integration fixtures with:
+The feature-gated system suite owns real datasets, models, RTSP, and Kafka. Run the real-image
+task-shaped inference target after installing the integration fixtures with:
 
 ```bash
-VQL_TEST_CASE=models/mixed_size_images \
 VQL_INTEGRATION_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
-  --test slt \
+  --test image \
   --locked
 ```
+
+The complete strict suite runs the image, video, Catalog Model, RTSP, and Kafka targets through
+`scripts/run-integration-tests.sh`.
 
 ## Contributing
 

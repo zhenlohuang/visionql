@@ -23,7 +23,7 @@ Tests:
 ```bash
 cargo test -p vql-kernel --test slt --locked                      # kernel-owned SQL contracts
 VQL_TEST_CASE=models/object_detection cargo test -p vql-kernel --test slt --locked # filter cases
-VQL_INTEGRATION_TEST=1 cargo test -p vql-testing --features system-tests --test slt --locked # real artifacts
+VQL_INTEGRATION_TEST=1 cargo test -p vql-testing --features system-tests --test image --test video --test model --locked # real artifacts
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
 scripts/run-integration-tests.sh                                  # strict suite with profiled Compose services
 ```
@@ -104,7 +104,7 @@ Rust unit tests live beside their modules and cover everything a synthetic fixtu
 
 Kernel SQL contracts use `sqllogictest-rs` through `vql-kernel/tests/slt.rs`. Cases are grouped by owner under `tests/slt/{ddl,connectors,functions,models}`, and every case gets a fresh Engine, catalog, and temporary `VQL_HOME`. Exact field names and nullability stay in `result_schema.rs`; branch behavior such as invalid TUMBLE widths and connector projection stays beside its implementation. There is no synthetic `scenarios` layer.
 
-Each `vql-testing` target pairs a top-level entry point with same-named private resources: `slt.rs` + `slt/`, `rtsp.rs` + `rtsp/`, and `kafka.rs` + `kafka/`. Real-data/model Sqllogictest cases are grouped under `slt/{functions,models}`, with their private adapter in `slt/harness.rs`; external-service SQL stays beside its runner. The `slt`, `rtsp`, and `kafka` targets require the `system-tests` feature and run serially where needed. Their fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`. `VQL_INTEGRATION_TEST=1` turns a missing requirement into a failure. The root `docker-compose.yaml` provides optional external services through profiles (`rtsp`, `kafka`), and `scripts/run-integration-tests.sh` starts isolated dependencies and runs the strict suite. See `docs/testing.md`.
+Each `vql-testing` target pairs a top-level entry point with same-named private SQL resources. `image`, `video`, `model`, `rtsp`, and `kafka` cover real media/model execution and external-service journeys; shared isolated-session helpers live under `tests/support/`. Task-shaped scenarios call `VQL_CLASSIFY` or `VQL_DETECT`, while the `model` target preserves the real Catalog Model resolve/direct-call contract. Every target requires the `system-tests` feature and runs serially where needed. Fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`. `VQL_INTEGRATION_TEST=1` turns a missing requirement into a failure. The root `docker-compose.yaml` provides optional external services through profiles (`rtsp`, `kafka`), and `scripts/run-integration-tests.sh` starts isolated dependencies and runs the strict suite. See `docs/testing.md`.
 
 `cargo test --workspace` executes the same deterministic tests on a fresh clone and a fixture-rich checkout. CI runs Rust coverage and a separate built-wheel Python API job; it does not run real external-service E2E.
 

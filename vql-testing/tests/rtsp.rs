@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use arrow::array::{Float64Array, Int64Array, UInt64Array};
 use libtest_mimic::{Arguments, Completion, Failed, Trial};
-use tempfile::tempdir;
-use vql_kernel::{Engine, EngineConfig};
+
+#[path = "support/mod.rs"]
+mod support;
+
+use support::{FixturePaths, SystemSession};
 
 const RTSP_URL_ENV: &str = "VQL_TEST_RTSP_URL";
-const REQUIRE_ENV: &str = "VQL_INTEGRATION_TEST";
 const RTSP_SETUP_SQL: &str = include_str!("rtsp/setup.sql");
 const PEOPLE_DETECTION_SQL: &str = include_str!("rtsp/detect_people.sql");
 const PEOPLE_PER_TUMBLE_SQL: &str = include_str!("rtsp/people_per_window.sql");
@@ -29,11 +31,9 @@ fn main() {
         arguments.test_threads = Some(1);
     }
 
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("vql-testing has a workspace parent");
-    let video = workspace.join("data/datasets/videos/sample-videos/people-detection.mp4");
-    let model = workspace.join("data/models/yolo26n.onnx");
+    let fixtures = FixturePaths::from_workspace(&support::workspace_root());
+    let video = fixtures.videos.join("people-detection.mp4");
+    let detector = fixtures.detector;
     let endpoint = std::env::var(RTSP_URL_ENV)
         .ok()
         .filter(|value| !value.is_empty());
@@ -52,32 +52,23 @@ fn main() {
             video.display()
         ));
     }
-    if !model.is_file() {
+    if !detector.is_file() {
         missing.push(format!(
-            "{} (run: python scripts/export_yolo26.py --size n)",
-            model.display()
+            "{} (run: python scripts/export_yolo26.py --task detect --size n)",
+            detector.display()
         ));
     }
-    let require_dependencies = std::env::var_os(REQUIRE_ENV).is_some();
 
     let trial = Trial::ignorable_test(
         "rtsp/real_stream_detects_people_and_closes_tumble_windows",
         move || {
-            if !missing.is_empty() {
-                let message = format!(
-                    "missing RTSP integration dependencies:\n  {}",
-                    missing.join("\n  ")
-                );
-                return if require_dependencies {
-                    Err(Failed::from(message))
-                } else {
-                    Ok(Completion::ignored_with(message))
-                };
+            if let Some(result) = support::prerequisite_result("RTSP", &missing) {
+                return result;
             }
             run_rtsp_case(
                 endpoint.as_deref().expect("endpoint was checked"),
                 &video,
-                &model,
+                &detector,
             )
             .map(|()| Completion::Completed)
             .map_err(Failed::from)
@@ -87,8 +78,7 @@ fn main() {
     libtest_mimic::run(&arguments, vec![trial]).exit();
 }
 
-fn run_rtsp_case(endpoint: &str, video: &Path, model: &Path) -> Result<(), String> {
-    let temp = tempdir().map_err(|error| error.to_string())?;
+fn run_rtsp_case(endpoint: &str, video: &Path, detector: &Path) -> Result<(), String> {
     let _publisher = ChildGuard(
         Command::new("ffmpeg")
             .args(["-nostdin", "-v", "error", "-re", "-stream_loop", "-1", "-i"])
@@ -110,18 +100,9 @@ fn run_rtsp_case(endpoint: &str, video: &Path, model: &Path) -> Result<(), Strin
             .map_err(|error| format!("start FFmpeg publisher: {error}"))?,
     );
 
-    let engine = Engine::new(EngineConfig::from_home(temp.path().join("vql-home")))
-        .map_err(|error| error.to_string())?;
-    let session = engine
-        .session()
-        .build()
-        .map_err(|error| error.to_string())?;
-    let setup_sql = RTSP_SETUP_SQL
-        .replace("${RTSP_URL}", &escape_sql_literal(endpoint))
-        .replace(
-            "${MODEL_PATH}",
-            &escape_sql_literal(&model.to_string_lossy()),
-        );
+    let system = SystemSession::isolated(Some(detector), None)?;
+    let session = system.session.clone();
+    let setup_sql = RTSP_SETUP_SQL.replace("${RTSP_URL}", &escape_sql_literal(endpoint));
     session
         .run_script(&setup_sql)
         .map_err(|error| format!("set up RTSP test objects: {error}"))?;

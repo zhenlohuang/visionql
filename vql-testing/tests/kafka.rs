@@ -6,11 +6,13 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
-use tempfile::tempdir;
-use vql_kernel::{Engine, EngineConfig};
+
+#[path = "support/mod.rs"]
+mod support;
+
+use support::{FixturePaths, SystemSession};
 
 const KAFKA_BOOTSTRAP_SERVERS_ENV: &str = "VQL_TEST_KAFKA_BOOTSTRAP_SERVERS";
-const REQUIRE_ENV: &str = "VQL_INTEGRATION_TEST";
 const KAFKA_SETUP_SQL: &str = include_str!("kafka/setup.sql");
 const KAFKA_PUBLISH_SQL: &str = include_str!("kafka/publish.sql");
 
@@ -22,31 +24,44 @@ fn main() {
     let bootstrap_servers = std::env::var(KAFKA_BOOTSTRAP_SERVERS_ENV)
         .ok()
         .filter(|value| !value.is_empty());
-    let require_dependencies = std::env::var_os(REQUIRE_ENV).is_some();
+    let fixtures = FixturePaths::from_workspace(&support::workspace_root());
+    let mut missing = Vec::new();
+    if bootstrap_servers.is_none() {
+        missing.push(format!(
+            "missing {KAFKA_BOOTSTRAP_SERVERS_ENV} \
+             (start Kafka with docker compose --profile kafka up -d)"
+        ));
+    }
+    missing.extend(
+        [
+            support::missing_path(&fixtures.images, "python scripts/fetch_datasets.py"),
+            support::missing_path(
+                &fixtures.detector,
+                "python scripts/export_yolo26.py --task detect --size n",
+            ),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     let trial = Trial::ignorable_test(
-        "kafka/bounded_query_publishes_acknowledged_json",
+        "kafka/vql_detect_result_is_acknowledged_and_consumable",
         move || {
-            let Some(bootstrap_servers) = bootstrap_servers.as_deref() else {
-                let message = format!(
-                    "missing {KAFKA_BOOTSTRAP_SERVERS_ENV} \
-                 (start Kafka with docker compose --profile kafka up -d)"
-                );
-                return if require_dependencies {
-                    Err(Failed::from(message))
-                } else {
-                    Ok(Completion::ignored_with(message))
-                };
-            };
-            run_kafka_case(bootstrap_servers)
-                .map(|()| Completion::Completed)
-                .map_err(Failed::from)
+            if let Some(result) = support::prerequisite_result("Kafka", &missing) {
+                return result;
+            }
+            run_kafka_case(
+                bootstrap_servers.as_deref().expect("endpoint was checked"),
+                &fixtures,
+            )
+            .map(|()| Completion::Completed)
+            .map_err(Failed::from)
         },
     );
 
     libtest_mimic::run(&arguments, vec![trial]).exit();
 }
 
-fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
+fn run_kafka_case(bootstrap_servers: &str, fixtures: &FixturePaths) -> Result<(), String> {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
@@ -56,23 +71,22 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(create_topic(bootstrap_servers, &topic))?;
     drop(runtime);
-    let temp = tempdir().map_err(|error| error.to_string())?;
     {
-        let engine = Engine::new(EngineConfig::from_home(temp.path().join("vql-home")))
-            .map_err(|error| error.to_string())?;
-        let session = engine
-            .session()
-            .build()
-            .map_err(|error| error.to_string())?;
+        let system = SystemSession::isolated(Some(&fixtures.detector), None)?;
+        let session = &system.session;
         let setup_sql = KAFKA_SETUP_SQL
             .replace(
                 "${KAFKA_BOOTSTRAP_SERVERS}",
                 &escape_sql_literal(bootstrap_servers),
             )
-            .replace("${KAFKA_TOPIC}", &escape_sql_literal(&topic));
+            .replace("${KAFKA_TOPIC}", &escape_sql_literal(&topic))
+            .replace(
+                "${IMAGES_LOCATION}",
+                &escape_sql_literal(&fixtures.images.to_string_lossy()),
+            );
         session
-            .sql(&setup_sql)
-            .map_err(|error| format!("create Kafka table: {error}"))?;
+            .run_script(&setup_sql)
+            .map_err(|error| format!("create image and Kafka tables: {error}"))?;
         let statement = session
             .sql(KAFKA_PUBLISH_SQL)
             .map_err(|error| format!("plan Kafka table write: {error}"))?;
@@ -80,8 +94,8 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
             .collect()
             .map_err(|error| format!("publish Kafka table write: {error}"))?;
         let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
-        if rows != 2 {
-            return Err(format!("expected 2 acknowledged query rows, found {rows}"));
+        if rows != 1 {
+            return Err(format!("expected 1 acknowledged query row, found {rows}"));
         }
     }
 
@@ -101,7 +115,7 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
                 .map_err(|error| format!("subscribe to Kafka topic: {error}"))?;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
             let mut messages = Vec::new();
-            while messages.len() < 2 && tokio::time::Instant::now() < deadline {
+            while messages.is_empty() && tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout(Duration::from_millis(500), consumer.recv()).await {
                     Ok(Ok(message)) => {
                         if let Some(value) = message.payload() {
@@ -118,10 +132,7 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
             Ok::<_, String>(messages)
         })?;
     messages.sort();
-    let mut expected = vec![
-        r#"{"answer":42,"note":null}"#.to_owned(),
-        r#"{"answer":7,"note":"seven"}"#.to_owned(),
-    ];
+    let mut expected = vec![r#"{"image":"000000000049.jpg","detected":true}"#.to_owned()];
     expected.sort();
     if messages != expected {
         return Err(format!(

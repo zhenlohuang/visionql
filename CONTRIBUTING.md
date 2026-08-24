@@ -84,41 +84,33 @@ python scripts/export_yolo26.py --task detect --size n
 python scripts/export_yolo26.py --task classify --size n
 ```
 
-Then run the real-data/model SQL suite, optionally narrowing it while iterating:
+Then run the real-data/model targets that do not require external services:
 
 ```bash
 VQL_INTEGRATION_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
-  --test slt \
+  --test image \
+  --test video \
+  --test model \
   --locked
 ```
 
 `vql-testing` has no library or unit-test target. Its dependencies are test-only, and every integration-test target requires `system-tests`, so the package contributes no target to the default Cargo test graph. Without strict mode, a manually selected system target reports missing prerequisites as ignored; `VQL_INTEGRATION_TEST=1` makes them fail.
 
-A case contains its setup statements, behavior query, and expected rows in standard sqllogictest form:
-
-```text
-query B
-SELECT COUNT(*) > 0 AS found FROM ...;
-----
-true
-```
-
-Real cases are grouped by their primary boundary under `vql-testing/tests/slt/{functions,models}`. The SLT adapter stays private in `tests/slt/harness.rs`; RTSP and Kafka SQL stay beside their runners under `tests/rtsp/` and `tests/kafka/`. Keep one behavior per file and return stable values that can be compared exactly. Every file receives an isolated temporary catalog, so do not add cleanup SQL unless cleanup is the behavior under test. Read the [Testing Design](docs/testing.md) before adding a case.
+Real cases are grouped by their primary boundary under `vql-testing/tests/{image,video,model,rtsp,kafka}`. Every target pairs a top-level Rust runner with same-named SQL resources, receives an isolated temporary catalog, and asserts stable semantic outcomes instead of model-specific score snapshots. Task-shaped scenarios use `VQL_CLASSIFY` or `VQL_DETECT`; the `model` target preserves the public Catalog Model resolve/direct-call journey. Read the [Testing Design](docs/testing.md) before adding a case.
 
 If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
 
 ### Real-model integration scenario
 
-The mixed-size image batch scenario exercises the ONNX pipeline through public SQL:
+The image target exercises classification, detection, unknown-class filtering, and mixed-size ONNX batching through public SQL:
 
 ```bash
-VQL_TEST_CASE=models/mixed_size_images \
 VQL_INTEGRATION_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
-  --test slt \
+  --test image \
   --locked
 ```
 

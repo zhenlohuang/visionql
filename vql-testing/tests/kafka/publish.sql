@@ -1,7 +1,12 @@
 INSERT INTO events
-SELECT *
-FROM (
-  VALUES
-    (CAST(42 AS BIGINT), CAST(NULL AS VARCHAR)),
-    (CAST(7 AS BIGINT), 'seven')
-) AS rows(answer, note)
+SELECT
+  '000000000049.jpg' AS image,
+  CARDINALITY(
+    VQL_DETECT(
+      image,
+      classes => ['person'],
+      min_score => 0.25
+    )
+  ) > 0 AS detected
+FROM photos
+WHERE uri LIKE '%/000000000049.jpg'

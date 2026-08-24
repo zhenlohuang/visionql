@@ -1,9 +1,10 @@
 SELECT
   frame_id,
   CARDINALITY(
-    detector(frame,
+    VQL_DETECT(
+      frame,
       classes => ['person'],
-      min_confidence => 0.5
+      min_score => 0.5
     )
   ) AS people
 FROM people_stream

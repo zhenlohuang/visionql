@@ -46,18 +46,20 @@ Its layout is:
 vql-testing/
 ├── Cargo.toml                 # test-only dependencies and explicit test targets
 └── tests/
-    ├── slt.rs                 # real-data/model Sqllogictest runner
-    ├── slt/
-    │   ├── harness.rs         # private Sqllogictest adapter
-    │   ├── functions/
-    │   └── models/
+    ├── support/               # shared isolated-session and fixture helpers
+    ├── image.rs               # real image and task-shaped inference runner
+    ├── image/                 # image setup and assertion queries
+    ├── video.rs               # real video and task-shaped inference runner
+    ├── video/                 # video setup and assertion queries
+    ├── model.rs               # real Catalog Model runner
+    ├── model/                 # Catalog Model setup and assertion queries
     ├── rtsp.rs                # RTSP system-test runner
     ├── rtsp/                  # RTSP setup and query scripts
     ├── kafka.rs               # Kafka system-test runner
     └── kafka/                 # Kafka setup and publish scripts
 ```
 
-All dependencies are dev-dependencies, and the explicit `slt`, `rtsp`, and `kafka` integration-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
+All dependencies are dev-dependencies, and the explicit `image`, `video`, `model`, `rtsp`, and `kafka` integration-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
 
 ## Default gate
 
@@ -91,7 +93,7 @@ The adapter uses `B`, `I`, `R`, and `T` for Boolean, integer, real, and text res
 
 ## System suite
 
-Real-data and real-model Sqllogictest cases live under `vql-testing/tests/slt/{functions,models}`. The runner's private adapter is `slt/harness.rs`; RTSP and Kafka SQL scripts live beside their runners under `tests/rtsp/` and `tests/kafka/`. Fetch the artifact prerequisites with:
+Each system target exercises one public end-to-end boundary and uses Rust assertions over stable semantic outcomes. SQL resources live beside their runner under the matching `tests/<target>/` directory. Fetch the artifact prerequisites with:
 
 ```bash
 python scripts/fetch_datasets.py
@@ -99,36 +101,29 @@ python scripts/export_yolo26.py --task detect --size n
 python scripts/export_yolo26.py --task classify --size n
 ```
 
-Run only the real SQL cases with:
+Run the real image, video, and Catalog Model targets without external services with:
 
 ```bash
 VQL_INTEGRATION_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
-  --test slt \
+  --test image \
+  --test video \
+  --test model \
   --locked
 ```
 
-The system SQL harness uses [`sqllogictest-rs`](https://github.com/risinglightdb/sqllogictest-rs), exposes each `.slt` file as an individual Cargo test, and runs serially to bound CPU and model memory. `VQL_TEST_CASE` filters by the relative case name and fails when no case matches. The adapter compares values exactly without whitespace normalization and recognizes these result families:
+The targets prove these journeys:
 
-| Code | VisionQL result family |
-| --- | --- |
-| `B` | Boolean |
-| `I` | Signed or unsigned integer |
-| `R` | Floating point or decimal |
-| `T` | Text and other displayable Arrow values |
+| Target | Public journey | Stable assertions |
+| --- | --- | --- |
+| `image` | `IMAGES` → `VQL_CLASSIFY` / `VQL_DETECT` | Known classifications and detections, locator presence, unknown-class filtering, mixed-size batching |
+| `video` | `VIDEOS` → decoded frames → `VQL_DETECT` | Eight distinct sequential frames with valid timing and dimensions, plus at least one person detection |
+| `model` | `CREATE MODEL` → `RESOLVE MODEL` → direct call | A real Catalog Model resolves and produces a person detection |
+| `rtsp` | RTSP frames → `VQL_DETECT` → `TUMBLE` | Eight frames, positive detections, and two internally consistent closed windows |
+| `kafka` | `IMAGES` → `VQL_DETECT` → Kafka Sink | Broker acknowledgement and exact consumed JSON for the inferred semantic result |
 
-Sqllogictest validates ordered result types and values, but not field names or nullability; those remain kernel owner contracts. VisionQL DDL therefore uses `query T` with its exact returned message rather than `statement ok`.
-
-The harness recognizes these substitutions:
-
-| Placeholder | Repository artifact |
-| --- | --- |
-| `${IMAGES_LOCATION}` | `data/datasets/images/coco128/images` |
-| `${VIDEOS_LOCATION}` | `data/datasets/videos/sample-videos` |
-| `${MODEL}` | `data/models/yolo26n.onnx` |
-| `${BUILTIN_DETECTION_MODEL}` | Detection model installed into the isolated `VQL_HOME` |
-| `${BUILTIN_CLASSIFICATION_MODEL}` | Classification model installed into the isolated `VQL_HOME` |
+Each target creates an isolated temporary `VQL_HOME`. Task-shaped inference targets install only their required release-managed artifacts under that home. Real-model execution is serial within each target to bound CPU and model memory. Exact Arrow field names, types, and nullability remain kernel owner contracts rather than system assertions.
 
 The root `docker-compose.yaml` exposes pinned optional `rtsp` and `kafka` profiles. Compose owns long-running services; the RTSP test owns its FFmpeg publisher and the Kafka test owns its topic and consumer group. Run every strict system target in an isolated Compose project with:
 

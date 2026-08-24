@@ -14,15 +14,25 @@ system-tests = []
 arrow.workspace = true
 libtest-mimic.workspace = true
 rdkafka.workspace = true
-sqllogictest.workspace = true
 tempfile.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 vql-kernel = { path = "../vql-kernel" }
 
 [[test]]
-name = "slt"
-path = "tests/slt.rs"
+name = "image"
+path = "tests/image.rs"
+harness = false
+required-features = ["system-tests"]
+
+[[test]]
+name = "video"
+path = "tests/video.rs"
+harness = false
+required-features = ["system-tests"]
+
+[[test]]
+name = "model"
+path = "tests/model.rs"
 harness = false
 required-features = ["system-tests"]
 
