@@ -145,3 +145,62 @@ jobs:
             target/llvm-cov/lcov.info
           if-no-files-found: error
           retention-days: 7
+
+  python-api:
+    name: Python API
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install native development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            clang \
+            libavcodec-dev \
+            libavdevice-dev \
+            libavfilter-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libclang-dev \
+            libswresample-dev \
+            libswscale-dev \
+            perl \
+            pkg-config
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      - name: Build and test the Python API
+        working-directory: vql-python
+        run: |
+          python -m pip install "maturin>=1.9,<2" pytest pytest-cov pyarrow
+          maturin build --locked --out ../target/wheels
+          python -m pip install ../target/wheels/*.whl
+          cd ..
+          python -m pytest -q \
+            --cov=visionql \
+            --cov-report=term-missing \
+            --cov-report=xml:target/python-coverage.xml \
+            vql-python/tests
+
+      - name: Upload Python coverage
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-coverage
+          path: target/python-coverage.xml
+          if-no-files-found: error
+          retention-days: 7

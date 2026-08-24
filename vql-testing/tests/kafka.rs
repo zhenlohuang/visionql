@@ -8,9 +8,11 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use tempfile::tempdir;
 use vql_kernel::{Engine, EngineConfig};
-use vql_testing::REQUIRE_ENV;
 
 const KAFKA_BOOTSTRAP_SERVERS_ENV: &str = "VQL_TEST_KAFKA_BOOTSTRAP_SERVERS";
+const REQUIRE_ENV: &str = "VQL_INTEGRATION_TEST";
+const KAFKA_SETUP_SQL: &str = include_str!("kafka/setup.sql");
+const KAFKA_PUBLISH_SQL: &str = include_str!("kafka/publish.sql");
 
 fn main() {
     let mut arguments = Arguments::from_args();
@@ -62,21 +64,17 @@ fn run_kafka_case(bootstrap_servers: &str) -> Result<(), String> {
             .session()
             .build()
             .map_err(|error| error.to_string())?;
+        let setup_sql = KAFKA_SETUP_SQL
+            .replace(
+                "${KAFKA_BOOTSTRAP_SERVERS}",
+                &escape_sql_literal(bootstrap_servers),
+            )
+            .replace("${KAFKA_TOPIC}", &escape_sql_literal(&topic));
         session
-            .sql(&format!(
-                "CREATE TABLE events USING KAFKA OPTIONS (\
-                 bootstrap_servers = '{}', topic = '{topic}', \
-                 delivery_timeout_ms = 15000, buffer_capacity = 2)",
-                escape_sql_literal(bootstrap_servers)
-            ))
+            .sql(&setup_sql)
             .map_err(|error| format!("create Kafka table: {error}"))?;
         let statement = session
-            .sql(
-                "INSERT INTO events \
-                 SELECT * FROM (VALUES \
-                 (CAST(42 AS BIGINT), CAST(NULL AS VARCHAR)), \
-                 (CAST(7 AS BIGINT), 'seven')) AS rows(answer, note)",
-            )
+            .sql(KAFKA_PUBLISH_SQL)
             .map_err(|error| format!("plan Kafka table write: {error}"))?;
         let batches = statement
             .collect()

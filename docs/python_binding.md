@@ -73,4 +73,4 @@ Python-owned API tests run after `maturin develop --locked`:
 python -m pytest -q vql-python/tests
 ```
 
-They protect PyArrow collection, schema preservation, Session configuration overrides, notebook representation, vectorized Python UDFs, and encoded-image flow through a Python UDF. Shared SQL conformance and external-service scenarios remain in the [Testing Design](./testing.md).
+They protect PyArrow collection, schema preservation, Session configuration overrides, notebook representation, vectorized Python UDFs, and encoded-image flow through a Python UDF. Kernel SQL owner tests and external-service scenarios are defined in the [Testing Design](./testing.md).

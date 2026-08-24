@@ -6,8 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-[dependencies]
+[features]
+default = []
+system-tests = []
+
+[dev-dependencies]
 arrow.workspace = true
+libtest-mimic.workspace = true
 rdkafka.workspace = true
 sqllogictest.workspace = true
 tempfile.workspace = true
@@ -15,20 +20,20 @@ thiserror.workspace = true
 tokio.workspace = true
 vql-kernel = { path = "../vql-kernel" }
 
-[dev-dependencies]
-libtest-mimic.workspace = true
-
 [[test]]
-name = "sql"
-path = "tests/sql.rs"
+name = "slt"
+path = "tests/slt.rs"
 harness = false
+required-features = ["system-tests"]
 
 [[test]]
 name = "rtsp"
 path = "tests/rtsp.rs"
 harness = false
+required-features = ["system-tests"]
 
 [[test]]
 name = "kafka"
 path = "tests/kafka.rs"
 harness = false
+required-features = ["system-tests"]

@@ -382,6 +382,7 @@ fn build_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Int32Array;
     use datafusion::prelude::{SessionConfig, SessionContext};
     use image::{Rgb, RgbImage};
     use tempfile::tempdir;
@@ -408,5 +409,43 @@ mod tests {
             assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
         });
         assert_eq!(metrics.dimension_probes(), 0);
+    }
+
+    #[test]
+    fn custom_provider_reads_mixed_image_dimensions() {
+        let temp = tempdir().unwrap();
+        for (name, width, height) in [("one.png", 1, 1), ("wide.png", 2, 1), ("widest.png", 3, 2)] {
+            RgbImage::from_pixel(width, height, Rgb([1, 2, 3]))
+                .save(temp.path().join(name))
+                .unwrap();
+        }
+        let provider = Arc::new(ImagesTableProvider::try_new(temp.path(), 1, false).unwrap());
+        let metrics = provider.metrics();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let context = SessionContext::new_with_config(SessionConfig::new());
+            context.register_table("photos", provider).unwrap();
+            let batches = context
+                .sql("SELECT width, height FROM photos ORDER BY width")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            assert_eq!(batches.len(), 1);
+            let widths = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let heights = batches[0]
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(widths.values(), &[1, 2, 3]);
+            assert_eq!(heights.values(), &[1, 1, 2]);
+        });
+        assert_eq!(metrics.dimension_probes(), 3);
     }
 }

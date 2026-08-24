@@ -115,7 +115,7 @@ Optimization follows the same order across providers: prune columns and time ran
 | Media runtime | Probe, read, decode, sample, frame buffers, encode | Model pre- or post-processing |
 | Model runtime | Artifact resolution, compiled pipelines, bounded scheduling, inference | SQL or Catalog authorization semantics |
 | Catalog | Definitions, namespaces, provider capabilities, transactions, snapshots, UC wire translation | Media bytes, model weights, credentials, durable jobs |
-| Testing | Shared SQL conformance, real-fixture scenarios, external-service system tests | Owner-module invariants that can be proved locally |
+| Testing | Real-fixture scenarios and external-service system tests | Owner-module invariants that can be proved locally |
 
 ## Batch and Streaming Paths
 
@@ -135,7 +135,7 @@ visionql/
 ├── vql-kernel/                   # planning, execution, media, models, connectors
 ├── vql-cli/                      # shell and script host
 ├── vql-python/                   # PyO3 and Python UDF host
-├── vql-testing/                  # shared conformance and system tests
+├── vql-testing/                  # integration-test targets; no library
 └── docs/
 ```
 
@@ -178,7 +178,7 @@ Boundary rules:
 | [Error codes](./error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI](./cli.md) | `shell` and `run`, terminal behavior, rendering, and signals |
 | [Python binding](./python_binding.md) | PyO3 API, PyArrow results, and Python UDF execution |
-| [Testing](./testing.md) | Test ownership, SQL conformance, fixtures, and external-service scenarios |
+| [Testing](./testing.md) | Test ownership, fixtures, and external-service scenarios |
 
 ## References
 

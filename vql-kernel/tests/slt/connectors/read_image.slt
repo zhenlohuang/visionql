@@ -8,6 +8,6 @@ created table 'photos'
 query II
 SELECT width, height
 FROM photos
-WHERE uri LIKE '%/000000000009.jpg';
+WHERE uri LIKE '%/widest.png';
 ----
-640 480
+3 2

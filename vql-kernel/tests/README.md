@@ -14,5 +14,5 @@ cargo test -p vql-kernel --locked
 tests belong here when a kernel API exposes metadata that the standard sqllogictest format cannot
 express.
 
-SQL conformance cases, real fixtures, and external-service scenarios follow the
-[Testing Design](../../docs/testing.md) and live in `vql-testing`.
+Deterministic SQL conformance cases live under `slt/`. Real fixtures and external-service
+scenarios follow the [Testing Design](../../docs/testing.md) and live in `vql-testing`.

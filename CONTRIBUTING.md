@@ -43,7 +43,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-CI runs formatting, Clippy, and `docker compose config --quiet` in one Linux job. A second Linux job runs the Rust tests once under `cargo-llvm-cov` and publishes the coverage report. It compiles and parses fixture-free integration paths but does not provision real data, models, or external services. The Python API suite is not part of CI, so run it locally from the repository root after `maturin develop` whenever a change touches the Python interface:
+CI runs formatting, Clippy, and `docker compose config --quiet` in one Linux job. A second Linux job runs the deterministic Rust suite once under `cargo-llvm-cov`. A third job builds the Python wheel, runs the API tests, and publishes Python source coverage. CI does not provision real data, models, or external services. Run the Python suite locally after `maturin develop` whenever a change touches that interface:
 
 ```bash
 python -m pip install pytest
@@ -63,27 +63,38 @@ cargo llvm-cov --workspace --exclude vql-python --locked --no-cfg-coverage --htm
 cargo llvm-cov report --ignore-filename-regex '/vql-python/' --summary-only
 ```
 
-Open `target/llvm-cov/html/index.html` for file-level results. Coverage is informational rather than a merge threshold. It measures the default Rust tests except for `vql-python`, which has no Rust tests; real-data SQL cases that skip because fixtures are absent, the ignored real-model test, and Python API tests are not represented unless they are run separately.
+Open `target/llvm-cov/html/index.html` for file-level results. Coverage is informational rather than a merge threshold. Rust coverage includes the default unit, owner-contract, kernel SQL, and CLI process tests. Feature-gated system targets are excluded. Python source coverage is published separately because it cannot be meaningfully combined with Rust instrumentation.
 
 ### Integration tests
 
-`vql-testing` runs shared SQL conformance through `sqllogictest-rs`. Fetch the real fixtures once:
+Kernel-owned SQL behavior runs with the rest of the kernel tests:
+
+```bash
+cargo test -p vql-kernel --test slt --locked
+VQL_TEST_CASE=models/object_detection cargo test -p vql-kernel --test slt --locked
+```
+
+Sqllogictest cases are grouped under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`. Every case receives a fresh Engine and catalog while sharing read-only generated fixtures. Put pure branch behavior beside its implementation and exact Arrow field metadata in focused Rust owner tests.
+
+Fetch the real system fixtures once:
 
 ```bash
 python scripts/fetch_datasets.py          # about 10 MB
-python scripts/export_yolo26.py --size n  # data/models/yolo26n.onnx
+python scripts/export_yolo26.py --task detect --size n
+python scripts/export_yolo26.py --task classify --size n
 ```
 
-Then run the suite, optionally narrowing it while iterating:
+Then run the real-data/model SQL suite, optionally narrowing it while iterating:
 
 ```bash
-cargo test -p vql-testing --test sql --locked
-VQL_TEST_CASE=functions/image_detection cargo test -p vql-testing --test sql --locked
+VQL_INTEGRATION_TEST=1 \
+  cargo test -p vql-testing \
+  --features system-tests \
+  --test slt \
+  --locked
 ```
 
-Without the fixtures each affected case reports ignored, which keeps `cargo test --workspace` green on a fresh clone. Set `VQL_INTEGRATION_TEST=1` to turn a missing fixture into a failure instead.
-
-Every `.slt` file appears as an individual test in Cargo output; use `cargo test -p vql-testing --test sql --locked -- --list` to list them.
+`vql-testing` has no library or unit-test target. Its dependencies are test-only, and every integration-test target requires `system-tests`, so the package contributes no target to the default Cargo test graph. Without strict mode, a manually selected system target reports missing prerequisites as ignored; `VQL_INTEGRATION_TEST=1` makes them fail.
 
 A case contains its setup statements, behavior query, and expected rows in standard sqllogictest form:
 
@@ -94,7 +105,7 @@ SELECT COUNT(*) > 0 AS found FROM ...;
 true
 ```
 
-Cases are grouped under `ddl/`, `functions/`, and `scenarios/`. Keep one behavior per file and return stable values that can be compared exactly. Every file receives an isolated temporary catalog, so do not add cleanup SQL unless cleanup is the behavior under test. Read the [Testing Design](docs/testing.md) before adding a case.
+Real cases are grouped by their primary boundary under `vql-testing/tests/slt/{functions,models}`. The SLT adapter stays private in `tests/slt/harness.rs`; RTSP and Kafka SQL stay beside their runners under `tests/rtsp/` and `tests/kafka/`. Keep one behavior per file and return stable values that can be compared exactly. Every file receives an isolated temporary catalog, so do not add cleanup SQL unless cleanup is the behavior under test. Read the [Testing Design](docs/testing.md) before adding a case.
 
 If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
 
@@ -103,8 +114,12 @@ If a change affects media decoding, ONNX preprocessing, batching, or postprocess
 The mixed-size image batch scenario exercises the ONNX pipeline through public SQL:
 
 ```bash
-VQL_TEST_CASE=scenarios/mixed_size_images \
-  cargo test -p vql-testing --test sql --locked
+VQL_TEST_CASE=models/mixed_size_images \
+VQL_INTEGRATION_TEST=1 \
+  cargo test -p vql-testing \
+  --features system-tests \
+  --test slt \
+  --locked
 ```
 
 The real RTSP scenario uses the `rtsp` profile in the root `docker-compose.yaml`. Run every strict

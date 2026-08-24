@@ -90,3 +90,90 @@ pub(crate) fn tumble_udf() -> ScalarUDF {
         Volatility::Immutable,
     )))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::ArrayRef;
+    use arrow::datatypes::Field;
+    use datafusion::config::ConfigOptions;
+
+    #[test]
+    fn buckets_timestamps_with_euclidean_rounding_and_preserves_nulls() {
+        let timestamps =
+            TimestampMillisecondArray::from(vec![Some(7_800), None, Some(-1)]).with_timezone("UTC");
+        let five_seconds = IntervalMonthDayNanoType::make_value(0, 0, 5_000_000_000);
+        let intervals = IntervalMonthDayNanoArray::from(vec![
+            Some(five_seconds),
+            Some(five_seconds),
+            Some(five_seconds),
+        ]);
+
+        let result = invoke_tumble(Arc::new(timestamps), Arc::new(intervals)).unwrap();
+
+        assert_eq!(result.value(0), 5_000);
+        assert!(result.is_null(1));
+        assert_eq!(result.value(2), -5_000);
+        assert_eq!(
+            result.data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_calendar_months_and_non_positive_intervals() {
+        for (interval, expected) in [
+            (
+                IntervalMonthDayNanoType::make_value(1, 0, 0),
+                "TUMBLE interval cannot contain calendar months",
+            ),
+            (
+                IntervalMonthDayNanoType::make_value(0, 0, 0),
+                "TUMBLE interval must be positive",
+            ),
+            (
+                IntervalMonthDayNanoType::make_value(0, 0, -1_000_000),
+                "TUMBLE interval must be positive",
+            ),
+        ] {
+            let error = invoke_tumble(
+                Arc::new(TimestampMillisecondArray::from(vec![Some(1)])),
+                Arc::new(IntervalMonthDayNanoArray::from(vec![Some(interval)])),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    fn invoke_tumble(
+        timestamps: ArrayRef,
+        intervals: ArrayRef,
+    ) -> datafusion::common::Result<TimestampMillisecondArray> {
+        let number_rows = timestamps.len();
+        let timestamp_type = timestamps.data_type().clone();
+        let result = tumble_udf().invoke_with_args(ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(timestamps),
+                ColumnarValue::Array(intervals),
+            ],
+            arg_fields: vec![
+                Field::new("timestamp", timestamp_type.clone(), true).into(),
+                Field::new(
+                    "interval",
+                    DataType::Interval(IntervalUnit::MonthDayNano),
+                    true,
+                )
+                .into(),
+            ],
+            number_rows,
+            return_field: Field::new("tumble", timestamp_type, true).into(),
+            config_options: Arc::new(ConfigOptions::default()),
+        })?;
+        let array = result.into_array(number_rows)?;
+        Ok(array
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("TUMBLE returns timestamp milliseconds")
+            .clone())
+    }
+}

@@ -1,60 +1,115 @@
 # VisionQL Testing Design
 
-> This document defines test ownership, shared SQL conformance, fixtures, and external-service system scenarios. Component boundaries come from the [High-Level Design](./high_level_design.md).
+> This document defines test ownership, suite boundaries, fixtures, execution policy, and coverage reporting. Component boundaries come from the [High-Level Design](./high_level_design.md).
 
-Tests live with the narrowest component that can prove the contract. Product crates own local invariants; `vql-testing` owns shared SQL behavior and cross-component system scenarios. A higher test layer must not replace a cheaper owner test for an exact schema, error code, parser rule, or host API.
+VisionQL tests prove a contract at the narrowest boundary that owns it. The default workspace gate is deterministic, parallel, and independent of downloaded datasets, model artifacts, Docker, and network services. Real artifacts and process boundaries are covered by an explicit system suite.
 
-## Test layers
+## Test model
+
+| Layer | Location | Proves | Dependencies | Default gate |
+| --- | --- | --- | --- | --- |
+| Unit | Owning module | Pure logic, branches, validation, state transitions | In-memory values and fakes | Yes |
+| Owner contract | `<crate>/tests/` or owning module | Public crate/API schemas, errors, persistence, and process behavior | Temporary directories, generated fixtures, `mock://` | Yes |
+| Kernel SQL contract | `vql-kernel/tests/slt/` | Stable embedded Engine SQL behavior | Generated images, empty directories, `mock://` | Yes |
+| Python API | `vql-python/tests/` | PyO3/PyArrow conversion, Python UDF hosting, and Python errors | Built extension and generated fixtures | Separate CI job |
+| System | `vql-testing/tests/` | Real ONNX/media execution and external-service boundaries | Downloaded artifacts, FFmpeg, Docker Compose | No |
+
+A broader layer does not replace a cheaper owner test. Exact error identifiers, Arrow field names, types, nullability, parser rules, retry/cancellation semantics, and resource accounting stay with the component that defines them. System tests provide compatibility evidence; they are not the only proof of local behavior.
+
+## Ownership by crate
+
+### `vql-catalog`
+
+Catalog tests own domain validation, callable namespace conflicts, revisions, immutable resolved versions, snapshot isolation, backend capability boundaries, SQLite reopen behavior, and Unity Catalog-compatible HTTP envelopes. Store tests exercise transactions and concurrency directly; HTTP tests exercise only routing and wire contracts that the catalog API owns.
+
+### `vql-kernel`
+
+Kernel tests own SQL parsing and rendering, planning and normalization, schemas, stable `VqlError` mappings, session isolation, memory accounting, cancellation, media timing, connector serialization, model resolution, batching, tensor conversion, preprocessing, and postprocessing. Use synthetic Arrow arrays, generated media, local fake servers, and `mock://` models before introducing a real artifact.
+
+SQL behavior that executes only through the embedded `Engine` is a kernel contract. Sqllogictest cases pin ordered result types and values; `result_schema.rs` pins field names, Arrow types, and nullability. Cross-module behavior may use the public `Engine` API under `vql-kernel/tests/`; internal branches remain beside their implementations.
+
+### `vql-cli`
+
+CLI tests own the literal `shell` and `run` surface, argument rejection, standalone `\q`, script ordering, terminal rendering, exit status, stdout, and stderr. Parser and shell helpers use module tests; at least one process-level contract executes the built `vql` binary with an isolated `VQL_HOME`.
+
+### `vql-python`
+
+Python tests own connection arguments, query collection, PyArrow conversion, Python UDF registration and invocation, exception fields, HTML representation, and Python helper APIs. Rust workspace coverage excludes the extension crate; the Python CI job builds a wheel and publishes a separate Python coverage report.
+
+### `vql-testing`
+
+`vql-testing` contains only real-artifact and external-service integration tests. It has no library target and no unit tests. Each Cargo test target has a top-level `<target>.rs` entry point; target-private harness code and SQL resources live under the same-named `tests/<target>/` directory. Behavior that can be proved inside one product crate stays with that crate.
+
+Its layout is:
 
 ```text
-crate unit and owner tests
-└── synthetic fixtures, mock:// models, exact schemas and public API contracts
-
-vql-testing SQL conformance
-└── sqllogictest cases executed through an embedded Engine adapter
-
-vql-testing system scenarios
-└── public VQL + real data/model + external services from Docker Compose
-
-Python binding tests
-└── PyO3/PyArrow API and Python UDF host
+vql-testing/
+├── Cargo.toml                 # test-only dependencies and explicit test targets
+└── tests/
+    ├── slt.rs                 # real-data/model Sqllogictest runner
+    ├── slt/
+    │   ├── harness.rs         # private Sqllogictest adapter
+    │   ├── functions/
+    │   └── models/
+    ├── rtsp.rs                # RTSP system-test runner
+    ├── rtsp/                  # RTSP setup and query scripts
+    ├── kafka.rs               # Kafka system-test runner
+    └── kafka/                 # Kafka setup and publish scripts
 ```
 
-Ownership rules:
+All dependencies are dev-dependencies, and the explicit `slt`, `rtsp`, and `kafka` integration-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
 
-- Rust unit tests stay beside the module that owns the invariant.
-- Crate integration tests cover public crate contracts using synthetic inputs or `mock://` models.
-- Exact Arrow field names, types, nullability, and stable error codes remain in owner tests because sqllogictest cannot express them.
-- CLI command and terminal contracts live in `vql-cli`; Python API contracts live in `vql-python/tests`.
-- One-purpose `.slt` cases cover SQL behavior visible across components.
-- Real data, real models, RTSP, Kafka, and process-boundary behavior belong to explicit system scenarios.
+## Default gate
 
-The default workspace suite never requires Docker or downloaded fixtures. A missing real fixture or external dependency is reported as an ignored test. `VQL_INTEGRATION_TEST=1` turns a missing prerequisite into a failure for explicitly provisioned runs.
-
-## SQL conformance
-
-Cases use [`sqllogictest-rs`](https://github.com/risinglightdb/sqllogictest-rs) and live under [`vql-testing/tests/cases`](../vql-testing/tests/cases):
-
-```text
-tests/cases/
-├── ddl/
-├── functions/
-└── scenarios/
-```
-
-Run or list the cases with:
+The required local Rust gate is:
 
 ```bash
-cargo test -p vql-testing --test sql --locked
-cargo test -p vql-testing --test sql --locked -- --list
-VQL_TEST_CASE=functions/model_call cargo test -p vql-testing --test sql --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
-Every `.slt` file is a separate Cargo test and receives a fresh `Engine`, catalog, and temporary
-`VQL_HOME`. An unmatched `VQL_TEST_CASE` fails instead of silently running nothing. The adapter
-uses strict column-family validation and exact value comparison; it does not normalize whitespace.
+The default suite creates all mutable state below per-test temporary directories. Owner tests generate small media fixtures and use `mock://` for inference. They do not inspect repository-local datasets or models, so a fresh clone and a developer checkout execute the same tests.
 
-Column codes are:
+Tests may run concurrently unless they mutate process-global state or share a provisioned external service. Such tests must isolate the state first; serialization is the final fallback and is explicit in the system harness.
+
+## Kernel SQL contracts
+
+Deterministic SQL cases use [`sqllogictest-rs`](https://github.com/risinglightdb/sqllogictest-rs) and live under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`. There is no generic `scenarios` category: a synthetic multi-step case belongs to the kernel domain that owns its behavior.
+
+Run or filter them with:
+
+```bash
+cargo test -p vql-kernel --test slt --locked
+cargo test -p vql-kernel --test slt --locked -- --list
+VQL_TEST_CASE=models/object_detection cargo test -p vql-kernel --test slt --locked
+```
+
+Every `.slt` file appears as an individual Cargo test and receives a fresh Engine, catalog, and temporary `VQL_HOME`. Cases run in parallel and share only generated, read-only image and directory fixtures. An unmatched `VQL_TEST_CASE` fails instead of silently executing nothing.
+
+The adapter uses `B`, `I`, `R`, and `T` for Boolean, integer, real, and text result families. It compares values exactly without whitespace normalization. Sqllogictest does not carry field names or nullability, so those assertions remain in `result_schema.rs`. VisionQL DDL returns a one-column result row and therefore uses `query T` with the exact returned message rather than `statement ok`.
+
+## System suite
+
+Real-data and real-model Sqllogictest cases live under `vql-testing/tests/slt/{functions,models}`. The runner's private adapter is `slt/harness.rs`; RTSP and Kafka SQL scripts live beside their runners under `tests/rtsp/` and `tests/kafka/`. Fetch the artifact prerequisites with:
+
+```bash
+python scripts/fetch_datasets.py
+python scripts/export_yolo26.py --task detect --size n
+python scripts/export_yolo26.py --task classify --size n
+```
+
+Run only the real SQL cases with:
+
+```bash
+VQL_INTEGRATION_TEST=1 \
+  cargo test -p vql-testing \
+  --features system-tests \
+  --test slt \
+  --locked
+```
+
+The system SQL harness uses [`sqllogictest-rs`](https://github.com/risinglightdb/sqllogictest-rs), exposes each `.slt` file as an individual Cargo test, and runs serially to bound CPU and model memory. `VQL_TEST_CASE` filters by the relative case name and fails when no case matches. The adapter compares values exactly without whitespace normalization and recognizes these result families:
 
 | Code | VisionQL result family |
 | --- | --- |
@@ -63,90 +118,81 @@ Column codes are:
 | `R` | Floating point or decimal |
 | `T` | Text and other displayable Arrow values |
 
-Sqllogictest validates the ordered type vector but does not carry field names or nullability.
-Protect those kernel-owned contracts with focused Rust tests under `vql-kernel/tests/`; do not add
-a private test-file grammar.
+Sqllogictest validates ordered result types and values, but not field names or nullability; those remain kernel owner contracts. VisionQL DDL therefore uses `query T` with its exact returned message rather than `statement ok`.
 
-VisionQL DDL returns a one-column result row, so write DDL records as `query T` with the expected
-message instead of `statement ok`.
+The harness recognizes these substitutions:
 
-Cases may enable substitution and use:
-
-| Placeholder | Value |
+| Placeholder | Repository artifact |
 | --- | --- |
 | `${IMAGES_LOCATION}` | `data/datasets/images/coco128/images` |
 | `${VIDEOS_LOCATION}` | `data/datasets/videos/sample-videos` |
 | `${MODEL}` | `data/models/yolo26n.onnx` |
-| `${BUILTIN_DETECTION_MODEL}` | Copies `data/models/yolo26n.onnx` to the isolated Engine's `$VQL_HOME/models/yolo26n.onnx` |
-| `${BUILTIN_CLASSIFICATION_MODEL}` | Copies `data/models/yolo26n-cls.onnx` to the isolated Engine's `$VQL_HOME/models/yolo26n-cls.onnx` |
+| `${BUILTIN_DETECTION_MODEL}` | Detection model installed into the isolated `VQL_HOME` |
+| `${BUILTIN_CLASSIFICATION_MODEL}` | Classification model installed into the isolated `VQL_HOME` |
 
-Fetch real fixtures with:
-
-```bash
-python scripts/fetch_datasets.py
-python scripts/export_yolo26.py --task detect --size n
-python scripts/export_yolo26.py --task classify --size n
-```
-
-Keep one behavior per `.slt` file. Put prerequisite statements before the assertion they support.
-Explicit teardown is unnecessary because every file owns an isolated temporary catalog; lifecycle
-behavior such as `DROP` belongs in its own case or a kernel owner test.
-
-## Model and Function contract coverage
-
-Model and Function redesign contracts are split by owning boundary:
-
-- Catalog owner tests pin the cross-kind callable-name constraint under concurrent creates and renames, immutable resolved versions, initial/default publication rules, version tombstones and reuse, and snapshot isolation from concurrent aggregate mutations.
-- Kernel parser and DDL tests pin both `CREATE MODEL` interface forms, flat option ownership, Runtime inference, every `ALTER MODEL` lifecycle constraint, sanitized multi-version `SHOW CREATE MODEL`, and the schemas of `SHOW MODELS`, `SHOW MODEL VERSIONS`, `SHOW FUNCTIONS`, and `DESCRIBE`.
-- Planner tests prove direct Model-call extraction, constant `version =>` selection, per-version deduplication, volatile-call preservation, constant lifting, SQL-wrapper expansion, inferred constant-only parameters through nested Functions, built-in AI lowering, and stable non-IMAGE overload failures.
-- ONNX Runtime owner tests use synthetic graphs for introspected names and static shapes, ambiguous output formats and labels, generic multi-input binding, scalar `[N]` inputs, input-processing union errors, `VECTOR`/`TENSOR` metadata, dynamic-shape rejection, and NULL-row compaction and scatter.
-- Shared SQL conformance keeps one direct Model call and the two YOLO26-backed built-in AI functions visible through the public engine adapter. Real ONNX and Triton fixtures remain system evidence rather than substitutes for the owner tests above.
-
-## Docker Compose, RTSP, and Kafka
-
-The root `docker-compose.yaml` is shared by development and tests. Profiles keep optional services
-off by default:
-
-- `rtsp` starts the pinned MediaMTX service.
-- `kafka` starts the pinned single-node Apache Kafka service.
-
-Add a new profile only when a component genuinely needs a process boundary; nothing starts by default.
-
-Start the current development dependency with:
-
-```bash
-docker compose --profile rtsp up -d mediamtx
-docker compose --profile rtsp down
-```
-
-Run the Kafka table-write system test against that profile with:
-
-```bash
-docker compose --profile kafka up -d kafka
-VQL_INTEGRATION_TEST=1 \
-VQL_TEST_KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092 \
-  cargo test -p vql-testing --test kafka --locked -- --nocapture
-docker compose --profile kafka down
-```
-
-The test creates an isolated topic, publishes a bounded SQL result, waits for producer
-acknowledgements, then consumes and compares the exact JSON messages.
-
-Compose owns long-running external services. The RTSP case owns its FFmpeg publisher so each test
-controls its input lifecycle. To run that case against an already-running MediaMTX:
-
-```bash
-VQL_INTEGRATION_TEST=1 \
-VQL_TEST_RTSP_URL=rtsp://127.0.0.1:8554/people \
-  cargo test -p vql-testing --test rtsp --locked -- --nocapture
-```
-
-Or provision an isolated Compose project and run all strict integration tests:
+The root `docker-compose.yaml` exposes pinned optional `rtsp` and `kafka` profiles. Compose owns long-running services; the RTSP test owns its FFmpeg publisher and the Kafka test owns its topic and consumer group. Run every strict system target in an isolated Compose project with:
 
 ```bash
 scripts/run-integration-tests.sh
 ```
 
-The wrapper chooses free host ports when `VQL_RTSP_PORT` or `VQL_KAFKA_PORT` is unset, uses a
-unique Compose project name, waits for both dependencies, and always tears the project down.
-Override `VQL_COMPOSE_PROJECT`, `VQL_RTSP_PORT`, or `VQL_KAFKA_PORT` when needed.
+The wrapper chooses free host ports, waits for both services, enables `system-tests`, sets `VQL_INTEGRATION_TEST=1`, emits service logs on failure, and always tears the project down. When a system target is invoked manually without strict mode, a missing prerequisite is reported as ignored. Strict mode turns every missing prerequisite into a failure.
+
+## Python API gate
+
+Build and run the Python suite locally with:
+
+```bash
+python -m pip install pytest
+cd vql-python
+maturin develop --locked
+cd ..
+python -m pytest -q vql-python/tests
+```
+
+CI builds a wheel against Python 3.12, installs it, runs the API suite, prints missing Python lines, and uploads `python-coverage.xml`. Python tests use `tmp_path` and generated images; they do not consume the system fixtures.
+
+## Coverage policy
+
+Coverage is a diagnostic and prioritization signal, not a substitute for contract assertions. Every behavior change and regression fix adds a focused test at its owning boundary. Reviews examine uncovered error paths and branch behavior in the changed modules rather than accepting a repository percentage alone.
+
+Rust CI executes the default suite once under `cargo-llvm-cov`, excluding `vql-python`, and uploads HTML and LCOV reports. Generate the same report locally with:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov \
+  --workspace \
+  --exclude vql-python \
+  --locked \
+  --no-cfg-coverage \
+  --html
+cargo llvm-cov report \
+  --ignore-filename-regex '/vql-python/' \
+  --summary-only
+```
+
+The Rust report includes unit, owner-contract, kernel SQL, and CLI process tests. It excludes feature-gated system targets and Python execution. Python coverage is reported separately because combining Rust source instrumentation and Python source coverage into one percentage would misstate both surfaces.
+
+Coverage work prioritizes public error branches, catalog transactions, planner rewrites, cancellation and resource cleanup, serialization boundaries, null handling, and shape/type validation. Repeating the same happy path at more expensive layers does not improve meaningful coverage.
+
+## Efficiency and reliability rules
+
+- Prefer values, Arrow arrays, temporary directories, generated PNGs, fake services, and `mock://` models in that order before real artifacts.
+- Use virtual time or explicit synchronization for asynchronous state. Do not rely on arbitrary sleeps when a readiness condition can be observed.
+- Give every blocking system operation a bounded timeout and include the failed boundary in its error.
+- Keep default tests independent so Cargo can use its normal parallel runner.
+- Keep real model execution serial unless a scenario specifically proves concurrency.
+- Do not make behavior conditional on assets that happen to exist in the checkout.
+- Do not weaken a failed test by broadening tolerances, increasing timeouts, or skipping it without changing the documented contract.
+
+## CI matrix
+
+| Job | Required behavior |
+| --- | --- |
+| Static analysis | Formatting, Compose configuration, workspace Clippy |
+| Rust tests and coverage | One deterministic default workspace run under coverage instrumentation |
+| Python API | Wheel build, Python API tests, Python source coverage |
+| System suite | Explicit local or release validation through `scripts/run-integration-tests.sh` |
+
+System scenarios remain outside the default pull-request matrix because they require downloaded artifacts and provisioned services. Changes to media decoding, ONNX execution, RTSP, Kafka, or their system contracts must report the relevant explicit system run in the pull request.

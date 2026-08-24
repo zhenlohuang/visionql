@@ -82,3 +82,65 @@ fn summarize_images(batch: &RecordBatch) -> Result<RecordBatch> {
         VqlError::new(ErrorCode::Execution, "failed to summarize IMAGE values").with_source(error)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::{
+        ArrayRef, BinaryArray, Int64Array, StringArray, StructArray, UInt32Array, UInt64Array,
+    };
+    use arrow::buffer::NullBuffer;
+    use vql_kernel::image_field;
+
+    use super::*;
+
+    #[test]
+    fn image_columns_render_as_safe_text_summaries() {
+        let image = image_field("image", true);
+        let DataType::Struct(storage_fields) = image.data_type() else {
+            panic!("IMAGE storage must be a Struct");
+        };
+        let images = StructArray::new(
+            storage_fields.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("file:///one.png"), None])) as ArrayRef,
+                Arc::new(StringArray::new_null(2)),
+                Arc::new(Int64Array::new_null(2)),
+                Arc::new(UInt64Array::new_null(2)),
+                Arc::new(BinaryArray::new_null(2)),
+                Arc::new(StringArray::new_null(2)),
+                Arc::new(Int32Array::from(vec![Some(640), None])),
+                Arc::new(Int32Array::from(vec![Some(480), None])),
+                Arc::new(UInt64Array::new_null(2)),
+                Arc::new(UInt32Array::new_null(2)),
+            ],
+            Some(NullBuffer::from(vec![true, false])),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![image])),
+            vec![Arc::new(images) as ArrayRef],
+        )
+        .unwrap();
+
+        let rendered = summarize_images(&batch).unwrap();
+
+        let values = rendered
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "<image uri=file:///one.png 640x480>");
+        assert!(values.is_null(1));
+        assert_eq!(rendered.schema().field(0).data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn scalar_columns_pass_through_and_empty_results_render() {
+        let values = Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef;
+        let batch = RecordBatch::try_from_iter(vec![("value", Arc::clone(&values))]).unwrap();
+
+        let rendered = summarize_images(&batch).unwrap();
+
+        assert!(Arc::ptr_eq(rendered.column(0), &values));
+        print_batches(&[]).unwrap();
+    }
+}

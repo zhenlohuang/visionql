@@ -42,4 +42,11 @@ zeroize.workspace = true
 ort = { workspace = true, features = ["coreml"] }
 
 [dev-dependencies]
+libtest-mimic.workspace = true
+sqllogictest.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "slt"
+path = "tests/slt.rs"
+harness = false

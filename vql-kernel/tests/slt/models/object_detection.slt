@@ -1,0 +1,24 @@
+control substitution on
+
+query T
+CREATE TABLE photos USING IMAGES LOCATION '${IMAGES_LOCATION}';
+----
+created table 'photos'
+
+query T
+CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';
+----
+created model 'detector'
+
+query T
+RESOLVE MODEL detector;
+----
+resolved model 'detector:v1'
+
+query BI
+SELECT
+  COUNT(*) = 3 AS all_images_inferred,
+  CAST(SUM(CARDINALITY(detector(image, classes => ['person']))) AS BIGINT) AS detections
+FROM photos;
+----
+true 3

@@ -7,12 +7,12 @@ use arrow::array::{Float64Array, Int64Array, UInt64Array};
 use libtest_mimic::{Arguments, Completion, Failed, Trial};
 use tempfile::tempdir;
 use vql_kernel::{Engine, EngineConfig};
-use vql_testing::REQUIRE_ENV;
 
 const RTSP_URL_ENV: &str = "VQL_TEST_RTSP_URL";
-const RTSP_SETUP_SQL: &str = include_str!("fixtures/rtsp/setup.sql");
-const PEOPLE_DETECTION_SQL: &str = include_str!("fixtures/rtsp/detect_people.sql");
-const PEOPLE_PER_TUMBLE_SQL: &str = include_str!("fixtures/rtsp/people_per_window.sql");
+const REQUIRE_ENV: &str = "VQL_INTEGRATION_TEST";
+const RTSP_SETUP_SQL: &str = include_str!("rtsp/setup.sql");
+const PEOPLE_DETECTION_SQL: &str = include_str!("rtsp/detect_people.sql");
+const PEOPLE_PER_TUMBLE_SQL: &str = include_str!("rtsp/people_per_window.sql");
 
 struct ChildGuard(Child);
 

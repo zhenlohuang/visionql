@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog domains, snapshots, backend ports, SQLite persistence, and the Unity Catalog-compatible API. Keep catalog relations in the Table namespace and distinguish read/write behavior through provider capabilities. `vql-kernel/` owns SQL planning, media decoding, model execution, and owner tests. `vql-cli/` provides the `vql` shell and script runner. `vql-python/` contains the PyO3/Maturin extension, Python package, and API tests. `vql-testing/` owns shared SQL conformance and external-service system tests. Keep executable examples under `examples/`, helper scripts under `scripts/`, local fixture documentation under `data/`, and product or architecture decisions under `docs/`. Treat `ROADMAP.md` as the source of truth for version scope.
+VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog domains, snapshots, backend ports, SQLite persistence, and the Unity Catalog-compatible API. Keep catalog relations in the Table namespace and distinguish read/write behavior through provider capabilities. `vql-kernel/` owns SQL planning, media decoding, model execution, and owner tests. `vql-cli/` provides the `vql` shell and script runner. `vql-python/` contains the PyO3/Maturin extension, Python package, and API tests. `vql-testing/` contains only real-artifact and external-service integration tests; it has no library target or unit tests. Keep executable examples under `examples/`, helper scripts under `scripts/`, local fixture documentation under `data/`, and product or architecture decisions under `docs/`. Treat `ROADMAP.md` as the source of truth for version scope.
 
 ## Build, Test, and Development Commands
 
@@ -12,7 +12,7 @@ VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog domai
 - `cargo fmt --all -- --check` verifies Rust formatting.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` enforces lint-free code.
 - `cargo test --workspace --locked` runs the default Rust suite.
-- `cargo test -p vql-testing --test sql --locked` runs shared sqllogictest cases.
+- `cargo test -p vql-kernel --test slt --locked` runs kernel-owned Sqllogictest cases.
 - `scripts/run-integration-tests.sh` provisions profiled Compose dependencies and runs strict integration tests.
 - From `vql-python/`, `maturin develop --locked`; then run `python -m pytest -q vql-python/tests` from the repository root.
 
@@ -28,7 +28,7 @@ Write `docs/high_level_design.md` and the component design documents as final-st
 
 ## Testing Guidelines
 
-Place Rust unit tests beside their modules and crate-owned integration tests under each crate's `tests/`. Anything provable with a synthetic fixture or a `mock://` model belongs in the owner crate; CLI and configuration contract changes need focused owner tests. Shared SQL behavior lives as one-purpose `.slt` files under `vql-testing/tests/cases/{ddl,functions,scenarios}`; every file is an individual Cargo test with an isolated Engine and catalog. Run them with `cargo test -p vql-testing --test sql --locked` and filter with `VQL_TEST_CASE=functions/image_detection`. Missing real fixtures are ignored by default, while `VQL_INTEGRATION_TEST=1` makes missing requirements fail. External services come from the root `docker-compose.yaml` profiles; use `scripts/run-integration-tests.sh` for the strict suite. See `docs/testing.md` before adding a case. There is no numeric coverage threshold; every behavior change or regression fix should add a focused test.
+Place Rust unit tests beside their modules and crate-owned integration tests under each crate's `tests/`. Anything provable with a synthetic fixture or a `mock://` model belongs in the owner crate; CLI and configuration contract changes need focused host tests. Deterministic public SQL behavior lives as one-purpose `.slt` files under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`; every file is an individual Cargo test with an isolated Engine, catalog, and generated fixtures. Run them with `cargo test -p vql-kernel --test slt --locked` and filter with `VQL_TEST_CASE=models/object_detection`. In `vql-testing`, each feature-gated target pairs a top-level entry point with a same-named resource directory: `slt.rs` + `slt/`, `rtsp.rs` + `rtsp/`, and `kafka.rs` + `kafka/`. The `slt`, `rtsp`, and `kafka` targets require `--features system-tests`. `VQL_INTEGRATION_TEST=1` makes missing requirements fail. External services come from the root `docker-compose.yaml` profiles; use `scripts/run-integration-tests.sh` for the strict suite. See `docs/testing.md` before adding a case. There is no numeric coverage threshold; every behavior change or regression fix should add a focused test.
 
 ## Commit & Pull Request Guidelines
 

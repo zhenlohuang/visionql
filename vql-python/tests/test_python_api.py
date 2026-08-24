@@ -25,6 +25,40 @@ def test_collect_and_vectorized_python_udf(tmp_path):
     assert "value" in session.sql("SELECT 1 AS value")._repr_html_()
 
 
+def test_run_script_show_and_cancel(tmp_path):
+    session = visionql.connect(tmp_path / "catalog.db")
+
+    first, second = session.run_script("SELECT 1 AS one; SELECT 2 AS two;")
+
+    assert "one" in first.show(1)
+    assert second.collect().column("two").to_pylist() == [2]
+    second.cancel()
+
+
+def test_decode_batch_helper_preserves_null_images(monkeypatch):
+    class FakeImage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def copy(self):
+            return self
+
+    pillow = types.ModuleType("PIL")
+    pillow.Image = types.SimpleNamespace(
+        open=lambda stream: FakeImage(stream.read())
+    )
+    monkeypatch.setitem(sys.modules, "PIL", pillow)
+    encoded = b"encoded-image"
+    images = pa.StructArray.from_arrays(
+        [pa.array([encoded, None], type=pa.binary())], names=["encoded"]
+    )
+
+    decoded = visionql.images.decode_batch(images)
+
+    assert decoded[0].payload == encoded
+    assert decoded[1] is None
+
+
 def test_image_filtering_python_udf_then_model(tmp_path):
     photos = tmp_path / "photos"
     photos.mkdir()

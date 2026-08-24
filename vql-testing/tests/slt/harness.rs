@@ -1,25 +1,21 @@
-//! Shared integration-test support for VisionQL frontends.
-
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::Array;
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use libtest_mimic::{Arguments, Completion, Failed, Trial};
 use sqllogictest::{ColumnType, DBOutput, Runner, strict_column_validator};
 use tempfile::TempDir;
 use thiserror::Error;
 use vql_kernel::{Engine, EngineConfig, Session, Statement};
 
-pub const FILTER_ENV: &str = "VQL_TEST_CASE";
-pub const REQUIRE_ENV: &str = "VQL_INTEGRATION_TEST";
+const FILTER_ENV: &str = "VQL_TEST_CASE";
+const REQUIRE_ENV: &str = "VQL_INTEGRATION_TEST";
 
-/// Column families used by VisionQL sqllogictest cases.
-///
-/// The one-character representation is deliberately compatible with the
-/// sqllogictest format while keeping booleans distinct from integers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VqlColumnType {
+enum VqlColumnType {
     Boolean,
     Integer,
     Real,
@@ -48,7 +44,7 @@ impl ColumnType for VqlColumnType {
 }
 
 #[derive(Debug, Error)]
-pub enum TestError {
+enum TestError {
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
     #[error(transparent)]
@@ -60,15 +56,15 @@ pub enum TestError {
 }
 
 #[derive(Debug, Clone)]
-pub struct FixturePaths {
-    pub images: PathBuf,
-    pub videos: PathBuf,
-    pub model: PathBuf,
-    pub classification_model: PathBuf,
+struct FixturePaths {
+    images: PathBuf,
+    videos: PathBuf,
+    model: PathBuf,
+    classification_model: PathBuf,
 }
 
 impl FixturePaths {
-    pub fn from_workspace(workspace: &Path) -> Self {
+    fn from_workspace(workspace: &Path) -> Self {
         Self {
             images: workspace.join("data/datasets/images/coco128/images"),
             videos: workspace.join("data/datasets/videos/sample-videos"),
@@ -77,7 +73,7 @@ impl FixturePaths {
         }
     }
 
-    pub fn missing_for(&self, source: &str) -> Vec<String> {
+    fn missing_for(&self, source: &str) -> Vec<String> {
         [
             (
                 "${IMAGES_LOCATION}",
@@ -112,6 +108,99 @@ impl FixturePaths {
     }
 }
 
+pub(crate) fn run(root: PathBuf, workspace: &Path) -> ! {
+    let mut arguments = Arguments::from_args();
+    let environment_filter = arguments
+        .filter
+        .is_none()
+        .then(|| std::env::var(FILTER_ENV).ok())
+        .flatten();
+    if arguments.test_threads.is_none() {
+        arguments.test_threads = Some(1);
+    }
+
+    let fixtures = FixturePaths::from_workspace(workspace);
+    let mut cases = discover_slt_files(&root).expect("discover system SQL cases");
+    cases.sort();
+    if let Some(filter) = &environment_filter {
+        cases.retain(|path| case_name(&root, path).contains(filter));
+    }
+
+    let mut trials = Vec::new();
+    if cases.is_empty() {
+        let message = environment_filter.map_or_else(
+            || format!("no system SQL cases under {}", root.display()),
+            |filter| {
+                format!(
+                    "no system SQL cases matched {FILTER_ENV}={filter:?} under {}",
+                    root.display()
+                )
+            },
+        );
+        trials.push(Trial::test("case_layout", move || {
+            Err(message.clone().into())
+        }));
+    }
+
+    let require_fixtures = std::env::var_os(REQUIRE_ENV).is_some();
+    trials.extend(cases.into_iter().map(|path| {
+        let name = case_name(&root, &path);
+        let source = fs::read_to_string(&path);
+        let parse_result = source.as_ref().map_err(ToString::to_string).and_then(|_| {
+            sqllogictest::parse_file::<VqlColumnType>(&path)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        });
+        let missing = source
+            .as_ref()
+            .map(|source| fixtures.missing_for(source))
+            .unwrap_or_default();
+        let fixtures = fixtures.clone();
+        Trial::ignorable_test(name, move || {
+            if let Err(error) = &parse_result {
+                return Err(Failed::from(format!("{}: {error}", path.display())));
+            }
+            if !missing.is_empty() {
+                let message = format!("missing system fixtures:\n  {}", missing.join("\n  "));
+                return if require_fixtures {
+                    Err(Failed::from(message))
+                } else {
+                    Ok(Completion::ignored_with(message))
+                };
+            }
+            run_slt_file(&path, &fixtures)
+                .map(|()| Completion::Completed)
+                .map_err(Failed::from)
+        })
+    }));
+
+    libtest_mimic::run(&arguments, trials).exit();
+}
+
+fn discover_slt_files(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("slt") {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn case_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .with_extension("")
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 #[derive(Clone)]
 struct EmbeddedDatabaseFactory {
     engine: Engine,
@@ -125,16 +214,13 @@ impl EmbeddedDatabaseFactory {
     ) -> Result<Self, TestError> {
         let home = Arc::new(tempfile::tempdir()?);
         if builtin_detection_model.is_some() || builtin_classification_model.is_some() {
-            let model_dir = home.path().join("models");
-            std::fs::create_dir_all(&model_dir)?;
+            fs::create_dir_all(home.path().join("models"))?;
         }
         if let Some(source) = builtin_detection_model {
-            let model_dir = home.path().join("models");
-            std::fs::copy(source, model_dir.join("yolo26n.onnx"))?;
+            fs::copy(source, home.path().join("models/yolo26n.onnx"))?;
         }
         if let Some(source) = builtin_classification_model {
-            let model_dir = home.path().join("models");
-            std::fs::copy(source, model_dir.join("yolo26n-cls.onnx"))?;
+            fs::copy(source, home.path().join("models/yolo26n-cls.onnx"))?;
         }
         let engine = Engine::new(EngineConfig::from_home(home.path()))?;
         Ok(Self { engine, home })
@@ -148,7 +234,7 @@ impl EmbeddedDatabaseFactory {
     }
 }
 
-pub struct EmbeddedDatabase {
+struct EmbeddedDatabase {
     session: Session,
     _home: Arc<TempDir>,
 }
@@ -175,13 +261,12 @@ impl sqllogictest::DB for EmbeddedDatabase {
     }
 
     fn engine_name(&self) -> &str {
-        "visionql"
+        "visionql-system"
     }
 }
 
-/// Run one `.slt` file against a fresh embedded Engine and catalog.
-pub fn run_slt_file(path: &Path, fixtures: &FixturePaths) -> Result<(), String> {
-    let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+fn run_slt_file(path: &Path, fixtures: &FixturePaths) -> Result<(), String> {
+    let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let builtin_detection_model = source
         .contains("${BUILTIN_DETECTION_MODEL}")
         .then_some(fixtures.model.as_path());
@@ -263,23 +348,4 @@ fn value_to_string(array: &dyn Array, row: usize) -> Result<String, TestError> {
         return Ok("NULL".to_owned());
     }
     Ok(arrow::util::display::array_value_to_string(array, row)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn column_codes_are_strict_and_stable() {
-        for (code, expected) in [
-            ('B', VqlColumnType::Boolean),
-            ('I', VqlColumnType::Integer),
-            ('R', VqlColumnType::Real),
-            ('T', VqlColumnType::Text),
-        ] {
-            assert_eq!(VqlColumnType::from_char(code), Some(expected));
-            assert_eq!(expected.to_char(), code);
-        }
-        assert_eq!(VqlColumnType::from_char('?'), None);
-    }
 }

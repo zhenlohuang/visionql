@@ -300,7 +300,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [Error code design](docs/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI design](docs/cli.md) | Shell, script execution, rendering, and signal behavior |
 | [Python binding design](docs/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |
-| [Testing design](docs/testing.md) | Test ownership, sqllogictest cases, fixtures, and Compose services |
+| [Testing design](docs/testing.md) | Test ownership, system scenarios, fixtures, and Compose services |
 | [Roadmap](ROADMAP.md) | Delivered and planned capabilities by version |
 | [Proposals](docs/proposals/README.md) | Focused designs for later features |
 | [Datasets](data/datasets/README.md) / [models](data/models/README.md) | Sample provenance and ONNX export contract |
@@ -317,16 +317,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Run the integration suite directly with:
+Run kernel-owned SQL contracts directly with:
 
 ```bash
-cargo test -p vql-testing --test sql --locked
+cargo test -p vql-kernel --test slt --locked
 ```
 
-Cases are grouped under `vql-testing/tests/cases/{ddl,functions,scenarios}` as one-purpose
-sqllogictest files. Each file gets an isolated Engine and catalog. Real-data cases run against
-`data/datasets`, `data/models/yolo26n-cls.onnx`, and `data/models/yolo26n.onnx`; they report an
-ignored test when a required fixture is absent.
+Cases are grouped under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`. The harness
+generates its fixtures and uses `mock://` models, so the default workspace suite never depends on
+downloaded data or models. Real data, models, RTSP, and Kafka remain in the feature-gated
+`vql-testing` system suite.
 
 Optional development and system-test services use profiles in the root Compose file. For example:
 
@@ -344,12 +344,16 @@ pre-commit run --all-files
 pre-commit run --hook-stage pre-push --all-files
 ```
 
-The real-model mixed-size batch scenario reads `data/models/yolo26n.onnx` directly. It runs when
-the integration fixtures are available and otherwise reports an ignored test:
+The feature-gated system suite owns real datasets, models, RTSP, and Kafka. Run one real-model SQL
+scenario after installing the integration fixtures with:
 
 ```bash
-VQL_TEST_CASE=scenarios/mixed_size_images \
-  cargo test -p vql-testing --test sql --locked
+VQL_TEST_CASE=models/mixed_size_images \
+VQL_INTEGRATION_TEST=1 \
+  cargo test -p vql-testing \
+  --features system-tests \
+  --test slt \
+  --locked
 ```
 
 ## Contributing
