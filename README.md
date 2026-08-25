@@ -48,13 +48,12 @@ The [PRD](docs/prd.md) covers target users, representative Physical AI workflows
 - [FFmpeg 8](https://ffmpeg.org/download.html), including development libraries for the default native video build and `ffmpeg` / `ffprobe` on `PATH` for sample preparation.
 - A C/C++ build toolchain and `make` for the bundled `librdkafka` build. Kafka TLS uses vendored OpenSSL and does not require a system `librdkafka` installation.
 
-### Install the Python package
+### Package availability
 
-```bash
-python -m pip install visionql
-```
-
-The v0.1.0 package is distributed as source and builds the native extension locally against the prerequisites above. It exposes the Python API described below. Build the repository from source when you also need the standalone `vql` CLI, examples, or integration-test assets.
+VisionQL v0.1.0 is currently distributed as source through the
+[GitHub release](https://github.com/zhenlohuang/visionql/releases/tag/v0.1.0). The Python package has
+not yet been published to PyPI. Build the repository from source for the Python API, standalone
+`vql` CLI, examples, and integration-test assets.
 
 ### Build from source
 
@@ -314,6 +313,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [Proposals](docs/proposals/README.md) | Focused designs for later features |
 | [Datasets](data/datasets/README.md) / [models](data/models/README.md) | Sample provenance and ONNX export contract |
 | [Contributing](CONTRIBUTING.md) | Development workflow, tests, and pull request expectations |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Community standards and private conduct reporting |
 | [Security](SECURITY.md) | Supported versions and private vulnerability reporting |
 
 ## Development

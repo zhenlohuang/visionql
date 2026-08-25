@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a reproducible problem in VisionQL
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve VisionQL. Do not include credentials, tokens, private media, or other sensitive data.
+  - type: input
+    id: version
+    attributes:
+      label: VisionQL version
+      description: Provide a release version or commit SHA.
+      placeholder: v0.1.0 or 6c219e5
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - CLI
+        - Python
+        - Rust API
+        - Catalog HTTP API
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the OS, architecture, and relevant Rust, Python, and FFmpeg versions.
+      placeholder: macOS 15 arm64, Rust 1.91.1, Python 3.12, FFmpeg 8
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest SQL statement, code sample, or command that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the complete VQL error code and message when available.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove credentials, tokens, private URLs, and private media paths before posting.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed secrets and private data from this report.
+          required: true

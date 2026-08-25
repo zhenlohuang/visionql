@@ -2,8 +2,12 @@
 
 VisionQL is an embedded batch and streaming SQL engine for images, recorded video, and live RTSP streams. The Python package exposes the synchronous `visionql.connect()` API and returns query results as PyArrow tables.
 
+The package has not yet been published to PyPI. Build it from a source checkout:
+
 ```bash
-python -m pip install visionql
+python -m pip install "maturin>=1.9,<2"
+cd vql-python
+maturin develop --locked
 ```
 
 ```python

@@ -1,6 +1,6 @@
 # Contributing to VisionQL
 
-Thank you for helping improve VisionQL. Contributions are welcome across the engine, Python and CLI interfaces, documentation, examples, and tests.
+Thank you for helping improve VisionQL. Contributions are welcome across the engine, Python and CLI interfaces, documentation, examples, and tests. All participation follows the project [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you start
 
