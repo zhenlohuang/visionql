@@ -1,9 +1,11 @@
 [package]
 name = "vql-kernel"
+description = "Embedded batch and streaming query kernel for VisionQL"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
 default = ["ffmpeg-native"]

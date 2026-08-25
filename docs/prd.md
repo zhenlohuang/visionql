@@ -409,7 +409,7 @@ The implementation details live in the [High-Level Design](./high_level_design.m
 | **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. From v0.2, durable service jobs recover after restart without losing Catalog state. |
 | **Error semantics** | A single decode or inference failure produces NULL for that row. Optional strict mode is `on_error = 'fail'`. Model false positives and false negatives are not engine errors; users manage them with explicit thresholds. |
 | **Security and privacy** | Data stays in its domain by default. Pin and hash model sources. The v0.2 service adds TLS, authentication, relation-level authorization, and out-of-process Python UDFs. |
-| **Compatibility** | VisionQL v0.1 has not been released, so pre-release SQL and Catalog definitions carry no compatibility guarantee. The current SQLite schema is initialized directly; no legacy schema or migration chain is supported. `EXPLAIN` text is not a stable API before 1.0. |
+| **Compatibility** | VisionQL v0.1 is the first public release. Before 1.0, minor releases may revise SQL and Catalog contracts; patch releases preserve the documented public contract. The current SQLite schema is initialized directly and has no legacy migration chain. `EXPLAIN` text is not a stable API before 1.0. |
 
 ### 3.8 Workbench
 

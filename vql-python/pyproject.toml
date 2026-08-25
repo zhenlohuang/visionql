@@ -5,11 +5,30 @@ build-backend = "maturin"
 [project]
 name = "visionql"
 version = "0.1.0"
-description = "Local visual data SQL engine"
+description = "Embedded SQL engine for querying images, video, and live streams"
+readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "../LICENSE" }
 dependencies = ["pyarrow>=18"]
+keywords = ["computer-vision", "datafusion", "sql", "streaming", "video"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Topic :: Database :: Database Engines/Servers",
+  "Topic :: Multimedia :: Video",
+]
+
+[project.urls]
+Changelog = "https://github.com/zhenlohuang/visionql/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/zhenlohuang/visionql#readme"
+Issues = "https://github.com/zhenlohuang/visionql/issues"
+Repository = "https://github.com/zhenlohuang/visionql"
 
 [tool.maturin]
 module-name = "visionql._visionql"
 python-source = "python"
 features = ["pyo3/extension-module"]
+exclude = ["python/visionql/__pycache__/**", "python/visionql/**/*.pyc"]

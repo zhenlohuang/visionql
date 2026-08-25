@@ -16,7 +16,8 @@
     <a href="#examples">Examples</a> ·
     <a href="#python-api">Python</a> ·
     <a href="#architecture">Architecture</a> ·
-    <a href="ROADMAP.md">Roadmap</a>
+    <a href="ROADMAP.md">Roadmap</a> ·
+    <a href="CHANGELOG.md">Changelog</a>
   </p>
 </div>
 
@@ -25,7 +26,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL today—and a chainable DataFrame API planned for v0.2—users can work with images, video files, and live video streams through the same query model.
 
 > [!IMPORTANT]
-> VisionQL v0.1 is pre-release. Image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output are implemented. `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact delivery status and version boundaries.
+> VisionQL v0.1.0 is the first public release. It supports image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output. `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
 
 ## Why VisionQL
 
@@ -46,6 +47,14 @@ The [PRD](docs/prd.md) covers target users, representative Physical AI workflows
 - Python 3.10 or newer.
 - [FFmpeg 8](https://ffmpeg.org/download.html), including development libraries for the default native video build and `ffmpeg` / `ffprobe` on `PATH` for sample preparation.
 - A C/C++ build toolchain and `make` for the bundled `librdkafka` build. Kafka TLS uses vendored OpenSSL and does not require a system `librdkafka` installation.
+
+### Install the Python package
+
+```bash
+python -m pip install visionql
+```
+
+The v0.1.0 package is distributed as source and builds the native extension locally against the prerequisites above. It exposes the Python API described below. Build the repository from source when you also need the standalone `vql` CLI, examples, or integration-test assets.
 
 ### Build from source
 

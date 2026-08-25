@@ -1,9 +1,11 @@
 [package]
 name = "vql-cli"
+description = "SQL shell and script runner for VisionQL"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "vql"

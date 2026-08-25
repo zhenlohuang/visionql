@@ -4,7 +4,7 @@ VisionQL brings one query model to images, recorded video, and live streams. Rel
 
 Status: ✅ Complete · 🚧 In progress · 📋 Planned
 
-## v0.1 — Embedded batch and streaming MVP 🚧
+## v0.1 — Embedded batch and streaming MVP ✅
 
 **Goal:** Install VisionQL with `pip` and run visual queries locally, without a VisionQL service.
 

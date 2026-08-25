@@ -1,5 +1,6 @@
 [package]
 name = "vql-catalog"
+description = "Catalog domains and embedded persistence for VisionQL"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
