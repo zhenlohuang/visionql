@@ -12,12 +12,6 @@ use crate::catalog::{
 use crate::{ErrorCode, Result, VqlError};
 
 pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
-    if sql.contains("<->") {
-        return Err(VqlError::feature(
-            "vector distance operator is not available",
-            "v0.3",
-        ));
-    }
     let tokens = significant_tokens(sql)?;
     let first = word(tokens.first()).unwrap_or_default();
     match first.as_str() {
@@ -76,10 +70,7 @@ fn parse_create(tokens: &[Token]) -> Result<VqlStatement> {
         )),
         Some("TABLE") => parse_create_table(tokens),
         Some("MODEL") => parse_create_model(tokens),
-        Some("INDEX") => Err(VqlError::feature(
-            "vector indexes are not available",
-            "v0.3",
-        )),
+        Some("INDEX") => Err(VqlError::feature("indexes are not available", "未排期")),
         Some("AGGREGATE") | Some("TABLE_FUNCTION") => Err(VqlError::feature(
             "aggregate and table functions are not available",
             "未排期",
@@ -99,7 +90,7 @@ fn parse_create_table(tokens: &[Token]) -> Result<VqlStatement> {
     if token_is(tokens.get(index), "AS") {
         return Err(VqlError::feature(
             "CREATE TABLE AS SELECT is not available",
-            "v0.3",
+            "未排期",
         ));
     }
     expect_word(tokens.get(index), "USING")?;
@@ -370,12 +361,6 @@ fn build_table_provider(
                 buffer_capacity,
             })
         }
-        "PARQUET" | "LANCE" | "HNSW" => {
-            return Err(VqlError::feature(
-                "columnar/vector providers are not available",
-                "v0.3",
-            ));
-        }
         _ => {
             return Err(VqlError::new(
                 ErrorCode::InvalidOption,
@@ -522,12 +507,6 @@ fn parse_create_model(tokens: &[Token]) -> Result<VqlStatement> {
                 return Err(VqlError::feature(
                     "the IMAGE_CLASSIFICATION Model capability is not available",
                     "未排期",
-                ));
-            }
-            Some("IMAGE_EMBEDDING" | "TEXT_EMBEDDING") => {
-                return Err(VqlError::feature(
-                    "embedding Model capability presets are not available",
-                    "v0.3",
                 ));
             }
             Some("TEXT_GENERATION") => {
@@ -1400,13 +1379,8 @@ mod tests {
     #[test]
     fn future_capabilities_have_stable_target_versions() {
         let cases = [
-            ("CREATE TABLE out USING PARQUET LOCATION './out'", "v0.3"),
-            ("CREATE TABLE out AS SELECT 1", "v0.3"),
-            ("CREATE INDEX idx USING HNSW", "v0.3"),
-            (
-                "CREATE MODEL clip TYPE IMAGE_EMBEDDING(512) FROM 'model.safetensors' USING TRANSFORMERS",
-                "v0.3",
-            ),
+            ("CREATE TABLE out AS SELECT 1", "未排期"),
+            ("CREATE INDEX idx", "未排期"),
             (
                 "CREATE MODEL classifier TYPE IMAGE_CLASSIFICATION FROM 'model.onnx'",
                 "未排期",
@@ -1415,7 +1389,6 @@ mod tests {
                 "CREATE MODEL generator TYPE TEXT_GENERATION FROM 'model.gguf' USING LLAMA_CPP",
                 "未排期",
             ),
-            ("SELECT embedding <-> other FROM values", "v0.3"),
             ("SUBMIT QUERY q AS SELECT 1", "v0.2"),
             ("CREATE AGGREGATE FUNCTION f", "未排期"),
             ("CREATE TABLE FUNCTION f", "未排期"),

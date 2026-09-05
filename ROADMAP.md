@@ -18,26 +18,27 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 - [x] Explore interactively in the SQL shell with multiline input, history, and `\q` exit; run scripts with `vql run`; or use Python through `sess.sql()` and Arrow.
 - [x] Reduce media processing with column, frame-sampling, and time-predicate pushdown.
 
-## v0.2 — Service and Workbench 📋
+## v0.2 — Single-node service 📋
 
-**Goal:** Keep queries running independently of clients and make VisionQL accessible from browsers and standard data tools.
+**Goal:** Keep an explicitly submitted continuous query running independently of its client through the smallest useful single-node service.
 
-- [ ] Run VisionQL as a single-node `vqld` service over Arrow Flight SQL.
-- [ ] Secure shared access with TLS, authentication, and table-level authorization.
-- [ ] Submit, inspect, pause, resume, stop, checkpoint, and recover durable queries.
-- [ ] Access thumbnails and authorized original media through the Flight protocol.
-- [ ] Isolate Python UDFs in worker processes and expose operational metrics through Prometheus.
-- [ ] Build equivalent queries with a Python DataFrame API in embedded or service mode.
-- [ ] Use Workbench to write SQL, inspect multimodal and live results, browse the Catalog, and operate queries.
+- [ ] Run bounded and attached continuous SQL through a tested Arrow Flight SQL subset in `vqld`.
+- [ ] Submit, inspect, and stop persistent continuous Table writes explicitly.
+- [ ] Keep submitted jobs running after client disconnect and rediscover them from another Session.
+- [ ] Restart active RTSP jobs from the live position with fresh window state and an explicit restart gap.
+- [ ] Bind to loopback by default; require TLS and one configured service credential for non-loopback access.
+- [ ] Return one bounded `IMAGE` thumbnail representation and expose per-query state through SQL.
+- [ ] Validate the complete service path with one selected Flight SQL or ADBC client integration.
 
-## v0.3 — Cross-modal search and persistence 📋
+## v0.3 — Workbench 📋
 
-**Goal:** Search images by text or image and reuse persisted inference results.
+**Goal:** Make bounded visual SQL results understandable in a focused browser client defined by the [Workbench Design](./docs/design/workbench.md).
 
-- [ ] Generate typed image and text embeddings with an isolated Transformers Runtime.
-- [ ] Search `VECTOR(n)` values with exact `<->` Top-K queries.
-- [ ] Store and restore multimodal results in Parquet and Lance, including native `IMAGE` and vector columns.
-- [ ] Accelerate Top-K search with explicit HNSW indexes backed by Lance.
+- [ ] Connect to one `vqld` endpoint through its public Arrow Flight SQL profile.
+- [ ] Run and cancel one bounded SQL statement at a time.
+- [ ] Render ordinary columns, bounded `IMAGE` thumbnails, and `BOX2D` overlays.
+- [ ] Display structured VQL errors without parsing message text.
+- [ ] Validate the same anchor query against the Python/notebook path.
 
 ## Future directions
 
@@ -47,6 +48,10 @@ These capabilities are not yet scheduled:
 - More streaming workloads through tracking, additional window types, VLM predicates, Kafka input, and cross-stream joins.
 - Agent and workflow integrations through MCP and reusable scenario packages.
 - General semantic image classification, text/document execution for the AI built-ins, and user-defined image-classification capability Models.
-- Cluster deployment, exactly-once delivery, multi-tenancy, auditing, and WASM UDFs.
+- Persistent window checkpoints, `PAUSE`/`RESUME`, and recovery of open window state.
+- Multi-user identity, relation-level authorization, audit, and a network Unity Catalog API.
+- Original-media Flight tickets, broader BI/JDBC compatibility, and multiple image transport modes.
+- Service-side Python UDF workers and a chainable DataFrame API.
+- Cluster deployment, exactly-once delivery, multi-tenancy, and WASM UDFs.
 - Edge-to-cloud query partitioning and edge fleet management.
 - Reproducible datasets, benchmarks, and performance regression gates.

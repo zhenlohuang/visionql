@@ -74,7 +74,7 @@ A bounded query executes as an ordinary DataFusion stream. An unbounded query (e
 - Ordering is strict: apply data → advance watermark → write and await sink acknowledgement → release the frame lease. `Session::cancel()` aborts; `request_graceful_stop()` drains — keep both wired when touching this loop.
 - `connectors/kafka.rs` is the only unbounded sink. `CREATE TABLE ... USING KAFKA` does no network I/O; `credential_ref` resolves at first write through the host-installed `SecretProvider` (`secrets.rs`) and resolved material never reaches the Catalog. The JSON wire format is fixed by exact tests (IMAGE projected to safe fields, never `encoded`/`buffer_id`/`buffer_slot`; raw binary rejected at planning).
 
-The unbounded allowlist and its rejection table live in `docs/kernel.md`; a rejection must name the offending node and suggest a rewrite rather than surfacing a raw DataFusion error.
+The unbounded allowlist and its rejection table live in `docs/design/kernel.md`; a rejection must name the offending node and suggest a rewrite rather than surfacing a raw DataFusion error.
 
 ### Catalog
 
@@ -94,7 +94,7 @@ Optional host capabilities are injected, never discovered: `EngineConfig::with_s
 
 ### Error contract
 
-`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL-CCDDD] SYMBOL: message`; `as_str()` returns the identifier and `symbol()` returns the readable name. Row-level failures (bad image, failed inference) produce NULL result columns; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change. The registry and extension rules live in `docs/error_codes.md`.
+`ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL-CCDDD] SYMBOL: message`; `as_str()` returns the identifier and `symbol()` returns the readable name. Row-level failures (bad image, failed inference) produce NULL result columns; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change. The registry and extension rules live in `docs/design/error_codes.md`.
 
 ## Testing model
 
@@ -104,7 +104,7 @@ Rust unit tests live beside their modules and cover everything a synthetic fixtu
 
 Kernel SQL contracts use `sqllogictest-rs` through `vql-kernel/tests/slt.rs`. Cases are grouped by owner under `tests/slt/{ddl,connectors,functions,models}`, and every case gets a fresh Engine, catalog, and temporary `VQL_HOME`. Exact field names and nullability stay in `result_schema.rs`; branch behavior such as invalid TUMBLE widths and connector projection stays beside its implementation. There is no synthetic `scenarios` layer.
 
-Each `vql-testing` target pairs a top-level entry point with same-named private SQL resources. `image`, `video`, `model`, `rtsp`, and `kafka` cover real media/model execution and external-service journeys; shared isolated-session helpers live under `tests/support/`. Task-shaped scenarios call `VQL_CLASSIFY` or `VQL_DETECT`, while the `model` target preserves the real Catalog Model resolve/direct-call contract. Every target requires the `system-tests` feature and runs serially where needed. Fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`. `VQL_INTEGRATION_TEST=1` turns a missing requirement into a failure. The root `docker-compose.yaml` provides optional external services through profiles (`rtsp`, `kafka`), and `scripts/run-integration-tests.sh` starts isolated dependencies and runs the strict suite. See `docs/testing.md`.
+Each `vql-testing` target pairs a top-level entry point with same-named private SQL resources. `image`, `video`, `model`, `rtsp`, and `kafka` cover real media/model execution and external-service journeys; shared isolated-session helpers live under `tests/support/`. Task-shaped scenarios call `VQL_CLASSIFY` or `VQL_DETECT`, while the `model` target preserves the real Catalog Model resolve/direct-call contract. Every target requires the `system-tests` feature and runs serially where needed. Fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`. `VQL_INTEGRATION_TEST=1` turns a missing requirement into a failure. The root `docker-compose.yaml` provides optional external services through profiles (`rtsp`, `kafka`), and `scripts/run-integration-tests.sh` starts isolated dependencies and runs the strict suite. See `docs/design/testing.md`.
 
 `cargo test --workspace` executes the same deterministic tests on a fresh clone and a fixture-rich checkout. CI runs Rust coverage and a separate built-wheel Python API job; it does not run real external-service E2E.
 

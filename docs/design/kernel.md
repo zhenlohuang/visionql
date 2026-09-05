@@ -1,6 +1,6 @@
 # VisionQL Kernel Design
 
-> This document defines the `vql-kernel` planning and execution contracts. System boundaries are defined by the [High-Level Design](./high_level_design.md); Catalog persistence, host behavior, and verification policy are defined by their dedicated design documents.
+> This document defines the `vql-kernel` planning and execution contracts. System boundaries are defined by the [High-Level Design](../high_level_design.md); Catalog persistence, host behavior, and verification policy are defined by their dedicated design documents.
 
 ## Kernel Boundary
 
@@ -63,9 +63,9 @@ Planning reads only the Catalog and lightweight metadata. Object listing, model 
 
 Planning opens one Catalog transaction and constructs a `DefinitionSnapshot` containing the current Tables, Models, and Functions in `vql.default`. RTSP and Kafka definitions are Tables with provider capabilities. A query-specific DataFusion session is populated from that snapshot. Resolved Model specifications are copied into `InferenceNode` extension nodes, while selected provider configurations are copied into the attached result handle or internal write target.
 
-The planned `DataFrame` and those copied specifications are the execution source of truth. Replacing or dropping a Catalog definition affects newly planned queries but does not replan a running query. Internal table generations remain available for media locators, but there is no public revision lifecycle, durable query identity, Manifest store, lease manager, or Manifest garbage collector.
+The planned `DataFrame` and those copied specifications are the execution source of truth. Replacing or dropping a Catalog definition affects newly planned queries but does not replan a running query. Opaque Catalog generations support exact historical snapshot lookup, but there is no user-facing revision lifecycle, persistent query identity, Manifest store, lease manager, or Manifest garbage collector.
 
-The durable, serializable Query Manifest required by submitted jobs and restart recovery belongs to the [`vqld` Service Design](./vqld.md). It is not a prerequisite for foreground embedded execution.
+The persistent job record used by `vqld` stores normalized SQL, semantic settings, and opaque Catalog generations. On restart, the service asks the Kernel to prepare against a snapshot loaded from those generations. The record is service state, not a serialized kernel plan or a prerequisite for foreground embedded execution.
 
 ### Allowlist for Unbounded Plans
 
@@ -189,7 +189,7 @@ value = aggregate_states
 
 Window state is charged to the Session memory pool through its own `MemoryConsumer` and additionally capped at 64 MiB, or at the Session limit when that is smaller. Exceeding the cap fails the query rather than spilling.
 
-State lives only for the attached process lifetime and is not serialized or restored after restart. A versioned checkpoint/recovery ABI is defined by the [`vqld` Service Design](./vqld.md), where durable jobs first require it.
+State lives only for the process lifetime and is not serialized or restored after restart. A persistent v0.2 job restarts with empty `TumbleState` at the current live-source position and reports the discarded open windows as part of its restart gap.
 
 The streaming aggregate allowlist is:
 
@@ -296,7 +296,7 @@ Extension statements cannot rely only on a `Dialect` hook; the VQL parser needs 
 | `CREATE FUNCTION ... LANGUAGE PYTHON AS 'module:function'` | Create a batched Python function; executable only from a Python host |
 | `SET vql.on_error = 'null' \| 'fail'` | Switch row-level failures between NULL results and hard errors for this Session, returning the new value as a one-column result |
 
-`DROP`, `SHOW`, `DESCRIBE`, and `SHOW CREATE` use the same VQL DDL path. `SHOW CREATE` must be sanitized and parseable. Statements outside the [documented scope](./high_level_design.md#scope) fail without registering placeholders.
+`DROP`, `SHOW`, `DESCRIBE`, and `SHOW CREATE` use the same VQL DDL path. `SHOW CREATE` must be sanitized and parseable. Statements outside the [documented scope](../high_level_design.md#scope) fail without registering placeholders.
 
 
 ### Typed Model Contract
@@ -307,11 +307,11 @@ A MODEL is a versioned callable backed by an artifact or endpoint. Capability fo
 |---|---|---|
 | `OBJECT_DETECTION` | `model(image IMAGE, classes => CONST ARRAY<STRING>?, min_confidence => CONST FLOAT?)` | `ARRAY<STRUCT<label STRING, confidence FLOAT, box BOX2D>>` |
 
-`IMAGE_CLASSIFICATION`, `IMAGE_EMBEDDING`, `TEXT_EMBEDDING`, and text-generation Model presets remain roadmap-gated. Generic Model signatures expose `IMAGE`, numeric scalars, `VECTOR(n)`, `TENSOR(dtype, dims...)`, and structured tensor output without introducing generic selector functions. Supported tensor elements are `FLOAT32`, `FLOAT64`, `INT8`, `INT16`, `INT32`, `INT64`, and `UINT8`; `STRING`, `FLOAT16`, and `MODEL` are rejected at an embedded generic boundary. The release-managed `VQL_CLASSIFY`, `VQL_EXTRACT`, and `VQL_DETECT` contracts are specified separately under [Built-in Functions](#built-in-functions).
+`IMAGE_CLASSIFICATION` and text-generation Model presets remain unscheduled. Generic Model signatures expose `IMAGE`, numeric scalars, `VECTOR(n)`, `TENSOR(dtype, dims...)`, and structured tensor output without introducing generic selector functions. Supported tensor elements are `FLOAT32`, `FLOAT64`, `INT8`, `INT16`, `INT32`, `INT64`, and `UINT8`; `STRING`, `FLOAT16`, and `MODEL` are rejected at an embedded generic boundary. The release-managed `VQL_CLASSIFY`, `VQL_EXTRACT`, and `VQL_DETECT` contracts are specified separately under [Built-in Functions](#built-in-functions).
 
 Generic signatures use embedded ONNX Runtime. `RESOLVE MODEL` binds declared parameters to graph inputs positionally unless `<parameter>.input_name` overrides the binding, matches structured outputs by field name, validates one dynamic leading batch axis plus static per-row shapes, and persists the resolved tensor contracts. Numeric scalar parameters map only to graph inputs shaped `[N]`. An `IMAGE` parameter requires exactly one processing form: either the `imagenet` preset or the complete inline set `mean`, `std`, `scale`, `resize`, and `pad_value`; incomplete inline processing or mixing the two forms fails resolution. Multi-input options use a parameter-name prefix such as `image.preprocess`, while a single-input Model may use flat keys. Execution compacts rows for which every argument is non-NULL, preprocesses IMAGE inputs, runs all graph inputs and outputs together, and scatters results back so any row with a NULL or failed argument remains NULL.
 
-One source bundle may be registered under multiple compatible capability types. For example, CLIP image and text embedding are two Models with different fixed interfaces; artifact-cache or Runtime-session reuse is an internal optimization.
+One source bundle may be registered under multiple compatible Model interfaces; artifact-cache or Runtime-session reuse is an internal optimization.
 
 The Model identifier is the call target. Required domain inputs are positional; semantic arguments and the reserved `version =>` selector are named constants:
 
@@ -538,7 +538,7 @@ After expanding SQL expression functions, the planner scans Projection, Filter, 
 1. Resolve the call target and constant semantic/version arguments from the snapshot, require a resolved selected version, and copy its resolved specification into `InferenceNode`.
 2. Replace each marker with an internal column reference and insert `InferenceNode` at the earliest point where every domain input exists and semantics remain unchanged.
 3. Deduplicate only when the Model semantic fingerprint, all domain input expressions, and semantic arguments match exactly, the selected version is immutable, the interface is deterministic, and every input expression is deterministic. Preserve every volatile invocation and its order.
-4. Evaluate a constant-domain-input inference call, such as a text query embedding, once as a query-init expression only under the same determinism rule.
+4. Evaluate a constant-domain-input inference call once as a query-init expression only under the same determinism rule.
 5. Never share raw Runtime output across different resolved processor contracts; only canonical, semantically identical inference results are shareable.
 
 ### `EXPLAIN`
@@ -614,7 +614,7 @@ trait PreProcessorFactory: Send + Sync {
 
 ```
 
-`PostProcessorFactory` follows the PreProcessor factory shape. The registry internally registers `vision.image_tensor@1`, `vision.yolo_e2e@1`, `vision.yolo_raw@1`, and `vision.xywh_normalized@1` for embedded ONNX execution, plus the public Runtime IDs `onnx-runtime` and `triton-inference-server`. The known roadmap-gated Runtime IDs `transformers` (Roadmap v0.3) and `vllm`, `sglang`, `llama-cpp` (unscheduled) are registered as rejecting factories, so their stable `FEATURE_NOT_AVAILABLE` responses carry a target release and do not depend on an unrelated fallback branch. Processor IDs remain internal implementation details; no public registration API ships until an independent embedded Runtime requires one.
+`PostProcessorFactory` follows the PreProcessor factory shape. The registry internally registers `vision.image_tensor@1`, `vision.yolo_e2e@1`, `vision.yolo_raw@1`, and `vision.xywh_normalized@1` for embedded ONNX execution, plus the public Runtime IDs `onnx-runtime` and `triton-inference-server`. The known but unscheduled Runtime IDs `transformers`, `vllm`, `sglang`, and `llama-cpp` are registered as rejecting factories, so their stable `FEATURE_NOT_AVAILABLE` responses do not depend on an unrelated fallback branch. Processor IDs remain internal implementation details; no public registration API ships until an independent embedded Runtime requires one.
 
 Each factory owns a serde option type with unknown fields denied. A PreProcessor receives only its input options; a PostProcessor receives only decoding and result-construction options; a Runtime receives only source, protocol, and binding options. Deserialization failures are rendered through the existing `INVALID_OPTION` contract with the complete option path. Options are deserialized once while compiling a pipeline, not once per input batch.
 
@@ -760,7 +760,7 @@ Stable identifiers are separate from prose messages. Clients react to identifier
 
 ## Related Designs
 
-- [High-Level Design](./high_level_design.md)
+- [High-Level Design](../high_level_design.md)
 - [Catalog Design](./catalog.md)
 - [CLI Design](./cli.md)
 - [Python Binding Design](./python_binding.md)

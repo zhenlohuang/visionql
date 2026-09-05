@@ -1,6 +1,6 @@
 # VisionQL Testing Design
 
-> This document defines test ownership, suite boundaries, fixtures, execution policy, and coverage reporting. Component boundaries come from the [High-Level Design](./high_level_design.md).
+> This document defines test ownership, suite boundaries, fixtures, execution policy, and coverage reporting. Component boundaries come from the [High-Level Design](../high_level_design.md).
 
 VisionQL tests prove a contract at the narrowest boundary that owns it. The default workspace gate is deterministic, parallel, and independent of downloaded datasets, model artifacts, Docker, and network services. Real artifacts and process boundaries are covered by an explicit system suite.
 

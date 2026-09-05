@@ -1,6 +1,6 @@
 # VisionQL Catalog Design
 
-> This document defines the `vql-catalog` domain, persistence, snapshot, and Unity Catalog-compatible API contracts. The [High-Level Design](./high_level_design.md) defines its place in the system; the [Kernel Design](./kernel.md) defines how planned statements consume snapshots.
+> This document defines the `vql-catalog` domain, persistence, snapshot, and Unity Catalog-compatible API contracts. The [High-Level Design](../high_level_design.md) defines its place in the system; the [Kernel Design](./kernel.md) defines how planned statements consume snapshots.
 
 ## Boundary
 
@@ -12,7 +12,7 @@
 - the `CatalogBackend` storage port and SQLite implementation;
 - Unity Catalog wire models and HTTP translation.
 
-It does not own media bytes, model artifacts, resolved credentials, connector sessions, query execution, or durable jobs. The service-owned job repository and Catalog-mutation coordination are defined by the [`vqld` Service Design](./vqld.md). `vql-catalog` has no dependency on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
+It does not own media bytes, model artifacts, resolved credentials, connector sessions, query execution, or persistent jobs. The [`vqld` Service Design](./vqld.md) defines the service-owned job repository; it refers to the Catalog's existing immutable historical generations instead of copying definitions. `vql-catalog` has no dependency on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
 
 ## Namespace and Objects
 

@@ -1,6 +1,6 @@
 # VisionQL CLI Design
 
-> This document defines the standalone `vql` host. SQL and execution semantics belong to the [Kernel Design](./kernel.md); the shared instance root and Catalog path are defined by the [Catalog Design](./catalog.md#catalog-location).
+> This document defines the standalone `vql` host. System boundaries come from the [High-Level Design](../high_level_design.md); SQL and execution semantics belong to the [Kernel Design](./kernel.md), while the shared instance root and Catalog path are defined by the [Catalog Design](./catalog.md#catalog-location).
 
 ## Boundary
 

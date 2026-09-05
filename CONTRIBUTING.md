@@ -98,7 +98,7 @@ VQL_INTEGRATION_TEST=1 \
 
 `vql-testing` has no library or unit-test target. Its dependencies are test-only, and every integration-test target requires `system-tests`, so the package contributes no target to the default Cargo test graph. Without strict mode, a manually selected system target reports missing prerequisites as ignored; `VQL_INTEGRATION_TEST=1` makes them fail.
 
-Real cases are grouped by their primary boundary under `vql-testing/tests/{image,video,model,rtsp,kafka}`. Every target pairs a top-level Rust runner with same-named SQL resources, receives an isolated temporary catalog, and asserts stable semantic outcomes instead of model-specific score snapshots. Task-shaped scenarios use `VQL_CLASSIFY` or `VQL_DETECT`; the `model` target preserves the public Catalog Model resolve/direct-call journey. Read the [Testing Design](docs/testing.md) before adding a case.
+Real cases are grouped by their primary boundary under `vql-testing/tests/{image,video,model,rtsp,kafka}`. Every target pairs a top-level Rust runner with same-named SQL resources, receives an isolated temporary catalog, and asserts stable semantic outcomes instead of model-specific score snapshots. Task-shaped scenarios use `VQL_CLASSIFY` or `VQL_DETECT`; the `model` target preserves the public Catalog Model resolve/direct-call journey. Read the [Testing Design](docs/design/testing.md) before adding a case.
 
 If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
 

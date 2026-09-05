@@ -260,11 +260,11 @@ mod tests {
 
     #[test]
     fn display_separates_identifier_symbol_and_message() {
-        let error = VqlError::feature("AUDIO is reserved", "v0.3");
+        let error = VqlError::feature("AUDIO is reserved", "未排期");
 
         assert_eq!(
             error.to_string(),
-            "[VQL-0A001] FEATURE_NOT_AVAILABLE: AUDIO is reserved (target: v0.3)"
+            "[VQL-0A001] FEATURE_NOT_AVAILABLE: AUDIO is reserved (target: 未排期)"
         );
     }
 

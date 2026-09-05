@@ -1,6 +1,6 @@
 # VisionQL Product Requirements Document
 
-> VisionQL is a unified batch and streaming engine for multimodal data. It lets users query and process images, recorded video, and live video streams through SQL or a DataFrame API.
+> VisionQL is a unified batch and streaming engine for multimodal data. It lets users query and process images, recorded video, and live video streams through SQL.
 
 ---
 
@@ -8,11 +8,11 @@
 
 **VisionQL is a data engine for Physical AI.**
 
-Traditional databases answer questions about structured business records. VisionQL makes the visual world captured by cameras and video files queryable. Engineers and analysts can analyze images, recordings, and live streams with one SQL statement or a few lines of DataFrame code, without assembling one-off Python pipelines or operating GPU inference jobs themselves.
+Traditional databases answer questions about structured business records. VisionQL makes the visual world captured by cameras and video files queryable. Engineers can analyze images, recordings, and live streams with SQL, without assembling one-off Python pipelines or operating GPU inference jobs themselves.
 
 - Images and recorded video are bounded datasets and run as batch workloads, much like Spark batch jobs.
 - RTSP video is an unbounded dataset and runs as a streaming workload, much like Flink or Spark Structured Streaming.
-- Both modes use the same SQL and DataFrame semantics.
+- Both modes use the same SQL semantics.
 
 ---
 
@@ -22,7 +22,7 @@ Traditional databases answer questions about structured business records. Vision
 
 1. **Visual data is growing faster than the systems built to process it.** An estimated 80–90% of newly created enterprise data is unstructured, including images, surveillance footage, dashcam recordings, and live feeds. Physical AI systems such as autonomous vehicles and robots add a constant stream of first-person video. Their data loops—finding corner cases and assembling training or evaluation sets—need infrastructure designed for visual data. Most existing data platforms can store a file path, but cannot understand or query what appears in the file.
 
-2. **Vision models are now useful as query operators.** Detection, tracking, OCR, vision-language models, and vector search can answer questions such as “How many people are in this frame?” or “Which clips show an intrusion into the restricted area?” What is missing is a coherent data system that connects models, media, and queries.
+2. **Vision models are now useful as query operators.** Detection, tracking, OCR, and vision-language models can answer questions such as “How many people are in this frame?” or “Which clips show an intrusion into the restricted area?” What is missing is a coherent data system that connects models, media, and queries.
 
 3. **A declarative interface can remove substantial engineering work.** Data processing moved from hand-written MapReduce jobs to Hive and Spark SQL because declarative languages and optimizers made common workloads easier to build and improve. Visual processing is still dominated by custom OpenCV and PyTorch scripts. It is ready for the same kind of abstraction.
 
@@ -40,28 +40,11 @@ Traditional databases answer questions about structured business records. Vision
 
 ### 2.3 Target Users and Jobs to Be Done
 
-**Primary users, in priority order:**
+**Primary user:** a data or ML engineer who currently builds visual-processing pipelines with Python, media libraries, model runtimes, and separate batch or streaming infrastructure. v0.1 and v0.2 optimize for this user. Analysts, platform teams, and agent developers are potential later users; they do not add requirements to the first service release.
 
-1. **Data and ML engineers** who build visual-processing pipelines today. They are the core users of the first release and primarily consume VisionQL as a pip-installable library.
-2. **Data analysts** who know SQL but not PyTorch. Starting in v0.2, they can connect to the authenticated `vqld` service from Workbench or a BI tool without a local installation.
-3. **Platform teams** building an internal visual analytics platform with multi-tenancy, governance, and cost controls. They are also the likely buyers of a future enterprise offering.
-4. **AI application and agent developers** who need a visual query tool for cameras and video libraries. Existing text-to-SQL systems can generate auditable, permission-scoped VisionQL queries.
+**Anchor workflow:** register entrance-camera recordings and an RTSP feed, run the same people-detection and per-minute aggregation logic over both, and write the live result to Kafka. This workflow is useful in security, retail, and moderation contexts without requiring VisionQL to ship a vertical application.
 
-**Representative use cases:**
-
-| Use case | Mode | Typical questions |
-|---|---|---|
-| Security and smart campuses | Streaming | People per minute, boundary-crossing alerts, loitering, cross-camera trajectories |
-| Retail traffic analysis | Streaming | Store entries, movement heatmaps, dwell time, queue length |
-| Autonomous driving and robotics data loops | Batch | Find corner cases such as rain + crossing pedestrian + occlusion in large driving or teleoperation archives |
-| Media and content platforms | Batch | Tag videos, find people or scenes, extract highlights, retrieve clips by text |
-| Content moderation | Batch + streaming | Apply the same policy to live feeds and historical backfills |
-| Industrial inspection | Streaming | Detect defects, aggregate yield by minute, retain evidence frames |
-| Drone and infrastructure inspection | Batch | Find defects, compare inspections over time, export work-order evidence |
-| Sports analytics | Batch | Track players, analyze formations, retrieve events such as shots or fouls |
-| AI agents and assistants | Batch + streaming | Answer questions such as “Has anyone remained in the warehouse for more than ten minutes?” and support visual RAG |
-
-Content moderation illustrates the value of a unified engine particularly well: one SQL query can backfill a file table and then monitor a live stream. VisionQL may eventually support many industries, but the initial launch will make one scenario excellent. The choice will be driven by pain, data volume, and willingness to pay; see Open Question 1.
+Other promising uses include robotics data selection, media tagging, industrial inspection, and visual retrieval. They remain market hypotheses until a design partner runs them end to end; their union is not the product scope.
 
 ### 2.4 Customer Value
 
@@ -88,8 +71,8 @@ Content moderation illustrates the value of a unified engine particularly well: 
 |---|---|---|
 | **Inference remains expensive** | Even a 10× improvement can leave full analysis of a large archive costly | Let users control inference volume explicitly through sample rates; push sampling into the source; pursue additional cost optimizations only after measuring real workloads |
 | **Results are probabilistic** | A detector can miss or falsely report an object, so `COUNT(*)` no longer represents an indisputable fact | Keep confidence and thresholds visible in the query; decide whether confidence-aware aggregation primitives are needed after user research |
-| **SQL cannot express every vision workflow** | Calibration and complex multi-object association do not fit naturally into SQL | Do not force all logic into SQL; use UDFs, custom models, and the DataFrame API for complex processing |
-| **Connector and model coverage takes time** | Product usefulness depends on supported sources, models, and scenario templates | Start with object detection plus RTSP, object storage, and Kafka provider tables; add embedding search in v0.3; make one security or moderation workflow complete before expanding |
+| **SQL cannot express every vision workflow** | Calibration and complex multi-object association do not fit naturally into SQL | Do not force all logic into SQL; use UDFs, custom models, or ordinary host-language composition for complex processing |
+| **Connector and model coverage takes time** | Product usefulness depends on supported sources, models, and scenario templates | Start with object detection plus RTSP, object storage, and Kafka provider tables; make one security or moderation workflow complete before expanding |
 | **Large platforms may add similar features** | Databricks and cloud vendors can extend their multimodal offerings | Differentiate through unified batch and streaming behavior, vision-native optimization, and an open-source ecosystem |
 
 ---
@@ -102,7 +85,7 @@ VisionQL uses one unifying model: **visual data is represented as relations made
 
 | Abstraction | Meaning |
 |---|---|
-| **Multimodal type system** | Extends standard SQL with `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)`, `TENSOR(dtype, dims...)`, and nested `STRUCT` / `ARRAY` types. `VECTOR` and `TENSOR` are available at generic Model boundaries in v0.1; embedding presets and vector search arrive in v0.3. |
+| **Multimodal type system** | Extends standard SQL with `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)`, `TENSOR(dtype, dims...)`, and nested `STRUCT` / `ARRAY` types. `VECTOR` and `TENSOR` are available at generic Model boundaries in v0.1. |
 | **Table** | A relation plus provider capabilities. Image/video tables are bounded and readable; RTSP tables are unbounded and readable; Kafka tables are writable. |
 | **Model** | A versioned callable with an immutable persisted interface. `TYPE` selects a capability preset, while an explicit signature exposes a generic tensor model. `FROM`, optional `USING`, and flat `OPTIONS` declare one version; `RESOLVE MODEL` introspects and pins its execution contract. A query calls the Model identifier directly, and planning copies the selected version into its immutable definition snapshot. |
 | **Function** | User-defined computation: a SQL expression function or a batched Python function. Function DDL reuses DataFusion's grammar and registry. A SQL function may wrap a typed inference call as an alias or preset. |
@@ -204,7 +187,7 @@ A **MODEL is a versioned callable**. A capability `TYPE` expands into a persiste
 
 `LOCATOR` is `STRUCT<char_span STRUCT<start INT, end INT>, box BOX2D>` with nullable members. Text spans use zero-based Unicode code-point offsets with an exclusive end. IMAGE task results use pixel boxes with a top-left origin. Every task score is in `[0, 1]`, sorted descending, and comparable only within one call.
 
-These are capability types rather than broad framework labels such as CV or LLM. The same physical bundle may be registered under multiple compatible types—for example, separate CLIP image- and text-embedding Models—while cache and session reuse remain internal optimizations.
+These are capability types rather than broad framework labels such as CV or LLM. The same physical bundle may be registered under multiple compatible Model interfaces, while cache and session reuse remain internal optimizations.
 
 ```sql
 -- Local ONNX object detection.
@@ -280,97 +263,36 @@ FROM traffic_videos AS f,
 WHERE det.label = 'person';
 ```
 
-#### 3.3.5 Cross-Modal Retrieval
-
-> Embeddings and vector search arrive in v0.3. This section fixes their SQL semantics in advance.
-
-```sql
--- Return the 20 images most similar to the text prompt.
-SELECT uri, image
-FROM product_photos
-ORDER BY clip_image(image)
-         <-> clip_text('a worker wearing a red helmet')
-LIMIT 20;
-```
-
-A vector column can be indexed with `CREATE INDEX ... USING HNSW`. When an index is present, `ORDER BY <-> LIMIT` is rewritten to approximate nearest-neighbor search. `<->` is shorthand for `L2_DISTANCE(a, b)`.
-
-#### 3.3.6 Writing Results
+#### 3.3.5 Writing Results
 
 ```sql
 -- Publish a continuous query to Kafka.
 INSERT INTO people_per_minute SELECT ...;
-
--- Retain evidence frames with the alert.
-INSERT INTO evidence  -- a Lance/Parquet table; native IMAGE storage arrives in v0.3
-SELECT ts, frame, det.box
-FROM cam_entrance,
-     UNNEST(yolo26n(frame)) AS det
-WHERE det.label = 'person' AND det.confidence > 0.9;
 ```
 
-#### 3.3.7 Rules for an Implementable SQL Dialect
+#### 3.3.6 Rules for an Implementable SQL Dialect
 
 Every extension must map to a mature extension point in the columnar query engine. VisionQL does not require a fork of that engine.
 
 1. **Extensions reduce to two standard mechanisms.**
-   - Per-Model typed markers are extracted into explicit `Inference` nodes. Ordinary DataFusion functions cover array operations (`CARDINALITY`) and vector predicates (`L2_DISTANCE`); SQL expression functions expand during planning.
+   - Per-Model typed markers are extracted into explicit `Inference` nodes. Ordinary DataFusion functions cover array operations such as `CARDINALITY`; SQL expression functions expand during planning.
    - VQL DDL updates the Catalog or runtime. Provider-table DDL, `CREATE MODEL`, `CREATE FUNCTION`, and `RESOLVE MODEL` do not enter the relational plan. A video table expands frames inside its scan operator at the fps declared by the table.
 2. **No lambdas or higher-order functions.** The object-detection capability owns label and confidence filtering, so native `CARDINALITY` can count its result without another VisionQL-specific function.
 3. **`UNNEST` is the only row-expansion mechanism.** `FROM t, UNNEST(expr) AS x` maps to the engine's native unnest node without requiring general lateral joins.
 4. **`TUMBLE(event_time, interval)` keeps the same shape in both modes.** Batch lowers it to ordinary time bucketing and aggregation. Streaming adds window state and watermark handling to the same logical plan. ANSI analytic windows remain available through `OVER (...)` and the named `WINDOW` clause for bounded queries.
-5. **Every custom operator has a function equivalent.** Operators such as `<->` normalize to functions, leaving a portable fallback when dialect syntax is unavailable.
+5. **Every future custom operator needs a function equivalent.** This keeps a portable fallback when dialect syntax is unavailable, without reserving an operator before its feature is implemented.
 6. **Multimodal types use standard columnar storage.** `IMAGE` and `VIDEO` are metadata-bearing binary or struct columns, `BOX2D` is a struct, and `VECTOR(n)`/`TENSOR(dtype, dims...)` use Arrow's canonical `arrow.fixed_shape_tensor` extension. Their names exist in DDL and documentation; the underlying engine needs no custom type kernel.
 
-### 3.4 Python DataFrame API (v0.2)
+### 3.4 Python API
 
-SQL and the DataFrame API build the same logical plan. SQL remains the primary interface; the DataFrame API gives engineers a programmable way to assemble more complex workflows.
-
-In v0.1, the Python package provides `sess.sql()`, Arrow result exchange, rich notebook display, and Python UDF registration. The chainable API arrives in v0.2 after the logical plan has been validated by real v0.1 queries; exposing it earlier would freeze an immature internal representation as a public contract.
-
-The target API looks like this. Embedding and Lance output are v0.3 capabilities:
-
-```python
-import visionql as vq
-
-sess = vq.connect()
-
-# Streaming equivalent of Section 3.2: publish average and peak counts by minute.
-counts = (
-    sess.stream("cam_entrance")
-        .with_column("person_cnt",
-                     vq.fn("cardinality")(
-                         vq.fn("yolo26n")(
-                             vq.col("frame"),
-                             classes=["person"], min_confidence=0.6,
-                         )
-                     ))
-        .window(vq.tumble("1 minute"))
-        .agg(avg_people=vq.avg("person_cnt"), peak_people=vq.max("person_cnt"))
-)
-counts.write.kafka("broker:9092", topic="people-count").start()
-
-# Batch: tag an image directory and persist the result.
-(
-    sess.table("product_photos")
-        .with_column("tags", vq.fn("yolo26n")(
-            vq.col("image")
-        ))
-        .with_column("embedding", vq.fn("clip_image")(
-            vq.col("image")
-        ))
-        .write.lance("s3://bucket/photo_index/")
-)
-```
-
-In the v0.2 target API, SQL and chainable expressions can be mixed because `sess.sql(...)` returns a DataFrame. The v0.1 synchronous API continues to return a `QueryHandle`.
+The v0.1 Python package provides `sess.sql()`, Arrow result exchange, notebook display, and Python UDF registration. SQL is the only normative query-construction surface. A chainable DataFrame API remains a candidate direction and will receive its own proposal only after real Python workflows establish the required composition, streaming, and result-lifecycle semantics.
 
 ### 3.5 Product Forms and Deployment
 
 VisionQL must satisfy three competing conditions:
 
 - Batch exploration should begin immediately after `pip install`, without a cluster.
-- Continuous queries need a long-lived process for state, recovery, resident model sessions, and GPU sharing.
+- Continuous queries need a long-lived process for lifecycle ownership, resident model sessions, restart orchestration, and GPU sharing.
 - High-volume video should stay close to the camera. Centralizing many feeds creates material network and compliance costs, while query results are comparatively small.
 
 One deployment form cannot serve all three well. VisionQL therefore uses **one engine kernel with two hosts**, sharing SQL and Catalog semantics. Cluster designs remain out of scope until these forms are validated.
@@ -378,61 +300,47 @@ One deployment form cannot serve all three well. VisionQL therefore uses **one e
 | Form | Packaging | Intended use | Release |
 |---|---|---|---|
 | Embedded `visionql` | pip package embedded in-process, similar to DuckDB | Notebook exploration, batch jobs, CI regression, and foreground streaming during development | v0.1 (MVP) |
-| Service `vqld` | Single-node daemon built by `vql-server`; Catalog, model runtime, and streaming runtime live in one binary | Long-running continuous queries, durable jobs and recovery, shared clients, Workbench, and BI access | v0.2 |
+| Service `vqld` | Single-node daemon built by `vql-server`; Catalog, model runtime, and streaming runtime live in one binary | Run attached queries remotely and keep explicitly submitted continuous queries alive independently of clients | v0.2 |
 
 The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`. In the interactive shell, `\q` or Ctrl-D exits. The pip package and Python import remain `visionql`.
 
 **Lifecycle and protocol contracts:**
 
-1. **Validate in a notebook, then run the same script.** From v0.1, `vql run job.sql` executes batch and streaming queries in the foreground and always attaches them to the client; an ordinary unbounded statement must be last in the script. In v0.2, `vql submit job.sql [--name <job>]` executes the DDL statements and wraps the script's single unbounded Table write as `SUBMIT QUERY`; the filename supplies the default job name. `SUBMIT QUERY <name> AS INSERT INTO ...` is the public protocol statement used by CLI and Workbench. An ordinary unbounded SQL statement never becomes detached implicitly after an upgrade.
-2. **The service owns durable queries in v0.2.** Foreground v0.1 streams stop with the client. Explicitly submitted jobs gain a name, state, recovery, query-level metrics, and `SHOW/DESCRIBE QUERY`, `PAUSE`, `RESUME`, and `STOP`. `DESCRIBE QUERY` exposes dependencies. Dropping an object referenced by a running job fails with a structured error listing the dependent jobs.
-3. **Clients use standard columnar protocols.** The service speaks Arrow Flight SQL. Python, BI tools, and third-party applications connect through Flight SQL, ADBC, or JDBC; there is no private client protocol.
-4. **First launch has no mandatory external service.** Catalog and model runtime are built in. Kafka, object storage, and Kubernetes are optional integrations.
-5. **Workbench ships with the service.** It is a separate lightweight project and a normal Flight SQL client. This both enforces the public protocol boundary and validates that the protocol covers a real visual client.
+1. **Validate locally, then submit explicitly.** From v0.1, `vql run job.sql` executes batch and streaming queries in the foreground and always attaches them to the client; an ordinary unbounded statement must be last in the script. In v0.2, `SUBMIT QUERY <name> AS INSERT INTO ...` is the public SQL statement for creating a persistent job. An ordinary unbounded statement never becomes detached implicitly.
+2. **The service owns a minimal persistent lifecycle.** Explicitly submitted jobs survive client disconnects and expose `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY`. The service stores normalized SQL, semantic Session settings, and pinned opaque Catalog generations. `PAUSE`, `RESUME`, serialized window checkpoints, and transparent state migration are not part of v0.2.
+3. **Restart is honest rather than transparent.** After a daemon restart, an active RTSP job is replanned against its pinned Catalog generations and reconnects at the live position with fresh in-memory window state. The unavailable interval and discarded open windows are reported as a restart gap. If the historical snapshot can no longer be prepared by the running engine, the job becomes `FAILED` and must be resubmitted.
+4. **Clients use a narrow standard protocol.** The service implements the Arrow Flight SQL operations required by one selected Flight SQL or ADBC client integration. Broader JDBC, BI metadata, and vendor capability coverage follows demonstrated client demand.
+5. **Remote exposure is explicit.** `vqld` listens on loopback by default. A non-loopback listener requires TLS and one configured service token mapped to a single principal. Multi-user identity and relation-level authorization are later capabilities.
+6. **First launch has no mandatory external service.** Catalog and model runtime are built in. Kafka and object storage are optional integrations.
 
 ### 3.6 Execution Requirements
 
 The implementation details live in the [High-Level Design](./high_level_design.md) and its component designs, but the following constraints are required for the product experience above:
 
 1. **Optimizer:** in the initial scope, push only user-declared fps/time ranges and decoding, plus query-local common-expression elimination for deterministic typed inference calls.
-2. **Frame path:** decoded frames are large. `IMAGE` should remain a reference or compressed value through most of the plan, with decoding deferred until inference or persistence.
+2. **Frame path:** decoded frames are large. `IMAGE` should remain a reference or compressed value through most of the plan, with decoding deferred until inference or result encoding.
 3. **GPU-aware scheduling:** automatic batching, operator/model co-location, and backpressure.
 4. **Streaming semantics:** event time, watermarks, and reconnect behavior. RTSP is non-replayable and therefore best-effort; outages and dropped frames must appear as gaps rather than fabricated data.
-5. **Storage:** columnar multimodal output, with Parquet and Lance plus video references in v0.3.
-6. **Observability:** per-query inference count and latency; from v0.2, a Prometheus endpoint powers operational and Workbench cost views.
-7. **Inference and code functions:** calls through persisted Model interfaces become explicit `Inference` nodes so the engine can manage accelerators, batching, and backpressure. SQL expression and Python Function DDL reuse DataFusion's function extension points as ordinary UDFs. In embedded mode, Python UDFs run in the host process and exchange Arrow batches. In the v0.2 service, Python UDFs run in isolated worker processes over Arrow IPC. The kernel never embeds a Python interpreter and needs Python only when a Python function is registered.
+5. **Result boundary:** bounded results cross host and service boundaries as Arrow values; continuous writes use the Kafka provider contract.
+6. **Observability:** query lifecycle, source health, last event time, restart gaps, and errors are available through `SHOW QUERIES` and `DESCRIBE QUERY`. Prometheus, when enabled, exposes only process and aggregate operational metrics without `query_id` labels.
+7. **Inference and code functions:** calls through persisted Model interfaces become explicit `Inference` nodes so the engine can manage accelerators, batching, and backpressure. SQL expression and Python Function DDL reuse DataFusion's function extension points as ordinary UDFs. In embedded mode, Python UDFs run in the host process and exchange Arrow batches. v0.2 service execution rejects Python Functions with `FEATURE_NOT_AVAILABLE`; an isolated service worker is unscheduled. The kernel never embeds a Python interpreter.
 
 ### 3.7 Non-Functional Requirements
 
 | Area | Requirement |
 |---|---|
-| **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. From v0.2, durable service jobs recover after restart without losing Catalog state. |
+| **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. In v0.2, persistent jobs restart from the current live position with fresh window state and an explicit restart gap; they do not claim transparent state recovery. |
 | **Error semantics** | A single decode or inference failure produces NULL for that row. Optional strict mode is `on_error = 'fail'`. Model false positives and false negatives are not engine errors; users manage them with explicit thresholds. |
-| **Security and privacy** | Data stays in its domain by default. Pin and hash model sources. The v0.2 service adds TLS, authentication, relation-level authorization, and out-of-process Python UDFs. |
+| **Security and privacy** | Data stays in its domain by default. Pin and hash model sources. `vqld` binds to loopback by default; non-loopback use requires TLS and one configured service token. Multi-user relation authorization and service-side Python execution are outside v0.2. |
 | **Compatibility** | VisionQL v0.1 is the first public release. Before 1.0, minor releases may revise SQL and Catalog contracts; patch releases preserve the documented public contract. The current SQLite schema is initialized directly and has no legacy migration chain. `EXPLAIN` text is not a stable API before 1.0. |
 
 ### 3.8 Workbench
 
-Workbench ships with `vqld` in v0.2 as a separate lightweight project under `vql-workbench/`. Its SPA and small backend connect to `vqld` as standard Arrow Flight SQL clients and use no private engine API.
+General SQL clients do not render `IMAGE`, `BOX2D`, or detection arrays naturally. v0.3 therefore adds a focused Workbench client after v0.2 validates the service protocol with one selected Flight SQL or ADBC integration.
 
-Generic SQL clients can connect through JDBC or ADBC, but typically render `IMAGE` as binary and detection structs as text. Visual query development needs inline images, bounding boxes, and recent stream results. Workbench focuses on multimodal result inspection and query operations rather than general BI.
+Workbench connects to one `vqld` endpoint, runs and cancels one bounded SQL statement at a time, renders ordinary columns and bounded thumbnails with `BOX2D` overlays, and displays structured VQL errors. It does not add Catalog browsing, live-stream preview, persistent-job operations, saved queries, dashboards, cost views, or original-media access in v0.3.
 
-| Capability | Contract | Release |
-|---|---|---|
-| SQL editor and execution | VQL highlighting, Catalog-aware completion, multi-statement scripts, and history. Prepared schema metadata identifies statement type and boundedness. Interactive row limits are applied at transport, not by rewriting SQL. | v0.2 |
-| Result inspection | Paginated table; inline `IMAGE` thumbnails; click-through via a locator-backed Flight ticket with reauthorization; `BOX2D` overlays; client-side confidence filtering; collapsed `VECTOR`. Original-frame lookup is available only for persistent sources. Live preview guarantees thumbnails; evidence that needs later lookup must first be persisted. | v0.2 |
-| Live result preview | Rolling view of the most recent N rows from an unbounded SELECT; closing the page cancels the preview query | v0.2 |
-| Catalog browser | Browse catalogs, schemas, tables, models, and functions with schema and DDL | v0.2 |
-| Continuous-query operations | Submit durable jobs through public SQL; show definition, state, inference volume, latency, dropped frames, and disconnections; expose `PAUSE`, `RESUME`, and `STOP` | v0.2 |
-| Cost view | Read the engine's Prometheus-format endpoint and show actual GPU time and inference calls per query without requiring a Prometheus server | v0.2 |
-
-Workbench follows three rules:
-
-1. Every operation uses SQL or a standard protocol: `SHOW`, `SUBMIT QUERY`, `DESCRIBE QUERY`, `PAUSE`, `RESUME`, `STOP`, versioned capabilities, statement metadata, structured errors, and Prometheus-format metrics.
-2. Workbench is stateless. The engine authenticates users; saved queries remain in browser storage; the process can restart or scale freely.
-3. Workbench is released independently. The engine does not depend on it, and compatibility follows the SQL and Flight SQL stability policy in Section 3.7.
-
-See the [Workbench proposal](./proposals/2026-08-05-workbench.md) for the technical design.
+Workbench remains an independent public-protocol client; `vql-kernel` and `vqld` do not gain Workbench-only APIs. See the [Workbench Design](./design/workbench.md) for the client and media boundaries.
 
 ---
 
@@ -446,20 +354,20 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 **v0.1 is a single-node, embedded batch-and-streaming release for images, recorded video, and RTSP:**
 
-- `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)`, `TENSOR(dtype, dims...)`, nested types, and `UNNEST`. `VECTOR` and `TENSOR` serve generic Model boundaries; embedding presets, vector distance search, and persisted vector columns wait for v0.3.
+- `IMAGE`, `VIDEO`, `BOX2D`, `VECTOR(n)`, `TENSOR(dtype, dims...)`, nested types, and `UNNEST`. `VECTOR` and `TENSOR` serve generic Model boundaries.
 - Image and video directory tables. Video is expanded by the table's declared fps.
 - `OBJECT_DETECTION` capability Models, generic ONNX signatures, named immutable versions, and direct `<model>(...)` calls. `VQL_CLASSIFY`, `VQL_EXTRACT`, and `VQL_DETECT` provide the complete task-shaped v0.1 AI function surface. Installed YOLO26n ImageNet classification and COCO detection artifacts execute the IMAGE classify/detect overloads; field extraction and STRING overloads return `FEATURE_NOT_AVAILABLE`. Local `ONNX_RUNTIME` uses VisionQL-owned processors, while remote `TRITON_INFERENCE_SERVER` owns its complete pre/post-processing pipeline behind the same canonical typed result. `CREATE FUNCTION` provides DataFusion-backed SQL expression and in-process Python UDFs.
 - One RTSP provider table with event time, watermarks, reconnect handling, and best-effort delivery; `TUMBLE` uses a bounded allowlist of `COUNT/SUM/AVG/MIN/MAX` over persistable scalar types.
-- Foreground SELECT results return directly; Kafka is a writable provider table for continuous output. Parquet and Lance arrive together in v0.3.
-- Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. Batch and streaming queries run in the foreground and stay attached to the client. The chainable DataFrame API arrives in v0.2.
+- Foreground SELECT results return directly; Kafka is a writable provider table for continuous output.
+- Embedded pip package, SQL shell, `vql run job.sql`, and Python library with `sess.sql()`, Arrow results, notebook display, and UDF registration. Batch and streaming queries run in the foreground and stay attached to the client. A chainable DataFrame API is unscheduled.
 - Configuration, Catalog, shell history, and cache live under `VQL_HOME` (default `$HOME/.vql`). `vql-catalog` uses SQLite at exactly `$VQL_HOME/catalog/vql.db`; its backend port is the future MySQL/PostgreSQL boundary. `$VQL_HOME/config.toml` selects SQLite settings and the Session memory limit. SQL defaults to `vql.default`.
 - Explicit frame-sampling pushdown as the first optimizer feature.
 
 RTSP remains non-replayable and best-effort; outages and drops appear as gaps. Scenario B uses recorded-video batch output as the trusted reference for the streaming result, but both paths are required before v0.1 is complete.
 
-**v0.2 adds the `vqld` service**, Flight SQL, TLS/authentication, relation-level authorization, durable job management and recovery backed by serializable Query Manifests, the Python DataFrame API, and Workbench. The network host, protocol, persistence, and recovery contracts are defined in the [`vqld` Service Design](./vqld.md).
+**v0.2 adds the minimal `vqld` service.** It hosts attached queries over a tested Arrow Flight SQL subset and keeps explicitly submitted continuous writes running after their clients disconnect. Persistent jobs store SQL, semantic settings, and pinned opaque Catalog generations. After daemon restart, active RTSP jobs restart from the live position with fresh window state and an explicit gap. v0.2 has no serialized checkpoints, `PAUSE`/`RESUME`, multi-user relation authorization, UC HTTP surface, service-side Python UDF worker, original-media ticket, DataFrame API, or Workbench. The exact host and lifecycle contracts are defined in the [`vqld` Service Design](./design/vqld.md).
 
-**v0.3 adds cross-modal retrieval and persisted results:** image/text embedding capability presets, direct Model calls returning `VECTOR(n)`, brute-force `<->` TopK, Parquet and Lance with native `IMAGE` and vector columns, and HNSW indexing. Parquet and Lance ship together against one output, CTAS, and logical-type recovery contract so `IMAGE` storage is designed only once.
+**v0.3 adds Workbench.** The independent browser client uses only the public `vqld` protocol to execute and cancel one bounded statement, render tables with thumbnail and `BOX2D` results, and present structured errors. It does not add a parallel query, Catalog, job-control, or media API.
 
 Everything else remains intentionally undefined. Candidate directions live in the [Roadmap](../ROADMAP.md) and will be scheduled only after earlier releases produce real feedback.
 
@@ -467,18 +375,20 @@ Everything else remains intentionally undefined. Candidate directions live in th
 
 - **Scenario A — first value without external services (v0.1):** run locally in a Python host. Register an image directory, use a Python UDF to reject blurry images, call a local ONNX Model directly to select images containing a target object, and display the result in the Python session. An in-process UDF requires a notebook or REPL; `vql shell` must direct the user to a Python host. The pure-SQL first-run path in Section 3.2 runs in the shell. Both paths must produce a first result within five minutes of `pip install`.
 - **Scenario B — batch/stream parity (v0.1):** start with the per-minute people-count query in Section 3.2, run it over recorded video, then point the same logic at an RTSP table and use `vql run` to publish to a Kafka table. With the same model and sample rate, assert equivalent results. Inspect `UNNEST` output through an ordinary foreground SELECT. Batch is the trusted reference for the streaming comparison.
+- **Scenario C — client-independent service execution (v0.2):** submit the Scenario B RTSP-to-Kafka write through `vqld`, disconnect the client, reconnect and inspect the same job, then stop it explicitly. Restart `vqld` during a second run and verify that the job reconnects at the live position, reports the unavailable interval and reset window state, and never claims replay or exactly-once delivery. Run the scenario through one selected Flight SQL or ADBC client integration.
+- **Scenario D — bounded visual inspection (v0.3):** connect Workbench to `vqld`, run the bounded image query from Scenario A, render each returned thumbnail with its `BOX2D` overlays, cancel one active query by its server query ID, and display one structured VQL error. The SQL and returned values must match the Python/notebook path.
 
-Scenario A proves that first use is simple. Scenario B proves the differentiated end-to-end streaming capability.
+Scenario A proves that first use is simple. Scenario B proves the differentiated end-to-end streaming capability. Scenario C proves the only new product value required from the first service release: execution independent of a client process. Scenario D proves that Workbench improves visual inspection without creating a second execution contract.
 
 ## 5. Roadmap Summary
 
 | Release | Theme | Core deliverables |
 |---|---|---|
 | **v0.1 (MVP)** | Single-node batch and streaming | Embedded pip package, SQL, CLI, image/video/RTSP/Kafka provider tables, object detection, Python UDFs, `TUMBLE`, attached continuous execution, Acceptance Scenarios A and B |
-| **v0.2** | Service and visual client | `vqld` with Flight SQL, TLS/authentication, relation-level authorization, explicit `SUBMIT QUERY`, durable jobs and recovery, Python DataFrame API, Workbench |
-| **v0.3** | Cross-modal retrieval and persistence | Embedding capability presets, direct Model calls returning `VECTOR(n)`, brute-force `<->` TopK, Parquet and Lance with native multimodal columns, HNSW |
+| **v0.2** | Minimal single-node service | `vqld`, a tested Flight SQL subset, explicit `SUBMIT QUERY`, client-independent jobs, honest restart-from-live behavior, one-principal remote security, and Acceptance Scenario C |
+| **v0.3** | Workbench | Independent browser client, bounded SQL execution and cancellation, thumbnail and `BOX2D` rendering, structured errors, and Acceptance Scenario D |
 
-Cost optimization, clustering, multi-tenancy, and edge coordination remain future candidates. The complete delivery and acceptance plan is maintained in the [Roadmap](../ROADMAP.md).
+Persistent window checkpoints, pause/resume, multi-user authorization, broader BI compatibility, original-media tickets, service-side Python UDFs, the DataFrame API, cost optimization, clustering, and edge coordination remain future candidates. The complete delivery and acceptance plan is maintained in the [Roadmap](../ROADMAP.md).
 
 ## 6. Business Model
 
@@ -488,7 +398,7 @@ The first users will be two or three design partners working with the team on on
 
 ## 7. Success Metrics
 
-**North-star metric: hours of video processed through VisionQL each week**, with batch and streaming normalized into one measure.
+**North-star metric: successful visual-query workflows used each week.** A bounded workflow counts when its result is collected or written; a continuous workflow counts when its sink acknowledges output. Video hours and inference calls are workload and cost diagnostics, not measures of user value.
 
 | Dimension | Metric |
 |---|---|
@@ -497,14 +407,15 @@ The first users will be two or three design partners working with the team on on
 | Cost | On workloads where sampling is valid, GPU time falls approximately in proportion to the declared sample-rate reduction versus full-frame inference |
 | Correctness | With the same model and sample rate, window aggregates match a hand-built baseline pipeline |
 | Adoption | Within 90 days of open-source launch, at least 3 real external scenarios run end to end and at least 1 design partner carries production traffic |
-| Retention | Streaming queries remain online for more than 30 days on average, and weekly active queries grow among design partners |
+| Service value | A submitted v0.2 job continues after client disconnect, can be rediscovered and stopped, and reports an honest gap after daemon restart |
+| Retention | Weekly successful workflows grow among design partners; repeated workflows matter more than raw processed hours |
 
 ## 8. Open Questions
 
-1. **Initial vertical:** security/campuses or content moderation? Security favors private deployment and has stronger willingness to pay but longer channel dependencies. Moderation is more cloud-native, has shorter buying paths, and often larger data volume. The answer determines early connector and scenario investment.
+1. **Initial packaging:** should the entrance-camera anchor workflow first be presented for security/campuses or content moderation? The answer changes examples and design-partner outreach, but not the engine or v0.2 service scope.
 2. **SQL compatibility:** provider-table DDL follows Spark/Databricks `USING ... OPTIONS (...)`; remaining type names, functions, and errors should converge only where doing so preserves VisionQL's typed inference and streaming semantics.
 3. **Confidence-aware aggregation:** should VisionQL eventually provide interval estimates or other dedicated primitives, or should users continue to set thresholds explicitly?
-4. **`IMAGE` transport:** the direction is fixed—return a thumbnail plus a reference by default, never inline original bytes implicitly. The reference includes a display-only sanitized `uri` and an opaque, version-bound `locator`. Original media is fetched through a Flight ticket/DoGet and reauthorized at dereference time. Locators apply only to persistent data. Live frames guarantee thumbnails only; anything requiring later retrieval must first be written by an evidence-retention query. Before the v0.2 Flight schema freezes, Workbench, Python, and BI client testing must determine thumbnail dimensions, inline-byte limits, and client media-reference TTL. See the [Workbench proposal](./proposals/2026-08-05-workbench.md) §3.2.
+4. **Service client profile:** which existing Flight SQL or ADBC client should become the single v0.2 compatibility target? Broader protocol coverage follows measured client demand.
 
 ---
 
@@ -518,11 +429,9 @@ The first users will be two or three design partners working with the team on on
 | `RESOLVE MODEL <name> [VERSION '<version>']` | DDL | Perform the potentially slow artifact download/cache or service validation step for one version |
 | `<model>(arguments [, version => '<version>', named semantic arguments])` | Typed inference | Call a Model directly; planning resolves the call target and version and extracts an `Inference` node |
 | `CREATE FUNCTION ... RETURN <expression> / LANGUAGE PYTHON AS '<entry>'` | DDL | Register a DataFusion-backed SQL expression or batched Python function |
-| `CREATE INDEX ... USING HNSW` | DDL | Add a vector index; rewrite `ORDER BY <-> LIMIT` to ANN in v0.3 |
 | `TUMBLE(ts, interval)` | Time bucket | Define a tumbling window for batch or streaming `GROUP BY` |
 | `UNNEST(expr) AS x` | Relational | Expand an array of detections into rows |
 | `CARDINALITY(array)` | DataFusion scalar function | Count detections after an object-detection Model applies its named filters |
-| `<->` (equivalent to `L2_DISTANCE`) | Vector | Cross-modal similarity in v0.3 |
-| `SUBMIT QUERY name AS INSERT INTO ...` | Operations | Create a durable Table-write job explicitly in v0.2; CLI entry point is `vql submit job.sql`; ordinary unbounded SQL stays attached |
-| `SHOW/DESCRIBE QUERY / PAUSE / RESUME / STOP` | Operations | Inspect and manage durable queries |
+| `SUBMIT QUERY name AS INSERT INTO ...` | Operations | Create a persistent Table-write job explicitly in v0.2; ordinary unbounded SQL stays attached |
+| `SHOW QUERIES / DESCRIBE QUERY / STOP QUERY` | Operations | Inspect and stop persistent queries in v0.2 |
 | `EXPLAIN` | Operations | Show the query plan |

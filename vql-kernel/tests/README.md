@@ -15,4 +15,4 @@ tests belong here when a kernel API exposes metadata that the standard sqllogict
 express.
 
 Deterministic SQL conformance cases live under `slt/`. Real fixtures and external-service
-scenarios follow the [Testing Design](../../docs/testing.md) and live in `vql-testing`.
+scenarios follow the [Testing Design](../../docs/design/testing.md) and live in `vql-testing`.

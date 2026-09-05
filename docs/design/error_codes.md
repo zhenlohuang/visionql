@@ -1,4 +1,4 @@
-# VisionQL Error Code Design
+# Error Code Design
 
 > This document defines the stable error identifiers shared by the kernel, Catalog, CLI, and Python binding. Component documents define where errors originate and how each host transports them.
 
@@ -11,7 +11,7 @@ Every VisionQL error has four layers:
 | Identifier | `VQL-42001` | Stable machine-readable identity; clients branch on this value |
 | Symbol | `INVALID_SQL` | Stable readable name for code and diagnostics |
 | Message | `expected a statement` | Human-readable context; wording is not an API |
-| Metadata | `target_version = "v0.3"` | Structured fields defined for a particular error |
+| Metadata | `target_version = "v0.2"` | Structured fields defined for a particular error |
 
 The identifier format is `VQL-CCDDD`:
 

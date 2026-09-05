@@ -1,10 +1,10 @@
 # VisionQL High-Level Design
 
-> This document turns the [VisionQL PRD](./prd.md) into the system boundaries shared by every component. Detailed contracts live in the [Kernel](./kernel.md), [Catalog](./catalog.md), [`vqld` service](./vqld.md), [Error codes](./error_codes.md), [CLI](./cli.md), [Python binding](./python_binding.md), and [Testing](./testing.md) designs.
+> This document turns the [VisionQL PRD](./prd.md) into the system boundaries shared by every component. Detailed contracts live in the [Kernel](./design/kernel.md), [Catalog](./design/catalog.md), [`vqld` service](./design/vqld.md), [Workbench](./design/workbench.md), [Error codes](./design/error_codes.md), [CLI](./design/cli.md), [Python binding](./design/python_binding.md), and [Testing](./design/testing.md) designs.
 
 ## Scope
 
-VisionQL's delivered v0.1 architecture is an embedded visual-query engine for local image and video directories, live RTSP streams, SQL model inference, event-time `TUMBLE` windows, Kafka output, and CLI and Python hosts. The [Roadmap](../ROADMAP.md) is the source of truth for release scope. The [`vqld` Service Design](./vqld.md) defines the planned v0.2 network host; [proposals](./proposals/README.md) define other later capabilities.
+VisionQL's delivered v0.1 architecture is an embedded visual-query engine for local image and video directories, live RTSP streams, SQL model inference, event-time `TUMBLE` windows, Kafka output, and CLI and Python hosts. The [Roadmap](../ROADMAP.md) is the source of truth for release scope. The [`vqld` Service Design](./design/vqld.md) defines the planned v0.2 network host; [proposals](./proposals/README.md) define other later capabilities.
 
 The architecture has five goals:
 
@@ -14,7 +14,7 @@ The architecture has five goals:
 4. Filtering, asynchronous inference, and row-level failure cannot lose event-time progress, window state, or source progress.
 5. The kernel remains independent of its host process and can be embedded by both CLI and Python.
 
-The embedded v0.1 design excludes durable jobs, restart recovery, cross-query decode sharing, model-result caching, multi-user security, and a network service. It also does not fork DataFusion, build a general SQL engine or video storage format, or force bounded and continuous statements to share physical operators. Syntax assigned to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, identify the target release or state that it is unscheduled, and create no Catalog object.
+The embedded v0.1 design excludes persistent service jobs, restart recovery, cross-query decode sharing, model-result caching, multi-user security, and a network service. It also does not fork DataFusion, build a general SQL engine or video storage format, or force bounded and continuous statements to share physical operators. Syntax assigned to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, identify the target release or state that it is unscheduled, and create no Catalog object.
 
 ## Naming Convention
 
@@ -87,7 +87,7 @@ A Model is a callable Catalog object whose immutable interface comes from a capa
 
 ### Immutable definitions during execution
 
-Planning captures one Catalog definition snapshot. Changing a Table, Model default/version aggregate, or Function affects newly planned statements but does not change a running statement. Model versions are immutable once resolved; publishing is the explicit default-version pointer. The snapshot is process-local; a durable, serializable Query Manifest belongs to the [`vqld` Service Design](./vqld.md).
+Planning captures one Catalog definition snapshot. Changing a Table, Model default/version aggregate, or Function affects newly planned statements but does not change a running statement. Model versions are immutable once resolved; publishing is the explicit default-version pointer. For a persistent v0.2 job, `vqld` stores normalized SQL, semantic settings, and the snapshot's opaque Catalog generations; the Catalog remains the definition source of truth.
 
 ### Bounded resources and honest delivery
 
@@ -120,8 +120,8 @@ Optimization follows the same order across providers: prune columns and time ran
 | Epoch coordinator | Ordered epochs, watermarks, window state, cancellation, sink acknowledgement | SQL expression semantics |
 | Media runtime | Probe, read, decode, sample, frame buffers, encode | Model pre- or post-processing |
 | Model runtime | Artifact resolution, compiled pipelines, bounded scheduling, inference | SQL or Catalog authorization semantics |
-| Catalog | Definitions, namespaces, provider capabilities, transactions, snapshots, UC wire translation | Media bytes, model weights, credentials, durable jobs |
-| `vql-server` / `vqld` (v0.2) | Flight and HTTP hosting, authentication enforcement, logical Sessions, query and job registries, checkpoints, recovery, metrics | SQL semantics, Catalog definitions, embedded runtime behavior |
+| Catalog | Definitions, namespaces, provider capabilities, transactions, snapshots, UC wire translation | Media bytes, model weights, credentials, persistent jobs |
+| `vql-server` / `vqld` (v0.2) | Flight hosting, one-principal service security, logical Sessions, query registry, persistent job records, restart orchestration, health, and aggregate metrics | SQL semantics, copied Catalog definitions, window checkpoints, embedded runtime behavior |
 | Testing | Real-fixture scenarios and external-service system tests | Owner-module invariants that can be proved locally |
 
 ## Batch and Streaming Paths
@@ -158,13 +158,13 @@ Boundary rules:
 - `vql-catalog` cannot depend on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
 - CLI and Python depend only on public kernel host interfaces; DataFusion types do not leak into their public APIs.
 - Breaking DataFusion or Arrow changes remain behind the kernel boundary and require focused planning, epoch, schema, and wire-format regression tests.
-- `vql-server` is a planned v0.2 crate defined by the [`vqld` Service Design](./vqld.md), not a current workspace member. Workbench remains a separate proposal-stage project.
+- `vql-server` is a planned v0.2 crate defined by the [`vqld` Service Design](./design/vqld.md), not a current workspace member. Workbench is a planned v0.3 independent client defined by the [Workbench Design](./design/workbench.md) and uses only public service protocols.
 
 ## Architecture Decisions
 
 | Decision | Rationale |
 |---|---|
-| Rust + Arrow + DataFusion | Supports embedding, columnar execution, Python interoperability, and extension points. |
+| Rust + Arrow + DataFusion | Supports typed inference, columnar execution, Python interoperability, and extension points. |
 | One logical plan with bounded or epoch execution | Preserves shared SQL semantics without forcing control messages through `RecordBatch`. |
 | Epoch-scoped frame leases | Frame lifetime does not depend on whether rows survive filtering. |
 | Standard Arrow storage for multimodal values | Preserves ecosystem readability while keeping process-local state private. |
@@ -180,13 +180,14 @@ Boundary rules:
 
 | Document | Contract |
 |---|---|
-| [Kernel](./kernel.md) | Planning, streaming, types, providers, inference, resources, and security |
-| [Catalog](./catalog.md) | Namespaces, definitions, provider capabilities, snapshots, backend, and UC API |
-| [`vqld` service](./vqld.md) | Flight SQL, security, Sessions, durable jobs, checkpoints, and recovery |
-| [Error codes](./error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
-| [CLI](./cli.md) | `shell` and `run`, terminal behavior, rendering, and signals |
-| [Python binding](./python_binding.md) | PyO3 API, PyArrow results, and Python UDF execution |
-| [Testing](./testing.md) | Test ownership, fixtures, and external-service scenarios |
+| [Kernel](./design/kernel.md) | Planning, streaming, types, providers, inference, resources, and security |
+| [Catalog](./design/catalog.md) | Namespaces, definitions, provider capabilities, snapshots, backend, and UC API |
+| [`vqld` service](./design/vqld.md) | Flight SQL, Sessions, persistent jobs, one-principal security, and honest restart-from-live behavior |
+| [Workbench](./design/workbench.md) | v0.3 browser client, bounded visual results, public-protocol boundary, and deferred capabilities |
+| [Error codes](./design/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
+| [CLI](./design/cli.md) | `shell` and `run`, terminal behavior, rendering, and signals |
+| [Python binding](./design/python_binding.md) | PyO3 API, PyArrow results, and Python UDF execution |
+| [Testing](./design/testing.md) | Test ownership, fixtures, and external-service scenarios |
 
 ## References
 

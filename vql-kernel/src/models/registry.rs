@@ -120,7 +120,7 @@ impl PipelineRegistry {
         registry.register_runtime(Arc::new(TritonRuntimeFactory));
         registry.register_runtime(Arc::new(UnavailableRuntimeFactory::new(
             "transformers",
-            "v0.3",
+            "未排期",
         )));
         for kind in ["vllm", "sglang", "llama-cpp"] {
             registry.register_runtime(Arc::new(UnavailableRuntimeFactory::new(kind, "未排期")));
@@ -525,13 +525,13 @@ mod tests {
     }
 
     #[test]
-    fn known_future_runtime_is_version_gated_by_a_stub_factory() {
+    fn known_unscheduled_runtime_is_rejected_by_a_stub_factory() {
         let registry = PipelineRegistry::builtins();
         let (interface, version) = declaration("transformers");
         let error = registry
             .validate_declaration(&interface, &version)
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
-        assert_eq!(error.target_version.as_deref(), Some("v0.3"));
+        assert_eq!(error.target_version.as_deref(), Some("未排期"));
     }
 }

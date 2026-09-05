@@ -117,6 +117,6 @@ def test_feature_error_preserves_target_version(tmp_path):
     error = caught.value
     assert error.code == "VQL-0A001"
     assert error.symbol == "FEATURE_NOT_AVAILABLE"
-    assert error.message == "vector indexes are not available"
-    assert error.target_version == "v0.3"
-    assert str(error).endswith("(target: v0.3)")
+    assert error.message == "indexes are not available"
+    assert error.target_version == "未排期"
+    assert str(error).endswith("(target: 未排期)")

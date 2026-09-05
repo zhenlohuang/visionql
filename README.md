@@ -23,10 +23,10 @@
 
 ## What is VisionQL
 
-VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL today—and a chainable DataFrame API planned for v0.2—users can work with images, video files, and live video streams through the same query model.
+VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL, users can work with images, video files, and live video streams through the same query model. A chainable DataFrame API remains a future candidate rather than a scheduled contract.
 
 > [!IMPORTANT]
-> VisionQL v0.1.0 is the first public release. It supports image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output. `vqld`, Workbench, and vector search follow in later releases. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
+> VisionQL v0.1.0 is the first public release. It supports image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output. The minimal single-node `vqld` service is planned for v0.2, followed by the focused Workbench visual SQL client in v0.3. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
 
 ## Why VisionQL
 
@@ -278,7 +278,7 @@ Hard failures have a stable `VQL-CCDDD` identifier, a readable symbol, and a dia
 [VQL-42001] INVALID_SQL: expected a statement
 ```
 
-CLI output uses that form. Python raises `visionql.VisionQLError`, a `RuntimeError` subclass whose `code`, `symbol`, `message`, and `target_version` attributes avoid error-string matching. See the [Error Code Design](docs/error_codes.md) for the registry and compatibility rules.
+CLI output uses that form. Python raises `visionql.VisionQLError`, a `RuntimeError` subclass whose `code`, `symbol`, `message`, and `target_version` attributes avoid error-string matching. See the [Error Code Design](docs/design/error_codes.md) for the registry and compatibility rules.
 
 ## Architecture
 
@@ -303,13 +303,14 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [Examples](examples/README.md) | End-to-end SQL, Python, and notebook workflows |
 | [Product requirements](docs/prd.md) | Product value, public semantics, and version scope |
 | [High-level design](docs/high_level_design.md) | System boundaries, data paths, invariants, and dependency direction |
-| [Kernel design](docs/kernel.md) | Planning, streaming, media, inference, resources, and security |
-| [Catalog design](docs/catalog.md) | Namespaces, definitions, snapshots, providers, backends, and UC API |
-| [`vqld` service design](docs/vqld.md) | Planned v0.2 Flight SQL, security, durable jobs, checkpoints, and recovery |
-| [Error code design](docs/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
-| [CLI design](docs/cli.md) | Shell, script execution, rendering, and signal behavior |
-| [Python binding design](docs/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |
-| [Testing design](docs/testing.md) | Test ownership, system scenarios, fixtures, and Compose services |
+| [Kernel design](docs/design/kernel.md) | Planning, streaming, media, inference, resources, and security |
+| [Catalog design](docs/design/catalog.md) | Namespaces, definitions, snapshots, providers, backends, and UC API |
+| [`vqld` service design](docs/design/vqld.md) | Planned v0.2 Flight SQL host, client-independent jobs, and honest restart-from-live behavior |
+| [Workbench design](docs/design/workbench.md) | Planned v0.3 browser client for bounded thumbnail and box inspection |
+| [Error code design](docs/design/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
+| [CLI design](docs/design/cli.md) | Shell, script execution, rendering, and signal behavior |
+| [Python binding design](docs/design/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |
+| [Testing design](docs/design/testing.md) | Test ownership, system scenarios, fixtures, and Compose services |
 | [Roadmap](ROADMAP.md) | Delivered and planned capabilities by version |
 | [Proposals](docs/proposals/README.md) | Focused designs for later features |
 | [Datasets](data/datasets/README.md) / [models](data/models/README.md) | Sample provenance and ONNX export contract |
