@@ -7,12 +7,13 @@
 `vql-catalog` owns:
 
 - Catalog, Schema, Table, Model, and Function definitions;
+- persistent Query definitions, pinned-generation dependencies, mutable status, and bounded terminal history;
 - namespace resolution and provider capability metadata;
 - transactional mutations and immutable definition snapshots;
 - the `CatalogBackend` storage port and SQLite implementation;
 - Unity Catalog wire models and HTTP translation.
 
-It does not own media bytes, model artifacts, resolved credentials, connector sessions, query execution, or persistent jobs. The [`vqld` Service Design](./vqld.md) defines the service-owned job repository; it refers to the Catalog's existing immutable historical generations instead of copying definitions. `vql-catalog` has no dependency on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
+It does not own media bytes, model artifacts, resolved credentials, connector sessions, query execution, or persistent Query lifecycle transitions. The [`vqld` Service Design](./vqld.md) defines the service-owned Query controller, which uses Catalog Query APIs instead of writing the backend directly. `vql-catalog` has no dependency on DataFusion, media/model runtimes, Kafka, PyO3, Flight, or CLI behavior.
 
 ## Namespace and Objects
 
@@ -22,15 +23,18 @@ The default namespace is `vql.default`:
 - `default` is the default Schema;
 - an unqualified SQL name such as `photos` resolves as `vql.default.photos`.
 
-Every relation provider occupies the Table namespace. Models and Functions share one callable namespace, while their Catalog kinds and lifecycle remain distinct. SQLite stores callable identity in a table whose primary key is `(catalog_name, schema_name, name)` and records the owning kind separately, so the database constraint prevents concurrent creates or renames from claiming one callable name. Object names are case-insensitive and normalize to lowercase, including names written as quoted SQL identifiers. `VQL_*` and the `vql.builtin` schema are release-managed reservations.
+Every relation provider occupies the Table namespace. Models and Functions share one callable namespace, while their Catalog kinds and lifecycle remain distinct. Persistent Queries occupy a Query-only namespace and do not collide with relations or callables. SQLite stores callable identity in a table whose primary key is `(catalog_name, schema_name, name)` and records the owning kind separately, so the database constraint prevents concurrent creates or renames from claiming one callable name. Object names are case-insensitive and normalize to lowercase, including names written as quoted SQL identifiers. `VQL_*` and the `vql.builtin` schema are release-managed reservations.
 
-| Object | Stored definition |
+| Object | Stored contract |
 |---|---|
 | Table | Provider variant with its options, location or sanitized endpoint, optional credential reference, comment/properties/owner metadata, and the Arrow schema; capabilities are derived from the provider rather than stored |
 | Model | Immutable expanded interface, comment, live named versions, the initial version declaration fingerprint, and one optional default pointer. Each version stores raw source, Runtime, flat options, declaration fingerprint, creation time, and an optional resolved contract with source/hash, execution, semantic fingerprint, and volatility |
 | Function | Parameter names and types, inferred constant-only parameter names, return type, normalized SQL-macro expression or Python `module:function` entry point, and a semantic fingerprint |
+| Query | Stable query ID and normalized name; immutable normalized and redacted SQL, principal, semantic Session settings, and pinned definition generations; separately mutable lifecycle status, restart gaps, and last error |
 
 Model calls are query syntax, not Function objects. The call target and selected version resolve from the statement's immutable definition snapshot.
+
+Query is a first-class Catalog object kind, but it is an operational object rather than a definition-revision object. Only `SUBMIT QUERY` creates one in the Catalog and Schema active during preparation. Ordinary bounded and attached-unbounded executions are transient and never enter the Catalog. Query names are unique among non-terminal Queries in that Query-only namespace; the server-generated Catalog object ID is the public query ID and stable lifecycle identity. Retained terminal Queries may share a name with a later submission.
 
 ### Callable Objects and Model Versions
 
@@ -43,6 +47,14 @@ Resolving the exact initial declaration establishes the first default. An added 
 Function bodies store computation rather than Model ownership. Model references in SQL functions resolve from the query snapshot when the body expands, so dropping a referenced Model does not cascade into Function deletion. Function definitions also persist parameters inferred to occupy constant-only Model positions.
 
 The `vql.builtin` schema is reserved for release-managed identities. User DDL cannot create, alter, rename, or drop objects in that schema. The v0.1 YOLO26 classifier and detector used by `VQL_CLASSIFY` and `VQL_DETECT` are kernel-owned rather than Catalog Models, so they do not appear in Catalog snapshots, Unity Catalog responses, `SHOW MODELS`, or internal object-revision history.
+
+### Persistent Query Objects
+
+A Query definition is immutable after its creation transaction. It contains no logical or physical plan, runtime handle, connector session, resolved credential, process-local frame reference, or checkpoint blob. Dependency rows refer to the exact opaque generations captured by Kernel preparation. Query creation validates those generations and commits the definition, dependencies, and initial `STARTING` status atomically before `vqld` launches execution.
+
+Query status is mutable operational state rather than a definition revision. It contains the public state, a monotonic status version, the internal stop-request flag, source health, last event time, lifecycle timestamps, restart-gap summary, and last structured error. Status writes use compare-and-swap so a stale execution task cannot overwrite a concurrent stop request or later lifecycle transition. `vql-catalog` enforces storage and concurrency invariants; the `vqld` Query controller owns transition policy, execution, cancellation, and restart behavior.
+
+Queries never enter `DefinitionSnapshot`, SQL definition resolution, or the Unity Catalog-compatible API. Terminal Queries are pruned under the configured count or age bound, while non-terminal Queries and their dependency rows are retained. Definition revisions referenced by a live Query remain resolvable; v0.2 still keeps all definition revisions append-only.
 
 ## Tables and Provider Capabilities
 
@@ -134,13 +146,15 @@ $VQL_HOME/
     └── models/
 ```
 
-The Catalog owns only `catalog/vql.db` in this layout. Hosts own `config.toml` loading and history; the model runtime owns `cache/models`. `config.toml` is optional and uses schema `version = 1`. Relative paths resolve from `VQL_HOME`, and an explicit Rust or Python host configuration may override the SQLite path before constructing `CatalogStore`.
+The Catalog owns only `catalog/vql.db` in this layout. The same database stores definition objects and persistent Query objects; `vqld` creates no separate service database. Hosts own `config.toml` loading and history; the model runtime owns `cache/models`. `config.toml` is optional and uses schema `version = 1`. Relative paths resolve from `VQL_HOME`, and an explicit Rust or Python host configuration may override the SQLite path before constructing `CatalogStore`.
 
 ## Persistence and Snapshots
 
-`CatalogBackend` is the storage port. `CatalogStore` provides default-namespace operations over any `Arc<dyn CatalogBackend>`. The `sqlite` feature implements the port at `$VQL_HOME/catalog/vql.db`. Other backends must preserve the same domain, transaction, snapshot, and wire-translation contracts.
+`CatalogBackend` is the storage port. `CatalogStore` provides default-namespace operations over any `Arc<dyn CatalogBackend>`, including Query creation, lookup, listing, status compare-and-swap, and terminal-history pruning. The `sqlite` feature implements the port at `$VQL_HOME/catalog/vql.db`. Other backends must preserve the same domain, transaction, snapshot, Query-concurrency, and wire-translation contracts.
 
 Every definition mutation commits atomically. The SQLite backend keeps `catalogs` and `schemas` rows for the namespace, an append-only `object_revisions` log holding each definition as JSON plus its Arrow IPC schema, and an `objects` table pointing every live `(catalog, schema, kind, name)` at its head generation. Each newly created Table, Model, or Function starts at object revision 1; only mutations of that same live object increment its revision. A separate global generation is an opaque storage key used for exact historical lookup and compare-and-swap, never a SQL or Unity Catalog field. Revision rows are never rewritten; `DROP` appends a tombstone revision and removes the object head so new planning cannot resolve the name. Model mutations compare-and-swap the opaque head generation and verify that every already-resolved version is carried forward byte-for-byte. Dropping a version removes it from the live head while history retains it; a later explicit add may reuse the version name.
+
+Query definitions, generation dependencies, and mutable status use dedicated relations in the same backend. Runtime status updates do not append `object_revisions` or advance a definition generation. This keeps definition snapshots stable and allows terminal Query history to be pruned independently of immutable definition history.
 
 A reader captures one `DefinitionSnapshot` containing current Tables, Model aggregates, and Functions. The snapshot is immutable and detached from the store, so later mutations—including moving a Model default—are invisible to everything already holding one. That is the whole consistency contract the Catalog offers; how a planned statement pins and consumes a snapshot belongs to the [Kernel Design](./kernel.md#immutable-query-definition-snapshot).
 
@@ -160,4 +174,4 @@ Wire models and paths follow the [Unity Catalog OpenAPI v0.6.0](https://github.c
 
 List operations use `max_results`, `page_token`, and `next_page_token`. Catalog domain errors use the shared [`VQL-CCDDD` identifiers](./error_codes.md). The compatibility adapter translates them to the UC `{ "error_code", "message" }` envelope and corresponding HTTP statuses; UC wire codes remain protocol values rather than VisionQL identifiers. The Axum router is available as `vql_catalog::uc::http::router` when the `http` feature is enabled.
 
-Credentials, grants, volumes, temporary table credentials, and registered-model versions are outside this compatibility surface.
+Queries, credentials, grants, volumes, temporary table credentials, and registered-model versions are outside this compatibility surface.

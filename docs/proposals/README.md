@@ -18,5 +18,5 @@ There are currently no active proposals.
 - **Language:** Proposal documents, titles, metadata keys, and index entries are written in English.
 - **Front matter:** Include only `created_at`, `status`, `target_version`, and `updated_at`.
 - **Status:** `draft` → `accepted` → `implemented`; use `superseded` when another proposal replaces it and link the replacement in the document body. When a feature enters current scope, merge its contract into the HLD and owning component design, then remove the proposal without renaming other files.
-- **System-design boundary:** If a change affects a global v0.1 invariant—such as payload states or the epoch contract—revise and review the [High-Level Design](../high_level_design.md) first. Persistent service-job and public protocol contracts belong to the [`vqld` Service Design](../design/vqld.md).
+- **System-design boundary:** If a change affects a global v0.1 invariant—such as payload states or the epoch contract—revise and review the [High-Level Design](../high_level_design.md) first. Persistent Query and public protocol contracts belong to the [`vqld` Service Design](../design/vqld.md).
 - **Index maintenance:** This README is the only proposal index. Update it whenever a proposal is added, renamed, or removed.

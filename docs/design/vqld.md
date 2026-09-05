@@ -10,52 +10,54 @@ The v0.2 acceptance path is:
 
 1. submit one RTSP-to-Kafka query through `vqld`;
 2. disconnect the client while the query keeps running;
-3. reconnect, find the same job, and inspect or stop it;
-4. restart `vqld` and observe the active job reconnect at the live RTSP position with a reported restart gap and fresh window state.
+3. reconnect, find the same persistent Query, and inspect or stop it;
+4. restart `vqld` and observe the active Query reconnect at the live RTSP position with a reported restart gap and fresh window state.
 
-The service owns a tested Arrow Flight SQL profile, logical client Sessions, attached-query registration, a persistent job repository, process health, and aggregate operational metrics.
+The service owns a tested Arrow Flight SQL profile, logical client Sessions, attached-execution registration, the persistent Query controller, process health, and aggregate operational metrics. The Catalog persists Query objects in the same backend as Table, Model, and Function definitions.
 
 The v0.2 service does not provide serialized window checkpoints, `PAUSE` or `RESUME`, transparent state recovery, multi-user or relation-level authorization, a network Unity Catalog API, original-media lookup, Workbench, a chainable DataFrame API, service-side Python UDF execution, complete BI/JDBC compatibility, clustering, high availability, distributed workers, replay for RTSP, or exactly-once delivery.
 
 ## Ownership Boundaries
 
 - `vql-kernel` owns parsing, statement classification, immutable definition snapshots, planning, bounded execution, the epoch coordinator, cancellation, media conversion, and model execution.
-- `vql-catalog` owns Catalog, Schema, Table, Model, and Function definitions, immutable object revisions, provider capabilities, SQLite persistence, and Unity Catalog-compatible wire models.
-- `vql-server` owns network transport, logical Sessions, attached query IDs, persistent job lifecycle, restart orchestration, and service-level security.
-- `vql-server` depends only on public APIs of `vql-kernel` and `vql-catalog`; neither lower crate depends on Flight, gRPC, authentication middleware, or service persistence.
-- CLI, Python, and third-party clients use public Flight SQL and SQL. No client receives a private engine or job-management RPC.
+- `vql-catalog` owns Catalog, Schema, Table, Model, Function, and persistent Query objects; immutable definition revisions; mutable Query status; provider capabilities; SQLite persistence; and Unity Catalog-compatible wire models.
+- `vql-server` owns network transport, logical Sessions, attached execution IDs, the persistent Query controller, restart orchestration, and service-level security.
+- `vql-server` depends only on public APIs of `vql-kernel` and `vql-catalog`; neither lower crate depends on Flight, gRPC, or authentication middleware, and the Catalog Query contract contains no service controller or runtime types.
+- CLI, Python, and third-party clients use public Flight SQL and SQL. No client receives a private engine or Query-management RPC.
 
-`vqld` composes three service-owned control planes around one embedded `Engine`:
+`vqld` coordinates three control planes around one embedded `Engine`:
 
 | Control plane | Ownership |
 |---|---|
 | Session registry | Authenticated logical Sessions, expiry, settings, and prepared statements required by the tested client profile |
-| Query registry | Per-execution query IDs, Flight endpoints, attached lifecycle, and exact cancellation |
-| Job repository | Persistent query SQL, pinned Catalog generations, state, restart gaps, errors, and bounded history |
+| Execution registry | Service-owned per-execution IDs, Flight endpoints, attached lifecycle, and exact cancellation |
+| Query controller | Catalog-backed Query objects, active kernel handles, lifecycle transitions, restart orchestration, and bounded terminal history |
 
 ## Local State and Process Model
 
-`vqld` uses `$VQL_HOME/catalog/vql.db` through `vql-catalog` and stores service state separately:
+`vqld` stores every durable Query definition and status through `vql-catalog` in the existing Catalog database. It has no separate service database:
 
 ```text
 $VQL_HOME/
-├── catalog/
-│   └── vql.db
-└── service/
-    └── vqld.db
+└── catalog/
+    └── vql.db    # definitions and persistent Query objects
 ```
 
-Only one `vqld` process may write one `VQL_HOME`. The daemon holds an instance lock for its lifetime. A job transaction is committed before launch, so every accepted submission is discoverable after restart. Terminal history is retained under a configured count or age bound; active jobs are never evicted.
+Only one `vqld` process may write one `VQL_HOME`. The daemon holds an instance lock for its lifetime. Query creation is committed before launch, so every accepted submission is discoverable after restart. Terminal Query history is retained under a configured count or age bound; active Queries are never evicted.
 
-The Catalog remains the source of truth for definitions. A non-terminal job records the exact opaque generations from its definition snapshot. The append-only Catalog already retains those historical generations, while live heads may still be changed or dropped for new queries. Such a mutation does not stop or retarget a persistent job; job termination remains explicit. The service does not copy full Table, Model, or Function definitions into a second manifest store and does not globally serialize Catalog mutations with job submission.
+A persistent Query is a first-class Catalog object kind with an operational lifecycle and a Query-only namespace. It belongs to the Catalog and Schema active when `SUBMIT QUERY` is prepared. Ordinary bounded and attached-unbounded executions are not Catalog objects. Query names do not collide with Table or callable names, and the stable Catalog object ID is its public `query_id` and lifecycle identity.
+
+The Catalog stores an immutable Query definition, dependency rows for the exact opaque generations from its definition snapshot, and a separately mutable Query status. Query status uses compare-and-swap rather than creating an append-only object revision for every runtime update. Queries do not enter `DefinitionSnapshot`, definition-name resolution, or the Unity Catalog-compatible API.
+
+Query creation validates every pinned generation and inserts the definition, dependencies, and initial `STARTING` status in one Catalog transaction. The append-only definition history retains those generations while live heads may still be changed or dropped for new executions. Such a mutation does not stop or retarget a persistent Query; termination remains explicit. The service does not copy full Table, Model, or Function definitions into another store and does not write the Catalog database directly.
 
 ## Public Network Surfaces
 
 | Surface | Contract |
 |---|---|
-| Arrow Flight SQL | Query and update execution, the metadata needed by the selected clients, and per-query cancellation |
+| Arrow Flight SQL | Query and update execution, the metadata needed by the selected clients, and per-execution cancellation |
 | `/health/live` | Process liveness only; returns no configuration or dependency detail |
-| `/health/ready` | Catalog, job repository, instance lock, and Flight-listener readiness |
+| `/health/ready` | Catalog including persistent Query storage, instance lock, and Flight-listener readiness |
 | `/metrics` | Optional process and aggregate service metrics without per-query labels |
 
 `vqld` binds to loopback by default. A non-loopback listener requires TLS and one configured service credential mapped to one Catalog principal. Every non-health request must authenticate. v0.2 does not expose the Unity Catalog-compatible HTTP router over the network.
@@ -83,8 +85,8 @@ The concrete Rust API may use different names, but it preserves these contracts:
 - DDL preparation validates syntax and authorization intent; provider validation and the Catalog transaction occur during execution.
 - A prepared statement owns its classification, result schema, Session settings, definition snapshot, opaque definition generations, and logical plan.
 - `prepare_pinned` loads one historical snapshot from an exact set of Catalog generations and resolves names only inside that snapshot. Missing or incompatible generations fail; it never substitutes current heads.
-- One logical Session may have multiple prepared statements and concurrent executions. Cancellation is routed through the `QueryHandle` registered for one `query_id`.
-- Preparing `SUBMIT QUERY` captures the normalized SQL, semantic settings, and definition generations but creates no job until execution commits the job transaction.
+- One logical Session may have multiple prepared statements and concurrent executions. Cancellation is routed through the `QueryHandle` registered for one `execution_id`.
+- Preparing `SUBMIT QUERY` captures the normalized SQL, semantic settings, and definition generations but creates no Query object until execution commits the Catalog transaction.
 
 ## Flight SQL Profile
 
@@ -95,8 +97,8 @@ The required product behavior is:
 - bounded queries return Arrow batches through `DoGet`;
 - ordinary unbounded queries return an attached `DoGet` stream;
 - updates execute once and return their affected-row result after completion;
-- every execution receives a server-generated query ID;
-- the client can cancel that exact query ID without affecting other executions;
+- every attached execution receives a server-generated execution ID;
+- the client can cancel that exact execution ID without affecting other executions;
 - scripts prepare and execute statements sequentially because later statements may depend on earlier DDL.
 
 Prepared result-schema metadata carries only the classification clients need:
@@ -110,9 +112,9 @@ vql.statement_info.result_mode = bounded | unbounded | none
 
 `SUBMIT QUERY` is an unbounded computation with a bounded result. Its returned row confirms persistence; it is not the result stream of the submitted computation.
 
-An attached execution has a bounded interval in which its first result stream must attach. Dropping its last result stream cancels its kernel `QueryHandle`. Losing an unrelated RPC or channel does not cancel another query. Persistent jobs are independent of the submitting Session.
+An attached execution has a bounded interval in which its first result stream must attach. Dropping its last result stream cancels its kernel `QueryHandle`. Losing an unrelated RPC or channel does not cancel another execution. Persistent Queries are independent of the submitting Session.
 
-Failures use standard gRPC status classes and the versioned structured VQL error representation defined by the [Error Code Design](./error_codes.md). Clients do not parse prose messages or ticket contents to discover a query ID.
+Failures use standard gRPC status classes and the versioned structured VQL error representation defined by the [Error Code Design](./error_codes.md). Clients do not parse prose messages or ticket contents to discover an execution ID.
 
 ## `IMAGE` Flight Boundary
 
@@ -140,9 +142,9 @@ DESCRIBE QUERY '<query_id>';
 STOP QUERY '<query_id>';
 ```
 
-`SUBMIT QUERY` accepts exactly one unbounded `INSERT INTO <table> SELECT ...` whose destination has writable capability. The normalized name is unique among non-terminal jobs. State-changing operations use the server-generated query ID; the name is display and filtering metadata.
+`SUBMIT QUERY` accepts exactly one unbounded `INSERT INTO <table> SELECT ...` whose destination has writable capability. The normalized name is unique among non-terminal Query objects. State-changing operations use the server-generated `query_id`; the name is display and filtering metadata.
 
-`SUBMIT QUERY` returns one bounded Arrow row after the job transaction commits:
+`SUBMIT QUERY` returns one bounded Arrow row after the Query transaction commits:
 
 ```text
 query_id Utf8,
@@ -169,22 +171,30 @@ DESCRIBE QUERY <id>:
 
 Later protocol versions may append columns. Clients select fields by name and preserve unknown state strings.
 
-`source_health` is NULL before a source starts and otherwise reports `connected` or `reconnecting`; clients preserve unknown later values. `restart_gap_count` increments once whenever daemon startup relaunches a previously active job. `last_event_time` is the newest event time accepted by the current process and is NULL before the first row.
+`source_health` is NULL before a source starts and otherwise reports `connected` or `reconnecting`; clients preserve unknown later values. `restart_gap_count` increments once whenever daemon startup relaunches a previously active Query. `last_event_time` is the newest event time accepted by the current process and is NULL before the first row.
 
-## Job Record and Restart
+## Query Object and Restart
 
-A service-owned job record contains:
+A Catalog-managed Query contains an immutable definition:
 
-- query ID and normalized name;
+- query ID, normalized name, principal identifier, and creation time;
 - normalized SQL and a redacted display projection;
-- the configured principal identifier;
 - semantic Session settings;
-- pinned opaque Catalog generations;
-- lifecycle state, timestamps, restart-gap summary, and last error.
+- pinned opaque Catalog generations.
+
+Its mutable status contains:
+
+- public lifecycle state and a monotonic `status_version` used for compare-and-swap;
+- the durable internal stop-request flag;
+- source health, last event time, and lifecycle timestamps;
+- restart-gap count and latest gap summary;
+- the last structured error.
 
 It does not contain a serialized DataFusion logical or physical plan, copied Catalog definitions, compiled model session, process-local frame reference, credential value, checkpoint blob, state-schema fingerprint, codec version, or engine state-format ABI.
 
-On startup, every persisted `STARTING` or `RUNNING` job is normalized to `STARTING`. The service then:
+`vql-catalog` owns Query validation, atomic persistence, status compare-and-swap, dependency integrity, listing, and terminal-history pruning. `vql-server` owns the allowed lifecycle transitions and all execution behavior. Runtime tasks update status against the expected `status_version`, so a late completion or failure cannot overwrite a concurrent stop request.
+
+On startup, the Query controller first completes every recorded stop request as `STOPPED` without launching it. It loads every other persisted `STARTING` or `RUNNING` Query, normalizes it to `STARTING`, and then:
 
 1. loads the pinned generations from the Catalog;
 2. rebuilds the prepared statement from normalized SQL and saved semantic settings;
@@ -194,7 +204,7 @@ On startup, every persisted `STARTING` or `RUNNING` job is normalized to `STARTI
 6. records the unavailable interval and whether open-window state was discarded;
 7. enters `RUNNING`, or `FAILED` if rehydration or launch cannot complete.
 
-The public states are `STARTING`, `RUNNING`, `STOPPED`, and `FAILED`. `STOP QUERY` commits an internal stop-request flag, cancels the active handle, releases runtime resources, and then commits `STOPPED`. Startup completes a recorded stop request without relaunching the job. Repeating `STOP QUERY` for a terminal job is idempotent. Transient cleanup steps and the stop-request flag do not create additional public states.
+The public states are `STARTING`, `RUNNING`, `STOPPED`, and `FAILED`. `STOP QUERY` first commits the stop-request flag with compare-and-swap, then the controller cancels the active handle, releases runtime resources, and commits `STOPPED`. Repeating `STOP QUERY` for a terminal Query is idempotent. Transient cleanup steps and the stop-request flag do not create additional public states.
 
 RTSP remains non-replayable. Restart loses unavailable source frames and open-window contributions; a Kafka write that was in flight at the crash may be absent or partially visible. `vqld` reports the gap and never describes this behavior as exactly once, at least once, or transparent recovery.
 
@@ -204,17 +214,17 @@ RTSP remains non-replayable. Restart loses unavailable source frames and open-wi
 
 - The configured credential maps to one principal; v0.2 has no user directory, role model, per-relation policy, or delegated identity.
 - A logical Session is opaque, short-lived, and bound to that principal.
-- Raw credentials, authorization metadata, URI user information, signed query parameters, and resolved secret values never enter job records, errors, metrics, or public logs.
-- Query execution uses the normal secret-provider boundary at runtime; secrets are not persisted with a job.
+- Raw credentials, authorization metadata, URI user information, signed query parameters, and resolved secret values never enter Query objects, errors, metrics, or public logs.
+- Query execution uses the normal secret-provider boundary at runtime; secrets are not persisted with a Query.
 - Service execution of a query that depends on a Python Function returns `FEATURE_NOT_AVAILABLE`. Embedded Python UDF behavior is unchanged.
 
 ## Metrics and Health
 
 `SHOW QUERIES` and `DESCRIBE QUERY` are the product interfaces for query state, source health, last event time, restart gaps, and errors.
 
-The optional Prometheus endpoint contains process and aggregate Session, query, inference, source, and sink metrics. It does not use `query_id` or job names as labels and is not a retained job-history API.
+The optional Prometheus endpoint contains process and aggregate Session, query, inference, source, and sink metrics. It does not use `query_id` or Query names as labels and is not a retained Query-history API.
 
-Liveness means the process event loop responds. Readiness requires the Catalog and job repository to open, migrations to complete, the instance lock to be held, and the Flight listener to accept work. RTSP, Kafka, model, or user Table failures affect their queries but do not make the daemon unready.
+Liveness means the process event loop responds. Readiness requires the Catalog, including Query storage, to open, migrations to complete, the instance lock to be held, and the Flight listener to accept work. RTSP, Kafka, model, or user Table failures affect their queries but do not make the daemon unready.
 
 ## Testing and Acceptance
 
@@ -226,13 +236,20 @@ Kernel owner tests verify:
 - per-`QueryHandle` cancellation remains independent for concurrent statements;
 - service-mode Python Functions fail before execution begins.
 
+Catalog owner tests verify:
+
+- Query creation validates and pins every definition generation in the same transaction;
+- ordinary executions create no Query object, and Queries never enter definition snapshots or the UC API;
+- status compare-and-swap prevents stale runtime writers from overwriting a stop request;
+- terminal-history pruning never evicts an active Query or its pinned dependencies.
+
 Service tests verify:
 
 - the exact Flight SQL operations required by the selected client integration;
-- bounded and attached-unbounded execution, Session isolation, query IDs, precise cancellation, and structured errors;
+- bounded and attached-unbounded execution, Session isolation, execution IDs, precise cancellation, and structured errors;
 - the single thumbnail representation and removal of process-local or credential-bearing fields;
-- atomic job creation, discovery after disconnect, bounded history, and idempotent stop;
-- restart of active RTSP jobs from the live position with fresh windows and an explicit gap;
+- atomic Query creation, discovery after disconnect, bounded history, and idempotent stop;
+- restart of active RTSP Queries from the live position with fresh windows and an explicit gap;
 - missing generations or preparation incompatibility cause failure without falling back to current Catalog heads;
 - loopback defaults and rejection of non-loopback startup without TLS and a configured credential;
 - aggregate metrics contain no per-query labels.

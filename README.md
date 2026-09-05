@@ -294,7 +294,7 @@ flowchart LR
     ARROW --> HOSTS
 ```
 
-The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. The separate `vql-catalog` crate owns catalog domains, definition snapshots, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface. SQL resolves unqualified names in `vql.default`. See the [High-Level Design](docs/high_level_design.md) and focused component designs below.
+The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. The separate `vql-catalog` crate owns catalog domains, definition snapshots, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface; v0.2 extends it with persistent Query objects for `vqld`. SQL resolves unqualified names in `vql.default`. See the [High-Level Design](docs/high_level_design.md) and focused component designs below.
 
 ## Documentation
 
@@ -304,8 +304,8 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [Product requirements](docs/prd.md) | Product value, public semantics, and version scope |
 | [High-level design](docs/high_level_design.md) | System boundaries, data paths, invariants, and dependency direction |
 | [Kernel design](docs/design/kernel.md) | Planning, streaming, media, inference, resources, and security |
-| [Catalog design](docs/design/catalog.md) | Namespaces, definitions, snapshots, providers, backends, and UC API |
-| [`vqld` service design](docs/design/vqld.md) | Planned v0.2 Flight SQL host, client-independent jobs, and honest restart-from-live behavior |
+| [Catalog design](docs/design/catalog.md) | Namespaces, definition and persistent Query objects, snapshots, providers, backends, and UC API |
+| [`vqld` service design](docs/design/vqld.md) | Planned v0.2 Flight SQL host, Catalog-backed persistent Queries, and honest restart-from-live behavior |
 | [Workbench design](docs/design/workbench.md) | Planned v0.3 browser client for bounded thumbnail and box inspection |
 | [Error code design](docs/design/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI design](docs/design/cli.md) | Shell, script execution, rendering, and signal behavior |

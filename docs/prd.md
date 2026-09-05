@@ -306,9 +306,9 @@ The CLI executable is `vql` (`vql shell`, `vql run`), paired with daemon `vqld`.
 
 **Lifecycle and protocol contracts:**
 
-1. **Validate locally, then submit explicitly.** From v0.1, `vql run job.sql` executes batch and streaming queries in the foreground and always attaches them to the client; an ordinary unbounded statement must be last in the script. In v0.2, `SUBMIT QUERY <name> AS INSERT INTO ...` is the public SQL statement for creating a persistent job. An ordinary unbounded statement never becomes detached implicitly.
-2. **The service owns a minimal persistent lifecycle.** Explicitly submitted jobs survive client disconnects and expose `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY`. The service stores normalized SQL, semantic Session settings, and pinned opaque Catalog generations. `PAUSE`, `RESUME`, serialized window checkpoints, and transparent state migration are not part of v0.2.
-3. **Restart is honest rather than transparent.** After a daemon restart, an active RTSP job is replanned against its pinned Catalog generations and reconnects at the live position with fresh in-memory window state. The unavailable interval and discarded open windows are reported as a restart gap. If the historical snapshot can no longer be prepared by the running engine, the job becomes `FAILED` and must be resubmitted.
+1. **Validate locally, then submit explicitly.** From v0.1, `vql run job.sql` executes batch and streaming queries in the foreground and always attaches them to the client; an ordinary unbounded statement must be last in the script. In v0.2, `SUBMIT QUERY <name> AS INSERT INTO ...` is the public SQL statement for creating a persistent Query object. An ordinary unbounded statement never becomes detached implicitly or enters the Catalog.
+2. **Catalog persistence and service control stay separate.** Explicitly submitted Queries survive client disconnects and expose `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY`. `vql-catalog` stores each immutable Query definition, pinned opaque definition generations, and mutable status in `$VQL_HOME/catalog/vql.db`; `vqld` owns execution and lifecycle transitions. `PAUSE`, `RESUME`, serialized window checkpoints, and transparent state migration are not part of v0.2.
+3. **Restart is honest rather than transparent.** After a daemon restart, an active RTSP Query is replanned against its pinned Catalog generations and reconnects at the live position with fresh in-memory window state. The unavailable interval and discarded open windows are reported as a restart gap. If the historical snapshot can no longer be prepared by the running engine, the Query becomes `FAILED` and must be resubmitted.
 4. **Clients use a narrow standard protocol.** The service implements the Arrow Flight SQL operations required by one selected Flight SQL or ADBC client integration. Broader JDBC, BI metadata, and vendor capability coverage follows demonstrated client demand.
 5. **Remote exposure is explicit.** `vqld` listens on loopback by default. A non-loopback listener requires TLS and one configured service token mapped to a single principal. Multi-user identity and relation-level authorization are later capabilities.
 6. **First launch has no mandatory external service.** Catalog and model runtime are built in. Kafka and object storage are optional integrations.
@@ -329,7 +329,7 @@ The implementation details live in the [High-Level Design](./high_level_design.m
 
 | Area | Requirement |
 |---|---|
-| **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. In v0.2, persistent jobs restart from the current live position with fresh window state and an explicit restart gap; they do not claim transparent state recovery. |
+| **Fault behavior** | RTSP is non-replayable and best-effort; gaps are reported, never invented. Reconnect automatically. In v0.2, persistent Queries restart from the current live position with fresh window state and an explicit restart gap; they do not claim transparent state recovery. |
 | **Error semantics** | A single decode or inference failure produces NULL for that row. Optional strict mode is `on_error = 'fail'`. Model false positives and false negatives are not engine errors; users manage them with explicit thresholds. |
 | **Security and privacy** | Data stays in its domain by default. Pin and hash model sources. `vqld` binds to loopback by default; non-loopback use requires TLS and one configured service token. Multi-user relation authorization and service-side Python execution are outside v0.2. |
 | **Compatibility** | VisionQL v0.1 is the first public release. Before 1.0, minor releases may revise SQL and Catalog contracts; patch releases preserve the documented public contract. The current SQLite schema is initialized directly and has no legacy migration chain. `EXPLAIN` text is not a stable API before 1.0. |
@@ -338,7 +338,7 @@ The implementation details live in the [High-Level Design](./high_level_design.m
 
 General SQL clients do not render `IMAGE`, `BOX2D`, or detection arrays naturally. v0.3 therefore adds a focused Workbench client after v0.2 validates the service protocol with one selected Flight SQL or ADBC integration.
 
-Workbench connects to one `vqld` endpoint, runs and cancels one bounded SQL statement at a time, renders ordinary columns and bounded thumbnails with `BOX2D` overlays, and displays structured VQL errors. It does not add Catalog browsing, live-stream preview, persistent-job operations, saved queries, dashboards, cost views, or original-media access in v0.3.
+Workbench connects to one `vqld` endpoint, runs and cancels one bounded SQL statement at a time, renders ordinary columns and bounded thumbnails with `BOX2D` overlays, and displays structured VQL errors. It does not add Catalog browsing, live-stream preview, persistent-Query operations, saved queries, dashboards, cost views, or original-media access in v0.3.
 
 Workbench remains an independent public-protocol client; `vql-kernel` and `vqld` do not gain Workbench-only APIs. See the [Workbench Design](./design/workbench.md) for the client and media boundaries.
 
@@ -365,9 +365,9 @@ VisionQL is a query and processing engine, not a complete vertical application.
 
 RTSP remains non-replayable and best-effort; outages and drops appear as gaps. Scenario B uses recorded-video batch output as the trusted reference for the streaming result, but both paths are required before v0.1 is complete.
 
-**v0.2 adds the minimal `vqld` service.** It hosts attached queries over a tested Arrow Flight SQL subset and keeps explicitly submitted continuous writes running after their clients disconnect. Persistent jobs store SQL, semantic settings, and pinned opaque Catalog generations. After daemon restart, active RTSP jobs restart from the live position with fresh window state and an explicit gap. v0.2 has no serialized checkpoints, `PAUSE`/`RESUME`, multi-user relation authorization, UC HTTP surface, service-side Python UDF worker, original-media ticket, DataFrame API, or Workbench. The exact host and lifecycle contracts are defined in the [`vqld` Service Design](./design/vqld.md).
+**v0.2 adds the minimal `vqld` service.** It hosts attached executions over a tested Arrow Flight SQL subset and keeps explicitly submitted continuous writes running after their clients disconnect. `vql-catalog` persists each Query definition, status, and pinned opaque definition generations in `$VQL_HOME/catalog/vql.db`; `vqld` owns its runtime controller. After daemon restart, active RTSP Queries restart from the live position with fresh window state and an explicit gap. v0.2 has no separate service database, serialized checkpoints, `PAUSE`/`RESUME`, multi-user relation authorization, UC HTTP surface, service-side Python UDF worker, original-media ticket, DataFrame API, or Workbench. The exact host and lifecycle contracts are defined in the [`vqld` Service Design](./design/vqld.md).
 
-**v0.3 adds Workbench.** The independent browser client uses only the public `vqld` protocol to execute and cancel one bounded statement, render tables with thumbnail and `BOX2D` results, and present structured errors. It does not add a parallel query, Catalog, job-control, or media API.
+**v0.3 adds Workbench.** The independent browser client uses only the public `vqld` protocol to execute and cancel one bounded statement, render tables with thumbnail and `BOX2D` results, and present structured errors. It does not add a parallel query, Catalog, persistent-Query control, or media API.
 
 Everything else remains intentionally undefined. Candidate directions live in the [Roadmap](../ROADMAP.md) and will be scheduled only after earlier releases produce real feedback.
 
@@ -375,8 +375,8 @@ Everything else remains intentionally undefined. Candidate directions live in th
 
 - **Scenario A — first value without external services (v0.1):** run locally in a Python host. Register an image directory, use a Python UDF to reject blurry images, call a local ONNX Model directly to select images containing a target object, and display the result in the Python session. An in-process UDF requires a notebook or REPL; `vql shell` must direct the user to a Python host. The pure-SQL first-run path in Section 3.2 runs in the shell. Both paths must produce a first result within five minutes of `pip install`.
 - **Scenario B — batch/stream parity (v0.1):** start with the per-minute people-count query in Section 3.2, run it over recorded video, then point the same logic at an RTSP table and use `vql run` to publish to a Kafka table. With the same model and sample rate, assert equivalent results. Inspect `UNNEST` output through an ordinary foreground SELECT. Batch is the trusted reference for the streaming comparison.
-- **Scenario C — client-independent service execution (v0.2):** submit the Scenario B RTSP-to-Kafka write through `vqld`, disconnect the client, reconnect and inspect the same job, then stop it explicitly. Restart `vqld` during a second run and verify that the job reconnects at the live position, reports the unavailable interval and reset window state, and never claims replay or exactly-once delivery. Run the scenario through one selected Flight SQL or ADBC client integration.
-- **Scenario D — bounded visual inspection (v0.3):** connect Workbench to `vqld`, run the bounded image query from Scenario A, render each returned thumbnail with its `BOX2D` overlays, cancel one active query by its server query ID, and display one structured VQL error. The SQL and returned values must match the Python/notebook path.
+- **Scenario C — client-independent service execution (v0.2):** submit the Scenario B RTSP-to-Kafka write through `vqld`, disconnect the client, reconnect and inspect the same persistent Query, then stop it explicitly. Restart `vqld` during a second run and verify that the Query reconnects at the live position, reports the unavailable interval and reset window state, and never claims replay or exactly-once delivery. Run the scenario through one selected Flight SQL or ADBC client integration.
+- **Scenario D — bounded visual inspection (v0.3):** connect Workbench to `vqld`, run the bounded image query from Scenario A, render each returned thumbnail with its `BOX2D` overlays, cancel one active execution by its server execution ID, and display one structured VQL error. The SQL and returned values must match the Python/notebook path.
 
 Scenario A proves that first use is simple. Scenario B proves the differentiated end-to-end streaming capability. Scenario C proves the only new product value required from the first service release: execution independent of a client process. Scenario D proves that Workbench improves visual inspection without creating a second execution contract.
 
@@ -385,7 +385,7 @@ Scenario A proves that first use is simple. Scenario B proves the differentiated
 | Release | Theme | Core deliverables |
 |---|---|---|
 | **v0.1 (MVP)** | Single-node batch and streaming | Embedded pip package, SQL, CLI, image/video/RTSP/Kafka provider tables, object detection, Python UDFs, `TUMBLE`, attached continuous execution, Acceptance Scenarios A and B |
-| **v0.2** | Minimal single-node service | `vqld`, a tested Flight SQL subset, explicit `SUBMIT QUERY`, client-independent jobs, honest restart-from-live behavior, one-principal remote security, and Acceptance Scenario C |
+| **v0.2** | Minimal single-node service | `vqld`, a tested Flight SQL subset, explicit Catalog-backed Query objects, client-independent execution, honest restart-from-live behavior, one-principal remote security, and Acceptance Scenario C |
 | **v0.3** | Workbench | Independent browser client, bounded SQL execution and cancellation, thumbnail and `BOX2D` rendering, structured errors, and Acceptance Scenario D |
 
 Persistent window checkpoints, pause/resume, multi-user authorization, broader BI compatibility, original-media tickets, service-side Python UDFs, the DataFrame API, cost optimization, clustering, and edge coordination remain future candidates. The complete delivery and acceptance plan is maintained in the [Roadmap](../ROADMAP.md).
@@ -407,7 +407,7 @@ The first users will be two or three design partners working with the team on on
 | Cost | On workloads where sampling is valid, GPU time falls approximately in proportion to the declared sample-rate reduction versus full-frame inference |
 | Correctness | With the same model and sample rate, window aggregates match a hand-built baseline pipeline |
 | Adoption | Within 90 days of open-source launch, at least 3 real external scenarios run end to end and at least 1 design partner carries production traffic |
-| Service value | A submitted v0.2 job continues after client disconnect, can be rediscovered and stopped, and reports an honest gap after daemon restart |
+| Service value | A submitted v0.2 Query continues after client disconnect, can be rediscovered and stopped, and reports an honest gap after daemon restart |
 | Retention | Weekly successful workflows grow among design partners; repeated workflows matter more than raw processed hours |
 
 ## 8. Open Questions
@@ -432,6 +432,6 @@ The first users will be two or three design partners working with the team on on
 | `TUMBLE(ts, interval)` | Time bucket | Define a tumbling window for batch or streaming `GROUP BY` |
 | `UNNEST(expr) AS x` | Relational | Expand an array of detections into rows |
 | `CARDINALITY(array)` | DataFusion scalar function | Count detections after an object-detection Model applies its named filters |
-| `SUBMIT QUERY name AS INSERT INTO ...` | Operations | Create a persistent Table-write job explicitly in v0.2; ordinary unbounded SQL stays attached |
+| `SUBMIT QUERY name AS INSERT INTO ...` | Operations | Create a persistent Catalog Query for a Table write explicitly in v0.2; ordinary unbounded SQL stays attached |
 | `SHOW QUERIES / DESCRIBE QUERY / STOP QUERY` | Operations | Inspect and stop persistent queries in v0.2 |
 | `EXPLAIN` | Operations | Show the query plan |

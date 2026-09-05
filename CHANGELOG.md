@@ -20,7 +20,7 @@ VisionQL v0.1.0 is the first public release of the embedded batch and streaming 
 ### Scope boundaries
 
 - `VQL_EXTRACT` execution and the STRING overload of `VQL_CLASSIFY` are typed but return `FEATURE_NOT_AVAILABLE` in v0.1.0.
-- A minimal single-node `vqld` Flight SQL host with client-independent persistent jobs is planned for v0.2. Checkpoints, multi-user authorization, and the DataFrame API are not part of that release.
+- A minimal single-node `vqld` Flight SQL host with Catalog-backed, client-independent persistent Queries is planned for v0.2. Checkpoints, multi-user authorization, and the DataFrame API are not part of that release.
 - A focused Workbench client for bounded visual SQL results is planned for v0.3.
 - RTSP execution is attached, best-effort, and non-replayable; v0.1.0 does not promise exactly-once delivery or restart recovery.
 

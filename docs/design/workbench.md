@@ -8,7 +8,7 @@ Generic SQL clients can execute VisionQL SQL but do not naturally render `IMAGE`
 
 > A data or ML engineer writes one bounded visual query and inspects image thumbnails with detection boxes in a browser.
 
-Catalog administration, continuous-job operations, dashboards, cost reporting, team sharing, and a general BI experience are separate capabilities and are not part of v0.3.
+Catalog administration, persistent-Query operations, dashboards, cost reporting, team sharing, and a general BI experience are separate capabilities and are not part of v0.3.
 
 ## v0.3 Scope
 
@@ -26,7 +26,7 @@ The release excludes:
 - multi-statement scripts, tabs, saved queries, and collaboration;
 - live-stream preview;
 - Catalog browsing or mutation;
-- persistent-job submission or operation;
+- persistent-Query submission or operation;
 - original-media lookup or locator handling;
 - metrics, cost views, dashboards, and Prometheus access;
 - a Workbench-owned identity or permission model;
@@ -38,7 +38,7 @@ Each excluded capability requires its own observed user task before it is added.
 
 Workbench is an independent client. It uses public Arrow Flight SQL, SQL, and structured errors. It never reads SQLite files, imports engine crates, or requires a Workbench-only `vqld` RPC.
 
-A small browser-facing adapter may be used if direct browser Flight SQL support is insufficient. That adapter owns only transport conversion, a short-lived browser Session, cancellation propagation, and bounded in-memory thumbnails. It stores no Catalog objects, query definitions, jobs, permissions, or business data.
+A small browser-facing adapter may be used if direct browser Flight SQL support is insufficient. That adapter owns only transport conversion, a short-lived browser Session, cancellation propagation, and bounded in-memory thumbnails. It stores no Catalog objects, Query definitions, permissions, or business data.
 
 The adapter must not:
 
@@ -56,7 +56,7 @@ Thumbnail dimensions and byte bounds are service configuration, not Workbench pr
 
 ## Query and Error Contract
 
-v0.3 executes only bounded statements. It uses prepared schema metadata from `vqld` to reject an unbounded result before opening a browser stream. Cancellation targets the server query ID returned by the public Flight boundary.
+v0.3 executes only bounded statements. It uses prepared schema metadata from `vqld` to reject an unbounded result before opening a browser stream. Cancellation targets the server execution ID returned by the public Flight boundary.
 
 Errors use the versioned VQL representation and standard gRPC status. The UI may add local editor context, but it does not parse messages to infer codes or retryability.
 
@@ -75,8 +75,8 @@ The v0.3 acceptance path demonstrates all of the following with a real visual qu
 Later evidence may justify one capability at a time:
 
 - attached live-result preview;
-- persistent-job inspection using `SHOW QUERIES` and `DESCRIBE QUERY`;
-- job submission and stop controls through public SQL;
+- persistent-Query inspection using `SHOW QUERIES` and `DESCRIBE QUERY`;
+- Query submission and stop controls through public SQL;
 - Catalog browsing through the supported Flight SQL metadata profile;
 - original-media access after a separate authorization and transport design;
 - per-query operational views from service query-status data rather than Prometheus.

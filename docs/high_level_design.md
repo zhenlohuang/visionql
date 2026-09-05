@@ -14,7 +14,7 @@ The architecture has five goals:
 4. Filtering, asynchronous inference, and row-level failure cannot lose event-time progress, window state, or source progress.
 5. The kernel remains independent of its host process and can be embedded by both CLI and Python.
 
-The embedded v0.1 design excludes persistent service jobs, restart recovery, cross-query decode sharing, model-result caching, multi-user security, and a network service. It also does not fork DataFusion, build a general SQL engine or video storage format, or force bounded and continuous statements to share physical operators. Syntax assigned to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, identify the target release or state that it is unscheduled, and create no Catalog object.
+The embedded v0.1 design excludes persistent Query objects, restart recovery, cross-query decode sharing, model-result caching, multi-user security, and a network service. It also does not fork DataFusion, build a general SQL engine or video storage format, or force bounded and continuous statements to share physical operators. Syntax assigned to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, identify the target release or state that it is unscheduled, and create no Catalog object.
 
 ## Naming Convention
 
@@ -67,7 +67,7 @@ flowchart TB
 
 The CLI and Python binding are hosts. They load configuration, build an `Engine`, create a `Session`, present results, and own process-specific lifecycle. They do not implement SQL semantics.
 
-`vql-kernel` owns planning and execution. `vql-catalog` owns persisted definitions and immutable definition snapshots. The kernel depends on the Catalog; the Catalog does not depend on execution, media, model, CLI, or Python code.
+`vql-kernel` owns planning and execution. `vql-catalog` owns persisted definitions and immutable definition snapshots and, in v0.2, persistent Query objects and mutable Query status. The kernel depends on the Catalog; the Catalog does not depend on execution, media, model, CLI, or Python code.
 
 ## Core Invariants
 
@@ -87,7 +87,7 @@ A Model is a callable Catalog object whose immutable interface comes from a capa
 
 ### Immutable definitions during execution
 
-Planning captures one Catalog definition snapshot. Changing a Table, Model default/version aggregate, or Function affects newly planned statements but does not change a running statement. Model versions are immutable once resolved; publishing is the explicit default-version pointer. For a persistent v0.2 job, `vqld` stores normalized SQL, semantic settings, and the snapshot's opaque Catalog generations; the Catalog remains the definition source of truth.
+Planning captures one Catalog definition snapshot. Changing a Table, Model default/version aggregate, or Function affects newly planned statements but does not change a running statement. Model versions are immutable once resolved; publishing is the explicit default-version pointer. For a persistent v0.2 Query, the Catalog stores normalized SQL, semantic settings, and the snapshot's opaque definition generations; `vqld` owns its controller and reconstructs execution from those generations after restart.
 
 ### Bounded resources and honest delivery
 
@@ -120,8 +120,8 @@ Optimization follows the same order across providers: prune columns and time ran
 | Epoch coordinator | Ordered epochs, watermarks, window state, cancellation, sink acknowledgement | SQL expression semantics |
 | Media runtime | Probe, read, decode, sample, frame buffers, encode | Model pre- or post-processing |
 | Model runtime | Artifact resolution, compiled pipelines, bounded scheduling, inference | SQL or Catalog authorization semantics |
-| Catalog | Definitions, namespaces, provider capabilities, transactions, snapshots, UC wire translation | Media bytes, model weights, credentials, persistent jobs |
-| `vql-server` / `vqld` (v0.2) | Flight hosting, one-principal service security, logical Sessions, query registry, persistent job records, restart orchestration, health, and aggregate metrics | SQL semantics, copied Catalog definitions, window checkpoints, embedded runtime behavior |
+| Catalog | Definition and persistent Query objects, namespaces, provider capabilities, transactions, snapshots, Query status CAS, persistence, and UC wire translation | Query execution or lifecycle transition policy, media bytes, model weights, credentials |
+| `vql-server` / `vqld` (v0.2) | Flight hosting, one-principal service security, logical Sessions, execution registry, persistent Query controller, restart orchestration, health, and aggregate metrics | SQL semantics, direct backend access, copied Catalog definitions, window checkpoints, embedded runtime behavior |
 | Testing | Real-fixture scenarios and external-service system tests | Owner-module invariants that can be proved locally |
 
 ## Batch and Streaming Paths
@@ -138,7 +138,7 @@ Optimization follows the same order across providers: prune columns and time ran
 
 ```text
 visionql/
-├── vql-catalog/                  # catalog domain, backends, snapshots, UC API
+├── vql-catalog/                  # catalog domain, Query persistence, snapshots, backends, UC API
 ├── vql-kernel/                   # planning, execution, media, models, connectors
 ├── vql-cli/                      # shell and script host
 ├── vql-python/                   # PyO3 and Python UDF host
@@ -155,7 +155,7 @@ vql-testing ─┘
 Boundary rules:
 
 - `vql-kernel` cannot depend on PyO3, clap, or Flight and listens on no port.
-- `vql-catalog` cannot depend on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
+- `vql-catalog` cannot depend on DataFusion, media/model runtimes, Kafka, PyO3, Flight, or CLI behavior.
 - CLI and Python depend only on public kernel host interfaces; DataFusion types do not leak into their public APIs.
 - Breaking DataFusion or Arrow changes remain behind the kernel boundary and require focused planning, epoch, schema, and wire-format regression tests.
 - `vql-server` is a planned v0.2 crate defined by the [`vqld` Service Design](./design/vqld.md), not a current workspace member. Workbench is a planned v0.3 independent client defined by the [Workbench Design](./design/workbench.md) and uses only public service protocols.
@@ -173,6 +173,7 @@ Boundary rules:
 | One callable namespace for Models and Functions | Makes collisions deterministic at DDL commit while preserving kind-specific lifecycle. |
 | One immutable definition snapshot per planned statement | Prevents concurrent DDL from changing a running result. |
 | SQLite behind `CatalogBackend` | Preserves zero-service startup without coupling the domain to one backend. |
+| Catalog-backed persistent Query objects | Gives submitted queries one durable identity and atomic definition-generation dependencies while leaving execution and lifecycle policy in `vqld`. |
 | In-memory allowlisted `TUMBLE` state | Gives attached execution bounded state without defining a recovery ABI. |
 | Delivery follows source replayability | Avoids guarantees that live RTSP input cannot satisfy. |
 
@@ -181,8 +182,8 @@ Boundary rules:
 | Document | Contract |
 |---|---|
 | [Kernel](./design/kernel.md) | Planning, streaming, types, providers, inference, resources, and security |
-| [Catalog](./design/catalog.md) | Namespaces, definitions, provider capabilities, snapshots, backend, and UC API |
-| [`vqld` service](./design/vqld.md) | Flight SQL, Sessions, persistent jobs, one-principal security, and honest restart-from-live behavior |
+| [Catalog](./design/catalog.md) | Namespaces, definition and persistent Query objects, provider capabilities, snapshots, backend, and UC API |
+| [`vqld` service](./design/vqld.md) | Flight SQL, Sessions, Catalog-backed persistent Queries, one-principal security, and honest restart-from-live behavior |
 | [Workbench](./design/workbench.md) | v0.3 browser client, bounded visual results, public-protocol boundary, and deferred capabilities |
 | [Error codes](./design/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI](./design/cli.md) | `shell` and `run`, terminal behavior, rendering, and signals |

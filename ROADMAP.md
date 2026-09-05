@@ -24,8 +24,8 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 
 - [ ] Run bounded and attached continuous SQL through a tested Arrow Flight SQL subset in `vqld`.
 - [ ] Submit, inspect, and stop persistent continuous Table writes explicitly.
-- [ ] Keep submitted jobs running after client disconnect and rediscover them from another Session.
-- [ ] Restart active RTSP jobs from the live position with fresh window state and an explicit restart gap.
+- [ ] Persist submitted Queries in the Catalog and keep them running after client disconnect.
+- [ ] Rediscover Catalog-backed Queries from another Session and restart active RTSP Queries from the live position with fresh window state and an explicit restart gap.
 - [ ] Bind to loopback by default; require TLS and one configured service credential for non-loopback access.
 - [ ] Return one bounded `IMAGE` thumbnail representation and expose per-query state through SQL.
 - [ ] Validate the complete service path with one selected Flight SQL or ADBC client integration.
