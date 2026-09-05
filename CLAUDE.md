@@ -18,6 +18,8 @@ cargo run -q -p vql-cli -- shell
 cargo run -p vql-cli -- run examples/sql/video_people_count.sql
 ```
 
+A fresh checkout does not build without native dependencies: FFmpeg 8 development headers, `clang`/`libclang`, and a C toolchain plus `perl`/`pkg-config` for the vendored `librdkafka` build (see the CI install step in `.github/workflows/ci.yml`). The FFmpeg headers are required by `vql-kernel`'s default `ffmpeg-native` feature, and both hosts depend on `vql-kernel` with default features, so a workspace build always needs them. `ort` downloads ONNX Runtime binaries on first build. `python scripts/fetch_datasets.py` fetches the COCO sample the README quick start queries.
+
 Tests:
 
 ```bash
@@ -56,7 +58,7 @@ Five crates: `vql-catalog` (catalog domains, snapshots, backend ports, SQLite, A
 
 ### Three invariants worth preserving
 
-**Model calls are plan nodes, not row UDFs.** Every persisted Model interface registers a typed volatile marker under the Model's own callable name. `planner/inference.rs` binds the version and semantic constants from the `DefinitionSnapshot`, then lifts the call into an `InferenceNode`. Identical invocations deduplicate only when the selected version, interface, and every input are deterministic. `InferenceExec` uses the `PreProcessor → RuntimeSession → PostProcessor` pipeline: VisionQL batches local ONNX Runtime work, while Triton owns dynamic batching for KServe V2 requests. Tests assert on `InferenceNode` / `InferenceExec` in the plan text — that is the contract.
+**Model calls are plan nodes, not row UDFs.** Every persisted Model interface registers a typed volatile marker under the Model's own callable name; the built-in task functions (`VQL_CLASSIFY`, `VQL_DETECT`, `VQL_EXTRACT` in `functions/ai.rs`) use the same mechanism through `__vql_*` markers. `planner/inference.rs` binds the version and semantic constants from the `DefinitionSnapshot`, then lifts the call into an `InferenceNode`. Identical invocations deduplicate only when the selected version, interface, and every input are deterministic. `InferenceExec` uses the `PreProcessor → RuntimeSession → PostProcessor` pipeline: VisionQL batches local ONNX Runtime work, while Triton owns dynamic batching for KServe V2 requests. Tests assert on `InferenceNode` / `InferenceExec` in the plan text — that is the contract.
 
 **`IMAGE` carries references, not pixels.** `IMAGE` is an Arrow `Struct` (schema in `vql-catalog/src/objects.rs`, kernel helpers in `types/image.rs`) with `ARROW:extension:name = vql.image` metadata and ten nullable fields; the three payload shapes are *referenced* (`uri` + `locator`), *buffered* (`buffer_id`/`buffer_slot`, in-process only), and *encoded* (`encoded` + `encoding`, used at process boundaries such as Python, JSON, and Kafka). Scans never decode. Decoding is triggered only by an explicit consumer such as inference preprocessing or a Python UDF, and `MediaRuntime` counters exist so tests can assert that a metadata-only query decoded zero frames. Preserving that property is a load-bearing part of nearly every media change.
 
@@ -68,7 +70,7 @@ Both paths share one planner and one type system; only execution differs. `Query
 
 A bounded query executes as an ordinary DataFusion stream. An unbounded query (exactly one `USING RTSP` table) is driven by the epoch coordinator in `session.rs` (`stream_rtsp`), not by DataFusion alone:
 
-- `connectors/rtsp.rs` decodes on dedicated worker threads and closes a `StreamEpoch` at 200 ms of event time or 64 sampled rows. Data, `SourceProgress`, watermark, and the frame-buffer lease travel as separate fields, so a `Filter` that drops every row still cannot stall progress or frame reclamation.
+- `connectors/rtsp.rs` decodes on dedicated worker threads and closes a `StreamEpoch` at 200 ms of event time or 64 sampled rows (`EPOCH_DURATION_MS` / `MAX_EPOCH_ROWS`). Data, `SourceProgress`, watermark, and the frame-buffer lease travel as separate fields, so a `Filter` that drops every row still cannot stall progress or frame reclamation.
 - The coordinator keeps the *logical* template and, per epoch, rebinds the stream scan to a single-partition `MemTable` (`bind_stream_epoch`) and lets DataFusion build a fresh physical tree. There is no compiled-plan reuse API.
 - `TUMBLE` state (`stream/tumble.rs`) lives outside DataFusion as process-local state keyed by `(window_start, group_key)`; accumulators are temporary per epoch. Watermark advances only after an epoch's data completes; windows emit at `window_end <= watermark`; state may not contain `buffer_id`/`buffer_slot`, `IMAGE`, or `VIDEO`. State is not checkpointed and does not survive the process.
 - Ordering is strict: apply data → advance watermark → write and await sink acknowledgement → release the frame lease. `Session::cancel()` aborts; `request_graceful_stop()` drains — keep both wired when touching this loop.
@@ -92,6 +94,8 @@ Each Session owns one memory budget; cloned handles share it, separately built S
 
 Optional host capabilities are injected, never discovered: `EngineConfig::with_secret_provider` for credentials and `SessionBuilder::with_python_udf_host` for Python UDFs. Kernel code must degrade with a clear error when a capability is absent.
 
+The CLI surface is deliberately only `shell` and `run` (`vql-cli/src/main.rs`): keep `EXPLAIN` as SQL, keep engine settings in `config.toml` rather than CLI flags, and keep standalone `\q` behavior aligned between the Reedline and non-TTY stdin loops in `commands/shell.rs`.
+
 ### Error contract
 
 `ErrorCode` (`error.rs`) is a stable, machine-readable enum rendered as `[VQL-CCDDD] SYMBOL: message`; `as_str()` returns the identifier and `symbol()` returns the readable name. Row-level failures (bad image, failed inference) produce NULL result columns; `SET vql.on_error='fail'` flips them to hard errors. Unimplemented-but-parseable syntax must return `FEATURE_NOT_AVAILABLE` with a target version and must not register a catalog object. Unit tests assert on codes directly (`ddl_parser.rs`, `registry.rs`, `session.rs`), so changing a code is a contract change. The registry and extension rules live in `docs/design/error_codes.md`.
@@ -102,7 +106,9 @@ Tests are split by the narrowest boundary that can prove a contract.
 
 Rust unit tests live beside their modules and cover everything a synthetic fixture can reach: parser and DDL validation, error codes, catalog lifecycle, plan shape, scheduler batching, streaming allowlist rejections. `session.rs` holds the broadest ones, using `mock://` models and generated PNGs so they need no downloads. Note that `mock://` never decodes its input, so it cannot exercise decode failures — use a Triton endpoint model for those, as decoding happens before any request.
 
-Kernel SQL contracts use `sqllogictest-rs` through `vql-kernel/tests/slt.rs`. Cases are grouped by owner under `tests/slt/{ddl,connectors,functions,models}`, and every case gets a fresh Engine, catalog, and temporary `VQL_HOME`. Exact field names and nullability stay in `result_schema.rs`; branch behavior such as invalid TUMBLE widths and connector projection stays beside its implementation. There is no synthetic `scenarios` layer.
+The `slt` target and every `vql-testing` target set `harness = false` and run on `libtest-mimic`, so each case is a generated `Trial` rather than a `#[test]`: select cases with `VQL_TEST_CASE` or a positional filter, not with a `module::test_name` path.
+
+Kernel SQL contracts use `sqllogictest-rs` through `vql-kernel/tests/slt.rs`. Cases are grouped by owner under `tests/slt/{ddl,connectors,functions,models}`, and every case gets a fresh Engine, catalog, and temporary `VQL_HOME`. Exact field names and nullability stay in `tests/result_schema.rs`; branch behavior such as invalid TUMBLE widths and connector projection stays beside its implementation. There is no synthetic `scenarios` layer.
 
 Each `vql-testing` target pairs a top-level entry point with same-named private SQL resources. `image`, `video`, `model`, `rtsp`, and `kafka` cover real media/model execution and external-service journeys; shared isolated-session helpers live under `tests/support/`. Task-shaped scenarios call `VQL_CLASSIFY` or `VQL_DETECT`, while the `model` target preserves the real Catalog Model resolve/direct-call contract. Every target requires the `system-tests` feature and runs serially where needed. Fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`. `VQL_INTEGRATION_TEST=1` turns a missing requirement into a failure. The root `docker-compose.yaml` provides optional external services through profiles (`rtsp`, `kafka`), and `scripts/run-integration-tests.sh` starts isolated dependencies and runs the strict suite. See `docs/design/testing.md`.
 
@@ -110,4 +116,6 @@ Each `vql-testing` target pairs a top-level entry point with same-named private 
 
 ## Docs
 
-`docs/high_level_design.md` is the authoritative system boundary. Detailed v0.1 contracts live in `docs/{kernel,catalog,cli,python_binding,testing}.md`; `ROADMAP.md` remains the source of truth for version scope, and `docs/proposals/` holds later-feature designs. When a public contract changes, update the README, PRD, Roadmap, HLD, and owning component design together.
+`docs/high_level_design.md` is the authoritative system boundary and `docs/prd.md` the product scope. Component contracts live in `docs/design/{kernel,catalog,cli,python_binding,testing,error_codes}.md`, with `vqld.md` and `workbench.md` covering the planned v0.2/v0.3 hosts. `ROADMAP.md` remains the source of truth for version scope, and `docs/proposals/` holds later-feature designs.
+
+Write the HLD and the `docs/design/` documents as final-state specifications: fold an agreed outcome into the normative text directly, without change logs, before/after narratives, rejected alternatives, or "after discussion"-style meta phrasing. Decision history belongs in a dated proposal. When a public contract changes, update the README, PRD, Roadmap, HLD, and the owning component design together.

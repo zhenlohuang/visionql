@@ -2,34 +2,29 @@
 
 ## Project Structure & Module Organization
 
-VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog domains, snapshots, backend ports, SQLite persistence, and the Unity Catalog-compatible API. Keep catalog relations in the Table namespace and distinguish read/write behavior through provider capabilities. `vql-kernel/` owns SQL planning, media decoding, model execution, and owner tests. `vql-cli/` provides the `vql` shell and script runner. `vql-python/` contains the PyO3/Maturin extension, Python package, and API tests. `vql-testing/` contains only real-artifact and external-service integration tests; it has no library target or unit tests. Keep executable examples under `examples/`, helper scripts under `scripts/`, local fixture documentation under `data/`, and product or architecture decisions under `docs/`. Treat `ROADMAP.md` as the source of truth for version scope.
+VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog objects and persistence; `vql-kernel/` contains SQL planning, media connectors, models, and execution; `vql-cli/` provides the `vql` shell and script runner; `vql-python/` contains the PyO3/Maturin package; and `vql-testing/` holds real-artifact and external-service tests. Keep examples in `examples/`, helper utilities in `scripts/`, fixture documentation in `data/`, and architecture or product decisions in `docs/`. `ROADMAP.md` defines release scope.
 
 ## Build, Test, and Development Commands
 
-- `cargo build --workspace --locked` builds all crates using `Cargo.lock`.
+- `cargo build --workspace --locked` builds every crate with the pinned lockfile.
 - `cargo run -p vql-cli -- shell` starts the development SQL shell.
-- `cargo run -p vql-cli -- run examples/sql/video_people_count.sql` runs a SQL script.
-- `cargo fmt --all -- --check` verifies Rust formatting.
-- `cargo clippy --workspace --all-targets --locked -- -D warnings` enforces lint-free code.
-- `cargo test --workspace --locked` runs the default Rust suite.
-- `cargo test -p vql-kernel --test slt --locked` runs kernel-owned Sqllogictest cases.
-- `scripts/run-integration-tests.sh` provisions profiled Compose dependencies and runs strict integration tests.
-- From `vql-python/`, `maturin develop --locked`; then run `python -m pytest -q vql-python/tests` from the repository root.
+- `cargo fmt --all -- --check` verifies formatting.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` runs the required Rust lints.
+- `cargo test --workspace --locked` runs the deterministic default Rust suite.
+- `cargo test -p vql-kernel --test slt --locked` runs SQL logic tests.
+- From `vql-python/`, run `maturin develop --locked`; from the root, run `python -m pytest -q vql-python/tests`.
+- `scripts/run-integration-tests.sh` provisions Compose services and runs strict system tests.
 
-Set `VQL_HOME="$PWD/data/.vql"` for reproducible local state. Default runtime settings come from the optional, strict schema-v1 file at `$VQL_HOME/config.toml`; relative paths resolve from `VQL_HOME`. Install hooks with `pre-commit install`; pre-commit checks formatting and Clippy, while pre-push runs workspace tests.
+Set `VQL_HOME="$PWD/data/.vql"` for reproducible local state. Install Git hooks with `pre-commit install`.
 
 ## Coding Style & Naming Conventions
 
-Use rustfmt defaults (four-space indentation). Follow Rust conventions: `snake_case` for modules, functions, and test names; `PascalCase` for types and traits; `SCREAMING_SNAKE_CASE` for constants. Keep public errors, configuration fields, environment variables, paths, and SQL syntax stable unless the change intentionally revises the contract. The CLI surface is only `shell` and `run`: keep `EXPLAIN` as SQL, keep engine settings out of CLI flags, and keep standalone `\q` behavior aligned between the Reedline and stdin shell loops. Do not commit `target/`, `.venv/`, downloaded datasets, model artifacts, local catalogs, or generated native extensions.
-
-## Documentation Guidelines
-
-Write `docs/high_level_design.md` and the component design documents under `docs/design/` as final-state specifications. Incorporate an agreed outcome by editing the normative design directly; do not add discussion transcripts, review conclusions, change logs, before/after narratives, rejected alternatives, or meta phrases such as "after discussion," "we decided," or "this was changed from." Keep only rationale required to understand a constraint. If decision history is explicitly required, record it in a separate dated Proposal or ADR rather than in the active design.
+Use rustfmt defaults and four-space indentation. Follow Rust naming conventions: `snake_case` for modules, functions, and tests; `PascalCase` for types and traits; and `SCREAMING_SNAKE_CASE` for constants. Keep Python code four-space indented and consistent with nearby typed APIs and pytest tests. Treat SQL syntax, error codes, configuration keys, paths, and environment variables as public contracts. Do not commit `target/`, virtual environments, downloaded datasets, models, local catalogs, or generated native extensions.
 
 ## Testing Guidelines
 
-Place Rust unit tests beside their modules and crate-owned integration tests under each crate's `tests/`. Anything provable with a synthetic fixture or a `mock://` model belongs in the owner crate; CLI and configuration contract changes need focused host tests. Deterministic public SQL behavior lives as one-purpose `.slt` files under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`; every file is an individual Cargo test with an isolated Engine, catalog, and generated fixtures. Run them with `cargo test -p vql-kernel --test slt --locked` and filter with `VQL_TEST_CASE=models/object_detection`. In `vql-testing`, the feature-gated `image`, `video`, `model`, `rtsp`, and `kafka` targets pair a top-level entry point with a same-named SQL resource directory and share only isolated-session helpers under `tests/support/`. Every target requires `--features system-tests`; `VQL_INTEGRATION_TEST=1` makes missing requirements fail. External services come from the root `docker-compose.yaml` profiles; use `scripts/run-integration-tests.sh` for the strict suite. See `docs/design/testing.md` before adding a case. There is no numeric coverage threshold; every behavior change or regression fix should add a focused test.
+Place Rust unit tests beside their modules and crate-level contract tests under `<crate>/tests/`. Put deterministic SQL cases in focused `.slt` files under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`; filter them with `VQL_TEST_CASE=models/object_detection`. Real media, ONNX, RTSP, and Kafka scenarios belong in `vql-testing/` and require `--features system-tests`. There is no numeric coverage threshold, but behavior changes and bug fixes should include focused regression tests. See `docs/design/testing.md` before adding system cases.
 
 ## Commit & Pull Request Guidelines
 
-Use concise Conventional Commit subjects, as in `feat: add ...`, `fix: preserve ...`, or `docs: update ...`. Keep pull requests focused, explain user-visible intent, link relevant issues, and list checks run or skipped. Update README, PRD, Roadmap, HLD, and the owning component design together when public contracts or version boundaries change. Run `git diff --check` before submission. Report security issues through `SECURITY.md`, never a public issue.
+Use concise Conventional Commit subjects, matching history: `feat: add ...`, `fix: preserve ...`, or `docs: update ...`. Keep pull requests focused. Complete the template with the change, rationale, exact checks run or skipped, linked issues, and public-contract impact. Update the README and relevant design documents when behavior or version scope changes. Run `git diff --check` before submission. Report vulnerabilities through `SECURITY.md`, never a public issue.
