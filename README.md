@@ -305,6 +305,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [High-level design](docs/high_level_design.md) | System boundaries, data paths, invariants, and dependency direction |
 | [Kernel design](docs/kernel.md) | Planning, streaming, media, inference, resources, and security |
 | [Catalog design](docs/catalog.md) | Namespaces, definitions, snapshots, providers, backends, and UC API |
+| [`vqld` service design](docs/vqld.md) | Planned v0.2 Flight SQL, security, durable jobs, checkpoints, and recovery |
 | [Error code design](docs/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI design](docs/cli.md) | Shell, script execution, rendering, and signal behavior |
 | [Python binding design](docs/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |

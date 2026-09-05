@@ -65,7 +65,7 @@ Planning opens one Catalog transaction and constructs a `DefinitionSnapshot` con
 
 The planned `DataFrame` and those copied specifications are the execution source of truth. Replacing or dropping a Catalog definition affects newly planned queries but does not replan a running query. Internal table generations remain available for media locators, but there is no public revision lifecycle, durable query identity, Manifest store, lease manager, or Manifest garbage collector.
 
-The durable, serializable Query Manifest required by submitted jobs and restart recovery belongs to the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md). It is not a prerequisite for foreground embedded execution.
+The durable, serializable Query Manifest required by submitted jobs and restart recovery belongs to the [`vqld` Service Design](./vqld.md). It is not a prerequisite for foreground embedded execution.
 
 ### Allowlist for Unbounded Plans
 
@@ -189,7 +189,7 @@ value = aggregate_states
 
 Window state is charged to the Session memory pool through its own `MemoryConsumer` and additionally capped at 64 MiB, or at the Session limit when that is smaller. Exceeding the cap fails the query rather than spilling.
 
-State lives only for the attached process lifetime and is not serialized or restored after restart. A versioned checkpoint/recovery ABI is defined by the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md), where durable jobs first require it.
+State lives only for the attached process lifetime and is not serialized or restored after restart. A versioned checkpoint/recovery ABI is defined by the [`vqld` Service Design](./vqld.md), where durable jobs first require it.
 
 The streaming aggregate allowlist is:
 
@@ -206,7 +206,7 @@ VQL logical types use standard Arrow storage and field metadata.
 
 | VQL type | Arrow storage type | Contract |
 |---|---|---|
-| `IMAGE` | `Struct`, defined in [Three `IMAGE` Payload Forms](#three-image-payload-forms) | `ARROW:extension:name=visionql.image` |
+| `IMAGE` | `Struct`, defined in [Three `IMAGE` Payload Forms](#three-image-payload-forms) | `ARROW:extension:name=vql.image` |
 | `VIDEO` | `Struct<uri, locator, duration_ns, fps, width, height, codec>` | `uri` is display-only; `locator` is used for reauthorized reads; a full video is never inlined |
 | `BOX2D` | `Struct<x: Float32, y: Float32, w: Float32, h: Float32>` | Top-left origin and normalized `[0,1]` coordinates |
 | `POINT2D` | `Struct<x: Float32, y: Float32>` | Internal logical type for spatial functions |
@@ -217,7 +217,7 @@ VQL logical types use standard Arrow storage and field metadata.
 | Task detection result | `List<Struct<label: Utf8, score: Float32, locator: LOCATOR?>>` | Sorted by descending score; `UNNEST` produces instances |
 | `AUDIO` / `MASK` | Reserved logical types | Registration and execution return an unsupported-feature error |
 
-Every `IMAGE` field carries `ARROW:extension:name=visionql.image` and `ARROW:extension:metadata={"version":1}`. An unaware client still sees a standard Arrow Struct.
+Every `IMAGE` field carries `ARROW:extension:name=vql.image` and `ARROW:extension:metadata={"version":1}`. An unaware client still sees a standard Arrow Struct.
 
 ### Three `IMAGE` Payload Forms
 

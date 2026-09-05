@@ -12,7 +12,7 @@
 - the `CatalogBackend` storage port and SQLite implementation;
 - Unity Catalog wire models and HTTP translation.
 
-It does not own media bytes, model artifacts, resolved credentials, connector sessions, query execution, or durable jobs. It has no dependency on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
+It does not own media bytes, model artifacts, resolved credentials, connector sessions, query execution, or durable jobs. The service-owned job repository and Catalog-mutation coordination are defined by the [`vqld` Service Design](./vqld.md). `vql-catalog` has no dependency on DataFusion, media/model runtimes, Kafka, PyO3, or CLI behavior.
 
 ## Namespace and Objects
 
@@ -56,9 +56,9 @@ Provider metadata determines whether a Table is readable, writable, bounded, and
 | `KAFKA` | no | yes | no | no |
 | `EXTERNAL` | no | no | yes | yes |
 
-`EXTERNAL` exists only for Tables registered through the Unity Catalog API with no `visionql.provider` property. It holds an optional data-source format and storage location, and it declares no readable or writable capability, so it carries metadata without describing a data path.
+`EXTERNAL` exists only for Tables registered through the Unity Catalog API with no `vql.provider` property. It holds an optional data-source format and storage location, and it declares no readable or writable capability, so it carries metadata without describing a data path.
 
-RTSP and Kafka appear in the Unity Catalog API as `EXTERNAL` Tables with `visionql.provider` and `visionql.{readable,writable,bounded,durable}` properties. They are not Unity Catalog `STREAMING_TABLE` objects because VisionQL does not implement that managed lifecycle.
+RTSP and Kafka appear in the Unity Catalog API as `EXTERNAL` Tables with `vql.provider` and `vql.{readable,writable,bounded,durable}` properties. They are not Unity Catalog `STREAMING_TABLE` objects because VisionQL does not implement that managed lifecycle.
 
 The SQL surface follows the [Spark data-source table shape](https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-create-table-datasource.html):
 
@@ -103,7 +103,7 @@ Directory providers take their root from `LOCATION` and only tuning options from
 | `IMAGES`, `VIDEOS` | `LOCATION` | Required absolute path to an existing, readable local directory, canonicalized at DDL time |
 | `IMAGES`, `VIDEOS` | `recursive` | Optional boolean; defaults to false |
 | `VIDEOS` | `fps` | Optional sampling target; defaults to 1, must be greater than 0 and at most 120 |
-| `VIDEOS` | `start_time` | Optional RFC 3339 timestamp anchoring frame time to real event time; without it the frame timestamp is synthesized from the Unix epoch and the field carries `visionql.synthetic_event_time` |
+| `VIDEOS` | `start_time` | Optional RFC 3339 timestamp anchoring frame time to real event time; without it the frame timestamp is synthesized from the Unix epoch and the field carries `vql.synthetic_event_time` |
 | `RTSP` | `url` | Required absolute `rtsp://` URL with a host. Embedded credentials, query strings, and fragments are rejected so they cannot reach storage |
 | `RTSP` | `fps` | Optional sampling target; defaults to 5, must be greater than 0 and at most 120 |
 | `RTSP` | `event_time` | Optional `'capture_time'` (default) or `'ingest_time'` |

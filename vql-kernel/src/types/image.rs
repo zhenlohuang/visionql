@@ -14,7 +14,7 @@ pub fn is_image_field(field: &Field) -> bool {
     field
         .metadata()
         .get("ARROW:extension:name")
-        .is_some_and(|name| name == "visionql.image")
+        .is_some_and(|name| name == "vql.image")
         && is_image_storage(field.data_type())
 }
 
@@ -278,6 +278,10 @@ mod tests {
         let field = image_field("image", false);
         assert!(is_image_field(&field));
         assert!(is_image_storage(field.data_type()));
+        assert_eq!(
+            field.metadata().get("ARROW:extension:name").unwrap(),
+            "vql.image"
+        );
         assert_eq!(
             field.metadata().get("ARROW:extension:metadata").unwrap(),
             r#"{"version":1}"#

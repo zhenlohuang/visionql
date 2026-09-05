@@ -61,7 +61,7 @@ impl ClientContext for KafkaClientContext {
             .ok_or_else(|| std::io::Error::other("Kafka OAUTHBEARER token was not configured"))?;
         Ok(OAuthToken {
             token: oauth.token.to_string(),
-            principal_name: "visionql".to_owned(),
+            principal_name: "vql".to_owned(),
             // librdkafka converts milliseconds to microseconds internally.
             // Keep a static host-provided token effectively non-expiring
             // without overflowing that conversion.
@@ -255,7 +255,7 @@ fn producer_config(
     let mut config = ClientConfig::new();
     config
         .set("bootstrap.servers", &sink.bootstrap_servers)
-        .set("client.id", format!("visionql-{name}"))
+        .set("client.id", format!("vql-{name}"))
         .set("acks", "all")
         .set("socket.connection.setup.timeout.ms", connection_timeout)
         .set("request.timeout.ms", &delivery_timeout)

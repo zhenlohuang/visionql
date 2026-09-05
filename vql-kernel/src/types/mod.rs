@@ -31,11 +31,11 @@ pub fn logical_type_of(field: &Field) -> VqlType {
         .get("ARROW:extension:name")
         .map(String::as_str)
     {
-        Some("visionql.image") => VqlType::Image,
-        Some("visionql.video") => VqlType::Video,
-        Some("visionql.box2d") => VqlType::Box2d,
-        Some("visionql.audio") => VqlType::Audio,
-        Some("visionql.mask") => VqlType::Mask,
+        Some("vql.image") => VqlType::Image,
+        Some("vql.video") => VqlType::Video,
+        Some("vql.box2d") => VqlType::Box2d,
+        Some("vql.audio") => VqlType::Audio,
+        Some("vql.mask") => VqlType::Mask,
         _ => VqlType::Arrow,
     }
 }

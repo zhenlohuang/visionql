@@ -445,66 +445,60 @@ fn schema_response(value: SchemaInfo) -> SchemaInfoResponse {
 fn table_from_request(request: &CreateTable) -> Result<TableDef> {
     let provider = request
         .properties
-        .get("visionql.provider")
+        .get("vql.provider")
         .map(|value| value.to_ascii_lowercase());
     let provider = match provider.as_deref() {
         Some("images") => TableProvider::Images {
             location: required_location(request)?,
-            recursive: property_bool(&request.properties, "visionql.recursive", false)?,
+            recursive: property_bool(&request.properties, "vql.recursive", false)?,
         },
         Some("videos") => TableProvider::Videos {
             location: required_location(request)?,
-            recursive: property_bool(&request.properties, "visionql.recursive", false)?,
-            fps: property_parse(&request.properties, "visionql.fps")?,
-            start_time_ms: property_parse(&request.properties, "visionql.start_time_ms")?,
+            recursive: property_bool(&request.properties, "vql.recursive", false)?,
+            fps: property_parse(&request.properties, "vql.fps")?,
+            start_time_ms: property_parse(&request.properties, "vql.start_time_ms")?,
         },
         Some("rtsp") => TableProvider::Rtsp(RtspTableConfig {
             name: request.name.clone(),
             endpoint: request
                 .properties
-                .get("visionql.endpoint")
+                .get("vql.endpoint")
                 .cloned()
-                .ok_or_else(|| invalid_property("visionql.endpoint"))?,
-            fps: property_parse(&request.properties, "visionql.fps")?.unwrap_or(5.0),
+                .ok_or_else(|| invalid_property("vql.endpoint"))?,
+            fps: property_parse(&request.properties, "vql.fps")?.unwrap_or(5.0),
             event_time: match request
                 .properties
-                .get("visionql.event_time")
+                .get("vql.event_time")
                 .map(String::as_str)
                 .unwrap_or("capture_time")
             {
                 "capture_time" => EventTimePolicy::CaptureTime,
                 "ingest_time" => EventTimePolicy::IngestTime,
-                _ => return Err(invalid_property("visionql.event_time")),
+                _ => return Err(invalid_property("vql.event_time")),
             },
-            watermark_delay_ms: property_parse(&request.properties, "visionql.watermark_delay_ms")?
+            watermark_delay_ms: property_parse(&request.properties, "vql.watermark_delay_ms")?
                 .unwrap_or(2_000),
             transport: match request
                 .properties
-                .get("visionql.transport")
+                .get("vql.transport")
                 .map(String::as_str)
                 .unwrap_or("tcp")
             {
                 "tcp" => RtspTransport::Tcp,
                 "udp" => RtspTransport::Udp,
-                _ => return Err(invalid_property("visionql.transport")),
+                _ => return Err(invalid_property("vql.transport")),
             },
         }),
         Some("kafka") => TableProvider::Kafka(KafkaTableConfig {
-            bootstrap_servers: required_property(
-                &request.properties,
-                "visionql.bootstrap_servers",
-            )?,
-            topic: required_property(&request.properties, "visionql.topic")?,
-            credential_ref: request.properties.get("visionql.credential_ref").cloned(),
-            delivery_timeout_ms: property_parse(
-                &request.properties,
-                "visionql.delivery_timeout_ms",
-            )?
-            .unwrap_or(30_000),
-            buffer_capacity: property_parse(&request.properties, "visionql.buffer_capacity")?
+            bootstrap_servers: required_property(&request.properties, "vql.bootstrap_servers")?,
+            topic: required_property(&request.properties, "vql.topic")?,
+            credential_ref: request.properties.get("vql.credential_ref").cloned(),
+            delivery_timeout_ms: property_parse(&request.properties, "vql.delivery_timeout_ms")?
+                .unwrap_or(30_000),
+            buffer_capacity: property_parse(&request.properties, "vql.buffer_capacity")?
                 .unwrap_or(1_024),
         }),
-        Some(_) => return Err(invalid_property("visionql.provider")),
+        Some(_) => return Err(invalid_property("vql.provider")),
         None => TableProvider::External {
             data_source_format: request
                 .data_source_format
@@ -531,26 +525,14 @@ fn table_response(
 ) -> TableInfoResponse {
     let mut properties = table.definition.metadata.properties.clone();
     properties.insert(
-        "visionql.provider".to_owned(),
+        "vql.provider".to_owned(),
         format!("{:?}", table.definition.provider.kind()).to_ascii_lowercase(),
     );
     let capabilities = table.definition.capabilities();
-    properties.insert(
-        "visionql.readable".to_owned(),
-        capabilities.readable.to_string(),
-    );
-    properties.insert(
-        "visionql.writable".to_owned(),
-        capabilities.writable.to_string(),
-    );
-    properties.insert(
-        "visionql.bounded".to_owned(),
-        capabilities.bounded.to_string(),
-    );
-    properties.insert(
-        "visionql.durable".to_owned(),
-        capabilities.durable.to_string(),
-    );
+    properties.insert("vql.readable".to_owned(), capabilities.readable.to_string());
+    properties.insert("vql.writable".to_owned(), capabilities.writable.to_string());
+    properties.insert("vql.bounded".to_owned(), capabilities.bounded.to_string());
+    properties.insert("vql.durable".to_owned(), capabilities.durable.to_string());
     append_provider_properties(&table.definition.provider, &mut properties);
     let data_source_format = match &table.definition.provider {
         TableProvider::Kafka(_) => Some(DataSourceFormat::Json),
@@ -587,7 +569,7 @@ fn table_response(
 fn append_provider_properties(provider: &TableProvider, properties: &mut BTreeMap<String, String>) {
     match provider {
         TableProvider::Images { recursive, .. } => {
-            properties.insert("visionql.recursive".to_owned(), recursive.to_string());
+            properties.insert("vql.recursive".to_owned(), recursive.to_string());
         }
         TableProvider::Videos {
             recursive,
@@ -595,19 +577,19 @@ fn append_provider_properties(provider: &TableProvider, properties: &mut BTreeMa
             start_time_ms,
             ..
         } => {
-            properties.insert("visionql.recursive".to_owned(), recursive.to_string());
+            properties.insert("vql.recursive".to_owned(), recursive.to_string());
             if let Some(value) = fps {
-                properties.insert("visionql.fps".to_owned(), value.to_string());
+                properties.insert("vql.fps".to_owned(), value.to_string());
             }
             if let Some(value) = start_time_ms {
-                properties.insert("visionql.start_time_ms".to_owned(), value.to_string());
+                properties.insert("vql.start_time_ms".to_owned(), value.to_string());
             }
         }
         TableProvider::Rtsp(config) => {
-            properties.insert("visionql.endpoint".to_owned(), config.endpoint.clone());
-            properties.insert("visionql.fps".to_owned(), config.fps.to_string());
+            properties.insert("vql.endpoint".to_owned(), config.endpoint.clone());
+            properties.insert("vql.fps".to_owned(), config.fps.to_string());
             properties.insert(
-                "visionql.event_time".to_owned(),
+                "vql.event_time".to_owned(),
                 match config.event_time {
                     EventTimePolicy::CaptureTime => "capture_time",
                     EventTimePolicy::IngestTime => "ingest_time",
@@ -615,11 +597,11 @@ fn append_provider_properties(provider: &TableProvider, properties: &mut BTreeMa
                 .to_owned(),
             );
             properties.insert(
-                "visionql.watermark_delay_ms".to_owned(),
+                "vql.watermark_delay_ms".to_owned(),
                 config.watermark_delay_ms.to_string(),
             );
             properties.insert(
-                "visionql.transport".to_owned(),
+                "vql.transport".to_owned(),
                 match config.transport {
                     RtspTransport::Tcp => "tcp",
                     RtspTransport::Udp => "udp",
@@ -629,22 +611,22 @@ fn append_provider_properties(provider: &TableProvider, properties: &mut BTreeMa
         }
         TableProvider::Kafka(config) => {
             properties.insert(
-                "visionql.bootstrap_servers".to_owned(),
+                "vql.bootstrap_servers".to_owned(),
                 config.bootstrap_servers.clone(),
             );
-            properties.insert("visionql.topic".to_owned(), config.topic.clone());
+            properties.insert("vql.topic".to_owned(), config.topic.clone());
             if config.credential_ref.is_some() {
                 properties.insert(
-                    "visionql.credential_ref".to_owned(),
+                    "vql.credential_ref".to_owned(),
                     "[REDACTED_SECRET_REF]".to_owned(),
                 );
             }
             properties.insert(
-                "visionql.delivery_timeout_ms".to_owned(),
+                "vql.delivery_timeout_ms".to_owned(),
                 config.delivery_timeout_ms.to_string(),
             );
             properties.insert(
-                "visionql.buffer_capacity".to_owned(),
+                "vql.buffer_capacity".to_owned(),
                 config.buffer_capacity.to_string(),
             );
         }
@@ -1274,8 +1256,8 @@ mod tests {
             .get_table("vql.default.camera")
             .unwrap();
         assert_eq!(info.table_type, TableType::External);
-        assert_eq!(info.properties["visionql.provider"], "rtsp");
-        assert_eq!(info.properties["visionql.bounded"], "false");
+        assert_eq!(info.properties["vql.provider"], "rtsp");
+        assert_eq!(info.properties["vql.bounded"], "false");
     }
 
     #[test]
@@ -1301,7 +1283,7 @@ mod tests {
                 columns: Vec::new(),
                 storage_location: Some(images.to_string_lossy().into_owned()),
                 comment: None,
-                properties: BTreeMap::from([("visionql.provider".to_owned(), "images".to_owned())]),
+                properties: BTreeMap::from([("vql.provider".to_owned(), "images".to_owned())]),
             })
             .unwrap();
 
@@ -1316,10 +1298,7 @@ mod tests {
             serde_json::from_str(&info.columns[1].type_json).unwrap();
         assert_eq!(image_type["name"], "image");
         assert_eq!(image_type["type"]["type"], "struct");
-        assert_eq!(
-            image_type["metadata"]["ARROW:extension:name"],
-            "visionql.image"
-        );
+        assert_eq!(image_type["metadata"]["ARROW:extension:name"], "vql.image");
         let snapshot = store.snapshot().unwrap();
         assert_eq!(snapshot.table("photos").unwrap().schema, images_schema());
     }
@@ -1341,7 +1320,7 @@ mod tests {
             columns,
             storage_location: Some(media.to_string_lossy().into_owned()),
             comment: None,
-            properties: BTreeMap::from([("visionql.provider".to_owned(), provider.to_owned())]),
+            properties: BTreeMap::from([("vql.provider".to_owned(), provider.to_owned())]),
         };
 
         let error = service
@@ -1365,7 +1344,7 @@ mod tests {
         let mut invalid_video = request("clips", "videos", Vec::new());
         invalid_video
             .properties
-            .insert("visionql.fps".to_owned(), "-1".to_owned());
+            .insert("vql.fps".to_owned(), "-1".to_owned());
         let error = service.create_table(invalid_video).unwrap_err();
         assert_eq!(error.code, CatalogErrorCode::InvalidArgument);
         assert!(error.message.contains("video fps"));

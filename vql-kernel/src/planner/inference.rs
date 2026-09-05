@@ -134,9 +134,9 @@ fn model_identity(model: &ResolvedModelDef) -> String {
 
 fn batching_owner(model: &ResolvedModelDef) -> &'static str {
     match model.execution {
-        ResolvedExecutionSpec::Embedded { .. } => "visionql",
+        ResolvedExecutionSpec::Embedded { .. } => "engine",
         ResolvedExecutionSpec::Service { .. } => "service",
-        ResolvedExecutionSpec::Generic { .. } => "visionql",
+        ResolvedExecutionSpec::Generic { .. } => "engine",
     }
 }
 

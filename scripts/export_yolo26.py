@@ -94,11 +94,11 @@ def main() -> None:
             pass
     metadata.update(
         {
-            "visionql.output_format": (
+            "vql.output_format": (
                 "classification" if args.task == "classify" else "yolo_e2e"
             ),
-            "visionql.image_size": json.dumps([image_size, image_size]),
-            "visionql.source_revision": args.revision,
+            "vql.image_size": json.dumps([image_size, image_size]),
+            "vql.source_revision": args.revision,
             **({"names": labels} if labels else {}),
         }
     )

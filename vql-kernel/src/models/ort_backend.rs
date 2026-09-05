@@ -963,7 +963,7 @@ fn inspect_onnx(path: &str) -> Result<OnnxInspection> {
     let metadata = session.metadata().ok();
     let format = metadata.as_ref().and_then(|metadata| {
         metadata
-            .custom("visionql.output_format")
+            .custom("vql.output_format")
             .or_else(|| metadata.custom("output_format"))
             .or_else(|| metadata.custom("format"))
     });
@@ -973,7 +973,7 @@ fn inspect_onnx(path: &str) -> Result<OnnxInspection> {
         .and_then(|value| parse_metadata_labels(&value));
     let image_size = metadata
         .as_ref()
-        .and_then(|metadata| metadata.custom("visionql.image_size"))
+        .and_then(|metadata| metadata.custom("vql.image_size"))
         .and_then(|value| serde_json::from_str(&value).ok());
     Ok(OnnxInspection {
         inputs,

@@ -63,7 +63,7 @@ Invocation is vectorized:
 3. Its result returns through the Arrow data interface.
 4. The kernel validates the result against the declared field contract.
 
-The entry point uses the `module:function` form and must resolve to a callable attribute. Resolution and invocation failures become structured execution errors. A Python call already running under the GIL cannot be interrupted; surrounding query execution observes cancellation after the call returns. Isolated worker processes and cancellation of already-running Python code belong to the [`vqld` service proposal](./proposals/2026-08-06-vqld-service.md).
+The entry point uses the `module:function` form and must resolve to a callable attribute. Resolution and invocation failures become structured execution errors. A Python call already running under the GIL cannot be interrupted; surrounding query execution observes cancellation after the call returns. Isolated worker processes and cancellation of already-running Python code belong to the [`vqld` Service Design](./vqld.md).
 
 ## Verification
 

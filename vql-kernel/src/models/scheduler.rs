@@ -148,7 +148,7 @@ impl ModelScheduler {
                         break;
                     }
                     outputs.push(
-                        self.submit_visionql(
+                        self.submit_engine(
                             chunk,
                             cancel.clone(),
                             budget.clone(),
@@ -160,7 +160,7 @@ impl ModelScheduler {
                 concat_arrays(&outputs)
             }
             SchedulerKind::VisionQl { .. } => {
-                self.submit_visionql(images, cancel, budget, reservations)
+                self.submit_engine(images, cancel, budget, reservations)
                     .await
             }
             SchedulerKind::Service { max_batch, .. } if images.len() > *max_batch => {
@@ -204,7 +204,7 @@ impl ModelScheduler {
         result
     }
 
-    async fn submit_visionql(
+    async fn submit_engine(
         &self,
         images: Vec<DynamicImage>,
         cancel: CancellationToken,
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visionql_scheduler_uses_actual_backend_batches() {
+    async fn engine_scheduler_uses_actual_backend_batches() {
         let batch_sizes = Arc::new(Mutex::new(Vec::new()));
         let scheduler = ModelScheduler::with_config(
             Arc::new(RecordingBackend {

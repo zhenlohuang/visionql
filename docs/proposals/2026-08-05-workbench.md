@@ -7,7 +7,7 @@ updated_at: 2026-08-16
 
 # Workbench
 
-This proposal derives Workbench from [VisionQL PRD](../prd.md) §3.8, the [High-Level Design](../high_level_design.md), and the [vqld Service proposal](./2026-08-06-vqld-service.md). Workbench is the multimodal SQL client shipped with the v0.2 `vqld` service. It runs queries, previews results, and operates continuous queries without owning business data or depending on private engine interfaces.
+This proposal derives Workbench from [VisionQL PRD](../prd.md) §3.8, the [High-Level Design](../high_level_design.md), and the [`vqld` Service Design](../vqld.md). Workbench is the multimodal SQL client shipped with the v0.2 `vqld` service. It runs queries, previews results, and operates continuous queries without owning business data or depending on private engine interfaces.
 
 ## 1. Product Positioning and Scope
 
@@ -130,7 +130,7 @@ Workbench contains a browser SPA and a small BFF. The BFF exists because browser
 
 ### 3.2 Client Representation of `IMAGE`
 
-The engine protocol returns references by default. The Workbench Flight session selects `image_mode=thumbnail`, so each result can carry a small preview. `IMAGE.uri` is display-only. Clicking the image calls public `FRAME_AT(locator [, pts_ms])` to obtain an original. The locator binds an opaque source generation and media version and is reauthorized on every server read. File and object-store references can be reread. Live RTSP frames are available only while retained by the engine's bounded compressed-GOP ring; after expiry, the thumbnail remains and the UI explains the limitation. Sections 4.3–4.4 define the full transport and authorization path.
+The engine protocol returns references by default. The Workbench Flight session selects `image_mode=thumbnail`, so each result can carry a small preview. `IMAGE.uri` is display-only. Clicking a persistent image calls the public `FRAME_AT` media-ticket operation to obtain an original. The locator binds an opaque source generation and media version and is reauthorized on every server read. Local persistent image and video references can be reread; remote object stores follow their provider contract. Live RTSP rows carry thumbnails but no durable locator, so evidence that requires later retrieval must first be written to a persistent Table. Sections 4.3–4.4 define the full transport and authorization path.
 
 ### 3.3 State Ownership
 
@@ -169,13 +169,13 @@ v0.2 does not ship Arrow JS in the browser. The BFF converts only bounded intera
 | Login and session | Flight Handshake / auth middleware over TLS; send and validate the Handshake token on every RPC |
 | Query and DDL | Statement query/update; prepared result metadata describes kind, boundedness, and side effect; prepared statements for parameterized media reads |
 | Result schema | Arrow schema and batches through `GetSchema` and `DoGet` |
-| Query identity | `VisionqlFlightInfoV1` in `FlightInfo.app_metadata` supplies query ID, statement kind, and mode |
+| Query identity | `VqlFlightInfoV1` in `FlightInfo.app_metadata` supplies query ID, statement kind, and mode |
 | Long queries and cancellation | `PollFlightInfo`, `CancelFlightInfo`, and cancellation propagation on disconnect |
 | Table catalog | `GetCatalogs`, `GetDbSchemas`, `GetTables`, `GetTableTypes` |
 | Other catalog objects | `SHOW MODELS/FUNCTIONS`, `DESCRIBE`, `SHOW CREATE` |
 | Continuous queries | `SUBMIT QUERY`, `SHOW/DESCRIBE QUERY`, `SHOW QUERY DEPENDENCIES`, `PAUSE`, `RESUME`, `STOP` |
 | Metrics | Prometheus endpoint configured at deployment; BFF filters labels such as `query_id` |
-| Errors | Standard gRPC status plus `visionql-error-bin` trailing metadata |
+| Errors | Standard gRPC status plus `vql-error-bin` trailing metadata |
 | Compatibility | Fixed vendor `GetSqlInfo` IDs for protocol, dialect, `IMAGE` extension version, and capabilities |
 
 Workbench never reads the SQLite Catalog or engine process files. It reads only the public Prometheus-format endpoint; external Prometheus/Grafana owns long-term storage.
@@ -185,10 +185,10 @@ Workbench never reads the SQLite Catalog or engine process files. It reads only 
 After login, the BFF reads fixed vendor SqlInfo:
 
 ```text
-10000 visionql_protocol_version : string
-10001 sql_dialect_version       : string
-10002 visionql_image_version    : string
-10003 capabilities              : list<string> {
+10000 VQL client-protocol version : string
+10001 VQL SQL-dialect version     : string
+10002 VQL IMAGE extension version : string
+10003 VQL capabilities            : list<string> {
   unbounded_do_get,
   poll_flight_info,
   cancel_flight_info,
@@ -208,13 +208,14 @@ After login, the BFF reads fixed vendor SqlInfo:
 With `statement_info_v1`, read these result-schema metadata fields from prepare:
 
 ```text
-visionql.statement_info.version = 1
-visionql.statement.kind = query | update | ddl | persistent_submission
-visionql.query.mode = bounded | unbounded | not_applicable
-visionql.statement.side_effect = read_only | write
+vql.statement_info.version = 1
+vql.statement_info.kind = query | update | ddl | persistent_submission
+vql.statement_info.query_mode = bounded | unbounded | not_applicable
+vql.statement_info.result_mode = bounded | unbounded | none
+vql.statement_info.side_effect = read_only | write
 ```
 
-Workbench does not infer these semantics with a local parser. `statement_info_v1` is required for Query execution in v0.2. Without it, retain connection diagnostics and read-only catalog browsing but block SQL execution instead of guessing the result lifecycle.
+`vql.statement_info.query_mode` describes the submitted computation, while `vql.statement_info.result_mode` describes the Flight result lifetime. Workbench does not infer these semantics with a local parser. `statement_info_v1` is required for Query execution in v0.2. Without it, retain connection diagnostics and read-only catalog browsing but block SQL execution instead of guessing the result lifecycle.
 
 ### 4.3 `IMAGE` Transport
 
@@ -226,7 +227,7 @@ SET vql.result.thumbnail_max_edge = 256;
 SET vql.result.thumbnail_quality = 75;
 ```
 
-The result remains a standard Arrow Struct with `ARROW:extension:name=visionql.image` and `ARROW:extension:metadata={"version":1}`, matching SqlInfo `visionql_image_version="1"`. The BFF reads:
+The result remains a standard Arrow Struct with `ARROW:extension:name=vql.image` and `ARROW:extension:metadata={"version":1}`, matching SqlInfo ID 10002 value `"1"`. The BFF reads:
 
 - sanitized display `uri`, opaque `locator`, `pts_ms`, `frame_id`, dimensions, and other reference fields;
 - JPEG or PNG thumbnail bytes in `encoded`;
@@ -246,22 +247,22 @@ sequenceDiagram
 
     U->>W: POST /api/v1/media:open {media_ref}
     W->>W: Validate session ownership and expiry
-    W->>V: Prepared FRAME_AT(locator [, pts]) query
+    W->>V: Locator-backed media DoGet ticket
     V->>V: Parse locator, reauthorize source generation, validate range
     V-->>W: image/jpeg or stable error code
     W-->>U: Same-origin image response
 ```
 
-- File and object-store references can be reread.
-- Live RTSP frames are readable only before engine-ring expiry. On expiry, keep the thumbnail, show “original frame expired,” and do not rerun the query.
-- `$1` for `FRAME_AT` comes only from the locator stored by the BFF. Omitting `$2` uses the locator PTS; specifying it may select only within the same authorized video object.
+- Local persistent image and video references can be reread. Remote object stores follow their provider contract.
+- Live RTSP frames have no locator and cannot be reopened after the Flight batch. Keep the thumbnail and require an evidence-retention query for later access.
+- The media ticket comes only from the locator stored by the BFF. Omitting its replacement PTS uses the locator PTS; specifying one may select only within the same authorized video object and source generation.
 - Do not expose the locator in an independent image URL or let the client modify locator or PTS.
-- Distinguish `INVALID_MEDIA_LOCATOR`, `MEDIA_LOCATOR_EXPIRED`, `PERMISSION_DENIED`, `SOURCE_REVISION_UNAVAILABLE`, and `FRAME_NOT_AVAILABLE` instead of collapsing them into a generic load failure.
+- Preserve the structured engine error for malformed locators, unavailable source generations, out-of-range PTS values, denied access, and unavailable media instead of collapsing them into a generic load failure.
 - Bind blobs and media references to the login session and clear them immediately on logout.
 
 ### 4.5 System SQL Results
 
-Jobs uses `SHOW QUERIES`; detail uses `DESCRIBE QUERY <id>`; dependencies use `SHOW QUERY DEPENDENCIES <id>`. Workbench depends only on the minimum columns fixed by the [vqld Service proposal](./2026-08-06-vqld-service.md).
+Jobs uses `SHOW QUERIES`; detail uses `DESCRIBE QUERY <id>`; dependencies use `SHOW QUERY DEPENDENCIES <id>`. Workbench depends only on the minimum columns fixed by the [`vqld` Service Design](../vqld.md).
 
 - Render unknown states as their original strings rather than failing the page.
 - Derive metric units from Prometheus suffixes and HELP metadata, never guesses.
@@ -270,15 +271,15 @@ Jobs uses `SHOW QUERIES`; detail uses `DESCRIBE QUERY <id>`; dependencies use `S
 
 ### 4.6 Structured Errors
 
-The engine uses standard gRPC status plus the versioned `VisionqlErrorV1` Protobuf envelope from the [vqld Service proposal](./2026-08-06-vqld-service.md) in `visionql-error-bin` trailing metadata:
+The engine uses standard gRPC status plus the versioned `VqlErrorV1` Protobuf envelope from the [`vqld` Service Design](../vqld.md) in `vql-error-bin` trailing metadata:
 
 ```text
-version, code, message, hint,
+version, code, symbol, message, hint, target_version,
 source_start, source_end,
 query_id, retryable
 ```
 
-Read stable `code`, span, `query_id`, and `retryable` only from the envelope; never match error types from `message`. The BFF adds `statement_index` for the statement it is executing. If the extension is missing or invalid, preserve the standard gRPC code, show that structured details were unavailable, and never expose raw metadata to the browser.
+Read stable `code`, `symbol`, `target_version`, span, `query_id`, and `retryable` only from the envelope; never match error types from `message` or derive retryability from `code`. The BFF adds `statement_index` for the statement it is executing. If the extension is missing or invalid, preserve the standard gRPC code, show that structured details were unavailable, and never expose raw metadata to the browser.
 
 ## 5. Workbench BFF API
 
@@ -409,7 +410,7 @@ The confidence slider filters only already-returned detection arrays or rows. Ke
 
 - Collapse `VECTOR(n)` to dimension, norm, and the first four values; allow per-row expansion without charting large vectors.
 - Show sanitized URI summary, duration, fps, resolution, and codec for `VIDEO`.
-- v0.2 has no video player or timeline. Use SQL `FRAMES` or `FRAME_AT` to inspect a frame.
+- v0.2 has no video player or timeline. Use SQL `FRAMES` or the locator-backed media-open flow to inspect a persistent frame.
 
 ### 7.5 Accessibility
 
@@ -541,7 +542,7 @@ Planned `EXPLAIN` cost estimates are unscheduled optimizer work. A future capabi
 
 ### 11.3 Authorization Model
 
-Workbench does not cache allow/deny decisions. The engine reauthorizes every query, `FRAME_AT`, and job action against the current identity. Catalog invisibility does not prove inaccessibility, so security tests directly attempt unauthorized SQL and forged, cross-session, revoked, and expired media references and locators.
+Workbench does not cache allow/deny decisions. The engine reauthorizes every query, `FRAME_AT`, and job action against the current identity. Catalog invisibility does not prove inaccessibility, so security tests directly attempt unauthorized SQL, expired media references, and forged, cross-session, revoked, or unavailable locators.
 
 ### 11.4 Multiple Replicas
 
@@ -645,7 +646,7 @@ Hard constraints:
 | Protocol contract | Fixed SqlInfo IDs/capabilities, all metadata RPCs, `statement_info_v1`, FlightInfo metadata, attached Table-write status, prepared statements, cancel, per-RPC session token, Protobuf errors, `IMAGE` schema/version, system SQL |
 | Integration | Mock Flight slow clients, disconnect, cancel, trailing-metadata errors, unknown capability/field fallback |
 | Real engine E2E | Login, DDL, bounded query, multimodal rendering, live preview, Jobs actions, permission denial |
-| Security | CSRF, XSS strings, forged/expired/revoked locators and media references, log redaction, cross-user cache and Flight-session isolation |
+| Security | CSRF, XSS strings, expired media references, forged/revoked/unavailable locators, log redaction, cross-user cache and Flight-session isolation |
 | Stability | One-hour live preview, BFF restart, failed replica affinity, no orphan queries |
 
 ### 14.2 PRD Acceptance Mapping
@@ -654,7 +655,7 @@ Hard constraints:
 |---|---|
 | SQL editing and execution | Run a selection, current statement, and multi-statement script; verify metadata classification, explicit `SUBMIT`, attached ordinary unbounded INSERT, error positioning, and browser-only history |
 | Transport limits | Do not rewrite aggregate SQL; after row/byte limits, show the reason and confirm engine cancellation |
-| `IMAGE` / `BOX2D` | Correct thumbnails, originals, detection arrays, and `UNNEST`; clear degradation after live-original expiry |
+| `IMAGE` / `BOX2D` | Correct thumbnails, persistent originals, detection arrays, and `UNNEST`; live rows remain explicitly thumbnail-only |
 | Confidence slider | No network query after adjustment; UI says it filters only the current preview |
 | `VECTOR` | Collapsed by default; expansion does not degrade other rows |
 | Live preview | Newest 500 rows; closing the tab, disconnect timeout, or logout cancels Flight |
@@ -670,7 +671,7 @@ Before the v0.2 Workbench release:
 1. Pass the protocol contract suite against real `vqld`.
 2. Complete “remote query → image and box preview → live cancellation → durable-query operations” end to end.
 3. Leave no interactive query after the browser closes.
-4. Reject unauthorized `FRAME_AT`, forged/expired/revoked locators and media references, and arbitrary URL reads.
+4. Reject unauthorized `FRAME_AT`, forged, revoked, or unavailable locators and media references, and arbitrary URL reads.
 5. Pass front-end and back-end unit tests, E2E, accessibility, and dependency-vulnerability checks.
 6. Verify independent build, container startup, and reverse-proxy deployment documentation.
 
@@ -682,8 +683,8 @@ As defined in §1.1 and PRD §3.8, Workbench is not a notebook, general BI tool,
 
 | Question | Current direction | Decision point |
 |---|---|---|
-| `IMAGE` thumbnail parameters | Engine defaults to reference; display-only `uri` and dereference locator are fixed; Workbench selects thumbnail; size, byte cap, and locator TTL remain open | Before v0.2 Flight schema freeze |
-| Live original-frame retention | Bounded engine ring; keep thumbnail after expiry | After a real eight-stream load test |
+| `IMAGE` thumbnail parameters | Engine defaults to reference; display-only `uri` and persistent dereference locator are fixed; Workbench selects thumbnail; size and byte caps remain open | Before v0.2 Flight schema freeze |
+| Live evidence retention | Live rows have no durable locator; write evidence to a persistent Table before later retrieval | Before v0.2 evidence workflow freeze |
 | Pagination for large Jobs lists | Prefer public SQL filtering/pagination over loading everything into BFF | Before v0.2 production-scale test |
 | External IdP login | Initially support engine token/basic capability; deployment or engine owns OIDC | Before v0.2 authentication freeze |
 | Large-export UX | Generate explicit SQL and require confirmation; do not download through BFF | After v0.2 usability test |

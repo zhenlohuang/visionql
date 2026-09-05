@@ -13,10 +13,7 @@ pub fn video_field(name: impl Into<String>, nullable: bool) -> Field {
         Arc::new(Field::new("codec", DataType::Utf8, true)),
     ]);
     Field::new(name.into(), DataType::Struct(fields), nullable).with_metadata(HashMap::from([
-        (
-            "ARROW:extension:name".to_owned(),
-            "visionql.video".to_owned(),
-        ),
+        ("ARROW:extension:name".to_owned(), "vql.video".to_owned()),
         (
             "ARROW:extension:metadata".to_owned(),
             r#"{"version":1}"#.to_owned(),

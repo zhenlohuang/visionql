@@ -173,7 +173,7 @@ impl sqllogictest::DB for EmbeddedDatabase {
     }
 
     fn engine_name(&self) -> &str {
-        "visionql-kernel"
+        "vql-kernel"
     }
 }
 

@@ -66,8 +66,8 @@ fn run_kafka_case(bootstrap_servers: &str, fixtures: &FixturePaths) -> Result<()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_nanos();
-    let topic = format!("visionql-kafka-sink-{}-{suffix}", std::process::id());
-    let group = format!("visionql-kafka-test-{}-{suffix}", std::process::id());
+    let topic = format!("vql-kafka-sink-{}-{suffix}", std::process::id());
+    let group = format!("vql-kafka-test-{}-{suffix}", std::process::id());
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(create_topic(bootstrap_servers, &topic))?;
     drop(runtime);
@@ -145,7 +145,7 @@ fn run_kafka_case(bootstrap_servers: &str, fixtures: &FixturePaths) -> Result<()
 async fn create_topic(bootstrap_servers: &str, topic: &str) -> Result<(), String> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
-        .set("client.id", "visionql-kafka-sink-integration")
+        .set("client.id", "vql-kafka-sink-integration")
         .create()
         .map_err(|error| format!("create Kafka admin client: {error}"))?;
     let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));

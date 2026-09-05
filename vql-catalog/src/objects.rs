@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CatalogError, CatalogErrorCode, Result};
 
-const IMAGE_EXTENSION_NAME: &str = "visionql.image";
+const IMAGE_EXTENSION_NAME: &str = "vql.image";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
@@ -406,7 +406,7 @@ pub fn videos_schema(synthetic_event_time: bool) -> SchemaRef {
     );
     if synthetic_event_time {
         timestamp = timestamp.with_metadata(HashMap::from([(
-            "visionql.synthetic_event_time".to_owned(),
+            "vql.synthetic_event_time".to_owned(),
             "true".to_owned(),
         )]));
     }

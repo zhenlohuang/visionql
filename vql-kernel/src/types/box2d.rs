@@ -11,6 +11,6 @@ pub fn box2d_field(name: impl Into<String>, nullable: bool) -> Field {
     ]);
     Field::new(name.into(), DataType::Struct(fields), nullable).with_metadata(HashMap::from([(
         "ARROW:extension:name".to_owned(),
-        "visionql.box2d".to_owned(),
+        "vql.box2d".to_owned(),
     )]))
 }

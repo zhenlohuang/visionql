@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-compose_project="${VQL_COMPOSE_PROJECT:-visionql-test-${CI_JOB_ID:-$$}}"
+compose_project="${VQL_COMPOSE_PROJECT:-vql-test-${CI_JOB_ID:-$$}}"
 
 if [[ -z "${VQL_RTSP_PORT:-}" ]]; then
   VQL_RTSP_PORT="$({ python3 - <<'PY'

@@ -758,7 +758,7 @@ impl Session {
             }) {
                 return Err(VqlError::new(
                     ErrorCode::PythonHostRequired,
-                    format!("function '{name}' requires the visionql Python host"),
+                    format!("function '{name}' requires the VisionQL Python host"),
                 ));
             }
         }
@@ -2947,7 +2947,7 @@ mod tests {
         let explain = explain_text(&session, "EXPLAIN SELECT detector(image) FROM photos");
         assert!(explain.contains("VisionQLPlan mode=bounded"));
         assert!(explain.contains("Inference model=detector"));
-        assert!(explain.contains("batching_owner=visionql"));
+        assert!(explain.contains("batching_owner=engine"));
         assert!(explain.contains("dedup=enabled"));
         assert!(explain.contains("decode=skipped(mock)"));
         assert!(explain.contains("image_payload=locator_or_encoded"));

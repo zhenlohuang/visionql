@@ -94,7 +94,7 @@ impl ScalarUDFImpl for PythonFunction {
                 VqlError::new(
                     ErrorCode::PythonHostRequired,
                     format!(
-                        "function '{}' requires the visionql Python host",
+                        "function '{}' requires the VisionQL Python host",
                         self.function.name
                     ),
                 )
