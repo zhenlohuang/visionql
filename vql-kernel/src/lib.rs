@@ -24,7 +24,9 @@ pub use python::{PyUdfHandle, PythonUdfHost, PythonUdfHostRef};
 pub(crate) use resources::QueryResource;
 pub use secrets::{KafkaAuthentication, KafkaTlsConfig, SecretProvider, SecretProviderRef};
 pub use session::{
-    DdlResult, QueryHandle, QueryInterruptAction, Session, SessionBuilder, Statement,
+    DdlResult, PersistentCommand, PreparedResult, PreparedStatement, QueryHandle,
+    QueryInterruptAction, QueryMode, QueryProgress, ResultMode, Session, SessionBuilder,
+    SourceHealth, Statement, StatementInfo, StatementKind,
 };
 pub use sql::{ends_with_statement_terminator, split_statements};
 pub use types::{

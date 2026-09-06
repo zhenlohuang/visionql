@@ -1,5 +1,5 @@
 [workspace]
-members = ["vql-catalog", "vql-kernel", "vql-cli", "vql-python", "vql-testing"]
+members = ["vql-catalog", "vql-kernel", "vql-cli", "vql-python", "vql-server", "vql-testing"]
 exclude = ["vql-workbench"]
 resolver = "3"
 
@@ -12,12 +12,14 @@ repository = "https://github.com/zhenlohuang/visionql"
 
 [workspace.dependencies]
 arrow = { version = "=58.3.0", features = ["json", "prettyprint"] }
+arrow-flight = { version = "=58.3.0", features = ["flight-sql", "tls-ring"] }
 arrow-pyarrow = "=58.3.0"
 arrow-schema = { version = "=58.4.0", features = ["canonical_extension_types"] }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 axum = "0.8"
 base64 = "0.22.1"
+bytes = "1"
 chrono = "0.4.42"
 clap = { version = "4.5.48", features = ["derive"] }
 ctrlc = "3.5.0"
@@ -25,12 +27,14 @@ datafusion = "=54.1.0"
 ffmpeg-next = "8.1.0"
 fast_image_resize = "6.1.0"
 futures = "0.3.31"
+fs2 = "0.4.3"
 hf-hub = "0.4.3"
 image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
 libtest-mimic = "0.8.2"
 object_store = "=0.13.2"
 ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
 percent-encoding = "2.3.2"
+prost = "0.14.1"
 pyo3 = "0.28.0"
 reedline = "0.49.0"
 reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -45,6 +49,7 @@ thiserror = "2.0.17"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.16"
 toml = "0.9.12"
+tonic = { version = "0.14.1", features = ["tls-ring"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tower = { version = "0.5", features = ["util"] }

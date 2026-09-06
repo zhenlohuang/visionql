@@ -26,7 +26,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL, users can work with images, video files, and live video streams through the same query model. A chainable DataFrame API remains a future candidate rather than a scheduled contract.
 
 > [!IMPORTANT]
-> VisionQL v0.1.0 is the first public release. It supports image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output. The minimal single-node `vqld` service is planned for v0.2, followed by the focused Workbench visual SQL client in v0.3. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
+> VisionQL v0.1.0 is the first public release. It supports image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output. The current source tree also contains the v0.2 single-node `vqld` implementation; it has not yet been published as a release. The focused Workbench visual SQL client remains planned for v0.3. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
 
 ## Why VisionQL
 
@@ -89,6 +89,31 @@ LIMIT 5;
 ```
 
 VisionQL persists the table definition, so a new shell session can query `sample_images` without registering it again.
+
+### Run `vqld`
+
+The single-node service listens for Arrow Flight SQL on `127.0.0.1:6031` and exposes health and aggregate metrics on `127.0.0.1:6032`:
+
+```bash
+export VQL_HOME="$PWD/data/.vql"
+cargo run -p vql-server --bin vqld
+
+curl http://127.0.0.1:6032/health/live
+curl http://127.0.0.1:6032/health/ready
+```
+
+Use a Flight SQL client to prepare and execute ordinary SQL or manage a persistent continuous Table write:
+
+```sql
+SUBMIT QUERY people_per_minute AS
+INSERT INTO people_sink SELECT ... FROM cam_entrance;
+
+SHOW QUERIES;
+DESCRIBE QUERY '<query_id>';
+STOP QUERY '<query_id>';
+```
+
+Loopback development accepts a Flight SQL handshake with principal `service` and an empty credential. Logical Sessions expire after 15 idle minutes by default. For non-loopback Flight access, configure `VQLD_SERVICE_TOKEN`, `--tls-cert`, and `--tls-key`; startup rejects an externally bound Flight listener without all three security inputs. The HTTP health and metrics listener remains loopback-only because v0.2 does not terminate TLS for that surface. Run `vqld --help` for Session and attach timeouts, result limits, Query-history retention, and listener options.
 
 ## Examples
 
@@ -284,7 +309,9 @@ CLI output uses that form. Python raises `visionql.VisionQLError`, a `RuntimeErr
 
 ```mermaid
 flowchart LR
+    CLIENTS["Flight SQL clients"] --> SERVER["vql-server / vqld"]
     HOSTS["CLI / Python"] --> API["Engine / Session"]
+    SERVER --> API
     API --> FRONTEND["VQL SQL"]
     FRONTEND --> CATALOG["vql-catalog / vql.default"]
     CATALOG --> FRONTEND
@@ -294,7 +321,7 @@ flowchart LR
     ARROW --> HOSTS
 ```
 
-The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. The separate `vql-catalog` crate owns catalog domains, definition snapshots, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface; v0.2 extends it with persistent Query objects for `vqld`. SQL resolves unqualified names in `vql.default`. See the [High-Level Design](docs/high_level_design.md) and focused component designs below.
+The CLI, Python, and `vqld` hosts share `vql-kernel`, which owns SQL planning, prepared-statement classification, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. `vql-server` adds Flight SQL Sessions, exact execution cancellation, network-safe `IMAGE` thumbnails, persistent Query control, restart orchestration, health, and aggregate metrics. The separate `vql-catalog` crate owns catalog domains, definition snapshots, persistent Query definitions and CAS status, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface. SQL resolves unqualified names in `vql.default`. See the [High-Level Design](docs/high_level_design.md) and focused component designs below.
 
 ## Documentation
 
@@ -305,7 +332,7 @@ The CLI and Python hosts share `vql-kernel`, which owns SQL planning, DataFusion
 | [High-level design](docs/high_level_design.md) | System boundaries, data paths, invariants, and dependency direction |
 | [Kernel design](docs/design/kernel.md) | Planning, streaming, media, inference, resources, and security |
 | [Catalog design](docs/design/catalog.md) | Namespaces, definition and persistent Query objects, snapshots, providers, backends, and UC API |
-| [`vqld` service design](docs/design/vqld.md) | Planned v0.2 Flight SQL host, Catalog-backed persistent Queries, and honest restart-from-live behavior |
+| [`vqld` service design](docs/design/vqld.md) | v0.2 Flight SQL host, Catalog-backed persistent Queries, and honest restart-from-live behavior |
 | [Workbench design](docs/design/workbench.md) | Planned v0.3 browser client for bounded thumbnail and box inspection |
 | [Error code design](docs/design/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI design](docs/design/cli.md) | Shell, script execution, rendering, and signal behavior |

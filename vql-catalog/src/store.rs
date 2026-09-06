@@ -6,9 +6,10 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 
 use crate::{
-    CatalogError, CatalogErrorCode, CatalogInfo, DEFAULT_CATALOG, DEFAULT_SCHEMA,
-    DefinitionSnapshot, FunctionDef, ModelDef, ObjectKind, Result, SchemaInfo, SecurableMetadata,
-    SnapshotObject, SnapshotTable, TableDef, provider_schema,
+    CatalogError, CatalogErrorCode, CatalogInfo, CreateQuery, DEFAULT_CATALOG, DEFAULT_SCHEMA,
+    DefinitionSnapshot, FunctionDef, ModelDef, ObjectKind, PersistentQuery, QueryDefinition,
+    QueryState, QueryStatus, Result, SchemaInfo, SecurableMetadata, SnapshotObject, SnapshotTable,
+    TableDef, provider_schema,
 };
 
 pub trait CatalogBackend: Debug + Send + Sync {
@@ -49,6 +50,12 @@ pub trait CatalogBackend: Debug + Send + Sync {
     ) -> Result<i64>;
     fn drop_table(&self, catalog_name: &str, schema_name: &str, name: &str) -> Result<i64>;
     fn snapshot(&self, catalog_name: &str, schema_name: &str) -> Result<DefinitionSnapshot>;
+    fn snapshot_at_generations(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        generations: &[i64],
+    ) -> Result<DefinitionSnapshot>;
     fn table_at_generation(&self, generation: i64) -> Result<TableDef>;
 
     fn create_model(&self, definition: &ModelDef) -> Result<i64>;
@@ -61,6 +68,21 @@ pub trait CatalogBackend: Debug + Send + Sync {
     fn create_function(&self, definition: &FunctionDef) -> Result<i64>;
     fn drop_object(&self, kind: ObjectKind, name: &str) -> Result<i64>;
     fn history_count(&self, kind: ObjectKind) -> Result<i64>;
+
+    fn create_query(&self, query: &CreateQuery) -> Result<PersistentQuery>;
+    fn get_query(&self, query_id: &str) -> Result<PersistentQuery>;
+    fn list_queries(&self) -> Result<Vec<PersistentQuery>>;
+    fn compare_and_swap_query_status(
+        &self,
+        query_id: &str,
+        expected_status_version: i64,
+        status: &QueryStatus,
+    ) -> Result<QueryStatus>;
+    fn prune_terminal_queries(
+        &self,
+        retain_count: Option<usize>,
+        older_than: Option<i64>,
+    ) -> Result<usize>;
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +194,20 @@ impl CatalogStore {
         self.backend.snapshot(catalog_name, schema_name)
     }
 
+    pub fn snapshot_at_generations(&self, generations: &[i64]) -> Result<DefinitionSnapshot> {
+        self.snapshot_at_generations_in(DEFAULT_CATALOG, DEFAULT_SCHEMA, generations)
+    }
+
+    pub fn snapshot_at_generations_in(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        generations: &[i64],
+    ) -> Result<DefinitionSnapshot> {
+        self.backend
+            .snapshot_at_generations(catalog_name, schema_name, generations)
+    }
+
     pub fn table_at_generation(&self, generation: i64) -> Result<TableDef> {
         self.backend.table_at_generation(generation)
     }
@@ -204,6 +240,37 @@ impl CatalogStore {
 
     pub fn history_count(&self, kind: ObjectKind) -> Result<i64> {
         self.backend.history_count(kind)
+    }
+
+    pub fn create_query(&self, query: &CreateQuery) -> Result<PersistentQuery> {
+        self.backend.create_query(query)
+    }
+
+    pub fn get_query(&self, query_id: &str) -> Result<PersistentQuery> {
+        self.backend.get_query(query_id)
+    }
+
+    pub fn list_queries(&self) -> Result<Vec<PersistentQuery>> {
+        self.backend.list_queries()
+    }
+
+    pub fn compare_and_swap_query_status(
+        &self,
+        query_id: &str,
+        expected_status_version: i64,
+        status: &QueryStatus,
+    ) -> Result<QueryStatus> {
+        self.backend
+            .compare_and_swap_query_status(query_id, expected_status_version, status)
+    }
+
+    pub fn prune_terminal_queries(
+        &self,
+        retain_count: Option<usize>,
+        older_than: Option<i64>,
+    ) -> Result<usize> {
+        self.backend
+            .prune_terminal_queries(retain_count, older_than)
     }
 }
 
@@ -529,6 +596,27 @@ mod sqlite {
             Ok(DefinitionSnapshot::new(tables, models, functions))
         }
 
+        fn snapshot_at_generations(
+            &self,
+            catalog_name: &str,
+            schema_name: &str,
+            generations: &[i64],
+        ) -> Result<DefinitionSnapshot> {
+            let catalog_name = normalize_name(catalog_name, "catalog")?;
+            let schema_name = normalize_name(schema_name, "schema")?;
+            self.get_schema(&catalog_name, &schema_name)?;
+            let mut connection = self.lock()?;
+            let transaction = connection.transaction()?;
+            let snapshot = load_snapshot_at_generations(
+                &transaction,
+                &catalog_name,
+                &schema_name,
+                generations,
+            )?;
+            transaction.commit()?;
+            Ok(snapshot)
+        }
+
         fn table_at_generation(&self, generation: i64) -> Result<TableDef> {
             let definition = self
                 .lock()?
@@ -669,6 +757,227 @@ mod sqlite {
         fn history_count(&self, kind: ObjectKind) -> Result<i64> {
             SqliteCatalogBackend::history_count(self, kind)
         }
+
+        fn create_query(&self, query: &CreateQuery) -> Result<PersistentQuery> {
+            let catalog_name = normalize_name(&query.catalog_name, "catalog")?;
+            let schema_name = normalize_name(&query.schema_name, "schema")?;
+            let name = normalize_name(&query.name, "query")?;
+            if query.principal.trim().is_empty() {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::InvalidArgument,
+                    "Query principal cannot be empty",
+                ));
+            }
+            if query.normalized_sql.trim().is_empty() {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::InvalidArgument,
+                    "Query SQL cannot be empty",
+                ));
+            }
+            let mut generations = query.definition_generations.clone();
+            generations.sort_unstable();
+            generations.dedup();
+            if generations.is_empty() {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::InvalidArgument,
+                    "persistent Query must pin at least one definition generation",
+                ));
+            }
+
+            let now = Utc::now().timestamp_millis();
+            let query_id = uuid::Uuid::new_v4().to_string();
+            let settings = serde_json::to_string(&query.session_settings)?;
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let schema_exists = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schemas WHERE catalog_name=?1 AND name=?2)",
+                params![catalog_name, schema_name],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !schema_exists {
+                return Err(not_found(
+                    "schema",
+                    &format!("{catalog_name}.{schema_name}"),
+                ));
+            }
+            for generation in &generations {
+                let valid = transaction.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM object_revisions
+                         WHERE generation=?1 AND catalog_name=?2 AND schema_name=?3 AND tombstone=0
+                     )",
+                    params![generation, catalog_name, schema_name],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !valid {
+                    return Err(CatalogError::new(
+                        CatalogErrorCode::Conflict,
+                        format!(
+                            "definition generation {generation} is unavailable in {catalog_name}.{schema_name}"
+                        ),
+                    ));
+                }
+            }
+            let inserted = transaction.execute(
+                "INSERT INTO queries(
+                     query_id, catalog_name, schema_name, name, principal, normalized_sql,
+                     sql_redacted, session_settings_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    query_id,
+                    catalog_name,
+                    schema_name,
+                    name,
+                    query.principal.trim(),
+                    query.normalized_sql,
+                    query.sql_redacted,
+                    settings,
+                    now
+                ],
+            );
+            map_query_unique(inserted, &name)?;
+            for generation in &generations {
+                transaction.execute(
+                    "INSERT INTO query_dependencies(query_id, generation) VALUES (?1, ?2)",
+                    params![query_id, generation],
+                )?;
+            }
+            let status = QueryStatus::starting(now);
+            insert_query_status(&transaction, &query_id, &status)?;
+            transaction.commit()?;
+            drop(connection);
+            self.get_query(&query_id)
+        }
+
+        fn get_query(&self, query_id: &str) -> Result<PersistentQuery> {
+            let connection = self.lock()?;
+            load_query(&connection, query_id)?.ok_or_else(|| not_found("query", query_id))
+        }
+
+        fn list_queries(&self) -> Result<Vec<PersistentQuery>> {
+            let connection = self.lock()?;
+            let mut statement = connection
+                .prepare("SELECT query_id FROM queries ORDER BY created_at DESC, query_id DESC")?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            ids.into_iter()
+                .map(|query_id| {
+                    load_query(&connection, &query_id)?.ok_or_else(|| {
+                        CatalogError::new(
+                            CatalogErrorCode::Internal,
+                            "Query disappeared while it was being listed",
+                        )
+                    })
+                })
+                .collect()
+        }
+
+        fn compare_and_swap_query_status(
+            &self,
+            query_id: &str,
+            expected_status_version: i64,
+            status: &QueryStatus,
+        ) -> Result<QueryStatus> {
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let next_version = expected_status_version.checked_add(1).ok_or_else(|| {
+                CatalogError::new(
+                    CatalogErrorCode::Internal,
+                    "Query status version overflowed",
+                )
+            })?;
+            let updated = transaction.execute(
+                "UPDATE query_status SET
+                     state=?1, status_version=?2, stop_requested=?3, source_health=?4,
+                     last_event_time=?5, started_at=?6, updated_at=?7, last_restart_at=?8,
+                     restart_gap_count=?9, restart_gap_started_at=?10,
+                     restart_gap_ended_at=?11, last_restart_reset_window_state=?12,
+                     error_code=?13, error_message=?14
+                 WHERE query_id=?15 AND status_version=?16",
+                params![
+                    status.state.as_str(),
+                    next_version,
+                    status.stop_requested,
+                    status.source_health,
+                    status.last_event_time,
+                    status.started_at,
+                    status.updated_at,
+                    status.last_restart_at,
+                    status.restart_gap_count,
+                    status.restart_gap_started_at,
+                    status.restart_gap_ended_at,
+                    status.last_restart_reset_window_state,
+                    status.error_code,
+                    status.error_message,
+                    query_id,
+                    expected_status_version
+                ],
+            )?;
+            if updated == 0 {
+                let exists = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM queries WHERE query_id=?1)",
+                    [query_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                return Err(if exists {
+                    CatalogError::new(
+                        CatalogErrorCode::Conflict,
+                        format!("Query '{query_id}' status changed; retry the operation"),
+                    )
+                } else {
+                    not_found("query", query_id)
+                });
+            }
+            transaction.execute(
+                "UPDATE queries SET terminal=?1 WHERE query_id=?2",
+                params![status.state.is_terminal(), query_id],
+            )?;
+            transaction.commit()?;
+            let mut persisted = status.clone();
+            persisted.status_version = next_version;
+            Ok(persisted)
+        }
+
+        fn prune_terminal_queries(
+            &self,
+            retain_count: Option<usize>,
+            older_than: Option<i64>,
+        ) -> Result<usize> {
+            if retain_count.is_none() && older_than.is_none() {
+                return Ok(0);
+            }
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let mut statement = transaction.prepare(
+                "SELECT q.query_id, s.updated_at
+                 FROM queries q JOIN query_status s USING(query_id)
+                 WHERE q.terminal=1 ORDER BY s.updated_at DESC, q.query_id DESC",
+            )?;
+            let terminal = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(statement);
+            let ids = terminal
+                .into_iter()
+                .enumerate()
+                .filter(|(index, (_, updated_at))| {
+                    retain_count.is_some_and(|retain| *index >= retain)
+                        || older_than.is_some_and(|cutoff| *updated_at < cutoff)
+                })
+                .map(|(_, (query_id, _))| query_id)
+                .collect::<Vec<_>>();
+            for query_id in &ids {
+                transaction.execute("DELETE FROM queries WHERE query_id=?1", [query_id])?;
+            }
+            transaction.commit()?;
+            Ok(ids.len())
+        }
     }
 
     fn initialize(connection: &Connection) -> Result<()> {
@@ -727,6 +1036,44 @@ mod sqlite {
                  PRIMARY KEY(catalog_name, schema_name, name),
                  FOREIGN KEY(catalog_name, schema_name) REFERENCES schemas(catalog_name, name)
                      ON UPDATE CASCADE ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS queries (
+                 query_id TEXT PRIMARY KEY,
+                 catalog_name TEXT NOT NULL,
+                 schema_name TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 principal TEXT NOT NULL,
+                 normalized_sql TEXT NOT NULL,
+                 sql_redacted TEXT NOT NULL,
+                 session_settings_json TEXT NOT NULL DEFAULT '{}',
+                 created_at INTEGER NOT NULL,
+                 terminal INTEGER NOT NULL DEFAULT 0,
+                 FOREIGN KEY(catalog_name, schema_name) REFERENCES schemas(catalog_name, name)
+                     ON UPDATE CASCADE ON DELETE RESTRICT
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS queries_active_name
+                 ON queries(catalog_name, schema_name, name) WHERE terminal=0;
+             CREATE TABLE IF NOT EXISTS query_dependencies (
+                 query_id TEXT NOT NULL REFERENCES queries(query_id) ON DELETE CASCADE,
+                 generation INTEGER NOT NULL REFERENCES object_revisions(generation) ON DELETE RESTRICT,
+                 PRIMARY KEY(query_id, generation)
+             );
+             CREATE TABLE IF NOT EXISTS query_status (
+                 query_id TEXT PRIMARY KEY REFERENCES queries(query_id) ON DELETE CASCADE,
+                 state TEXT NOT NULL CHECK(state IN ('STARTING', 'RUNNING', 'STOPPED', 'FAILED')),
+                 status_version INTEGER NOT NULL CHECK(status_version >= 1),
+                 stop_requested INTEGER NOT NULL DEFAULT 0,
+                 source_health TEXT,
+                 last_event_time INTEGER,
+                 started_at INTEGER,
+                 updated_at INTEGER NOT NULL,
+                 last_restart_at INTEGER,
+                 restart_gap_count INTEGER NOT NULL DEFAULT 0,
+                 restart_gap_started_at INTEGER,
+                 restart_gap_ended_at INTEGER,
+                 last_restart_reset_window_state INTEGER NOT NULL DEFAULT 0,
+                 error_code TEXT,
+                 error_message TEXT
              );",
         )?;
         let now = Utc::now().timestamp_millis();
@@ -1079,6 +1426,241 @@ mod sqlite {
         Ok(values)
     }
 
+    fn load_snapshot_at_generations(
+        transaction: &Transaction<'_>,
+        catalog_name: &str,
+        schema_name: &str,
+        generations: &[i64],
+    ) -> Result<DefinitionSnapshot> {
+        let mut requested = generations.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+        if requested.len() != generations.len() {
+            return Err(CatalogError::new(
+                CatalogErrorCode::InvalidArgument,
+                "definition generations must not contain duplicates",
+            ));
+        }
+        let mut tables = BTreeMap::new();
+        let mut models = BTreeMap::new();
+        let mut functions = BTreeMap::new();
+        for generation in requested {
+            let revision = transaction
+                .query_row(
+                    "SELECT object_id, kind, name, object_revision, definition_json, schema_ipc
+                     FROM object_revisions
+                     WHERE generation=?1 AND catalog_name=?2 AND schema_name=?3 AND tombstone=0",
+                    params![generation, catalog_name, schema_name],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<Vec<u8>>>(5)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    CatalogError::new(
+                        CatalogErrorCode::NotFound,
+                        format!("definition generation {generation} does not exist"),
+                    )
+                })?;
+            let (object_id, kind, name, revision, definition, schema) = revision;
+            let definition = definition.ok_or_else(|| {
+                CatalogError::new(
+                    CatalogErrorCode::Storage,
+                    format!("definition generation {generation} has no definition"),
+                )
+            })?;
+            match kind.as_str() {
+                "table" => {
+                    let schema = schema.ok_or_else(|| {
+                        CatalogError::new(
+                            CatalogErrorCode::Storage,
+                            format!("table generation {generation} has no Arrow schema"),
+                        )
+                    })?;
+                    let previous = tables.insert(
+                        name,
+                        SnapshotTable {
+                            object_id,
+                            generation,
+                            revision,
+                            definition: serde_json::from_str(&definition)?,
+                            schema: decode_schema(&schema)?,
+                        },
+                    );
+                    if previous.is_some() {
+                        return Err(CatalogError::new(
+                            CatalogErrorCode::InvalidArgument,
+                            "definition generations contain multiple revisions of one Table",
+                        ));
+                    }
+                }
+                "model" => {
+                    let previous = models.insert(
+                        name,
+                        SnapshotObject {
+                            object_id,
+                            generation,
+                            revision,
+                            definition: serde_json::from_str(&definition)?,
+                        },
+                    );
+                    if previous.is_some() {
+                        return Err(CatalogError::new(
+                            CatalogErrorCode::InvalidArgument,
+                            "definition generations contain multiple revisions of one Model",
+                        ));
+                    }
+                }
+                "function" => {
+                    let previous = functions.insert(
+                        name,
+                        SnapshotObject {
+                            object_id,
+                            generation,
+                            revision,
+                            definition: serde_json::from_str(&definition)?,
+                        },
+                    );
+                    if previous.is_some() {
+                        return Err(CatalogError::new(
+                            CatalogErrorCode::InvalidArgument,
+                            "definition generations contain multiple revisions of one Function",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(CatalogError::new(
+                        CatalogErrorCode::Storage,
+                        format!("definition generation {generation} has an invalid object kind"),
+                    ));
+                }
+            }
+        }
+        Ok(DefinitionSnapshot::new(tables, models, functions))
+    }
+
+    fn insert_query_status(
+        transaction: &Transaction<'_>,
+        query_id: &str,
+        status: &QueryStatus,
+    ) -> Result<()> {
+        transaction.execute(
+            "INSERT INTO query_status(
+                 query_id, state, status_version, stop_requested, source_health, last_event_time,
+                 started_at, updated_at, last_restart_at, restart_gap_count,
+                 restart_gap_started_at, restart_gap_ended_at, last_restart_reset_window_state,
+                 error_code, error_message
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                query_id,
+                status.state.as_str(),
+                status.status_version,
+                status.stop_requested,
+                status.source_health,
+                status.last_event_time,
+                status.started_at,
+                status.updated_at,
+                status.last_restart_at,
+                status.restart_gap_count,
+                status.restart_gap_started_at,
+                status.restart_gap_ended_at,
+                status.last_restart_reset_window_state,
+                status.error_code,
+                status.error_message
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_query(connection: &Connection, query_id: &str) -> Result<Option<PersistentQuery>> {
+        let row = connection
+            .query_row(
+                "SELECT q.query_id, q.catalog_name, q.schema_name, q.name, q.principal,
+                        q.normalized_sql, q.sql_redacted, q.session_settings_json, q.created_at,
+                        s.state, s.status_version, s.stop_requested, s.source_health,
+                        s.last_event_time, s.started_at, s.updated_at, s.last_restart_at,
+                        s.restart_gap_count, s.restart_gap_started_at, s.restart_gap_ended_at,
+                        s.last_restart_reset_window_state, s.error_code, s.error_message
+                 FROM queries q JOIN query_status s USING(query_id) WHERE q.query_id=?1",
+                [query_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, bool>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<i64>>(13)?,
+                        row.get::<_, Option<i64>>(14)?,
+                        row.get::<_, i64>(15)?,
+                        row.get::<_, Option<i64>>(16)?,
+                        row.get::<_, i64>(17)?,
+                        row.get::<_, Option<i64>>(18)?,
+                        row.get::<_, Option<i64>>(19)?,
+                        row.get::<_, bool>(20)?,
+                        row.get::<_, Option<String>>(21)?,
+                        row.get::<_, Option<String>>(22)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut dependencies = connection.prepare(
+            "SELECT generation FROM query_dependencies WHERE query_id=?1 ORDER BY generation",
+        )?;
+        let generations = dependencies
+            .query_map([query_id], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let settings = serde_json::from_str(&row.7)?;
+        Ok(Some(PersistentQuery {
+            definition: QueryDefinition {
+                query_id: row.0,
+                catalog_name: row.1,
+                schema_name: row.2,
+                name: row.3,
+                principal: row.4,
+                normalized_sql: row.5,
+                sql_redacted: row.6,
+                session_settings: settings,
+                definition_generations: generations,
+                created_at: row.8,
+            },
+            status: QueryStatus {
+                state: QueryState::try_from(row.9.as_str())?,
+                status_version: row.10,
+                stop_requested: row.11,
+                source_health: row.12,
+                last_event_time: row.13,
+                started_at: row.14,
+                updated_at: row.15,
+                last_restart_at: row.16,
+                restart_gap_count: row.17,
+                restart_gap_started_at: row.18,
+                restart_gap_ended_at: row.19,
+                last_restart_reset_window_state: row.20,
+                error_code: row.21,
+                error_message: row.22,
+            },
+        }))
+    }
+
     fn catalog_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogInfo> {
         Ok(CatalogInfo {
             name: row.get(0)?,
@@ -1131,6 +1713,24 @@ mod sqlite {
                 Err(CatalogError::new(
                     CatalogErrorCode::AlreadyExists,
                     format!("{kind} '{name}' already exists"),
+                ))
+            }
+            Err(error) => Err(error.into()),
+            Ok(value) => Ok(value),
+        }
+    }
+
+    fn map_query_unique(
+        result: std::result::Result<usize, rusqlite::Error>,
+        name: &str,
+    ) -> Result<usize> {
+        match result {
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(CatalogError::new(
+                    CatalogErrorCode::AlreadyExists,
+                    format!("active Query '{name}' already exists"),
                 ))
             }
             Err(error) => Err(error.into()),
@@ -1431,6 +2031,107 @@ mod sqlite {
                 .unwrap_err();
             assert_eq!(error.code, CatalogErrorCode::Conflict);
             assert!(error.message.contains("immutable"));
+        }
+
+        #[test]
+        fn persistent_query_pins_generations_and_status_updates_use_cas() {
+            let temp = tempdir().unwrap();
+            let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
+            backend.create_model(&model("detector")).unwrap();
+            let generation = backend
+                .snapshot(DEFAULT_CATALOG, DEFAULT_SCHEMA)
+                .unwrap()
+                .model("detector")
+                .unwrap()
+                .generation;
+            let query = backend
+                .create_query(&CreateQuery {
+                    catalog_name: DEFAULT_CATALOG.to_owned(),
+                    schema_name: DEFAULT_SCHEMA.to_owned(),
+                    name: "people_per_minute".to_owned(),
+                    principal: "service".to_owned(),
+                    normalized_sql: "INSERT INTO sink SELECT detector(image) FROM camera"
+                        .to_owned(),
+                    sql_redacted: "INSERT INTO sink SELECT detector(image) FROM camera".to_owned(),
+                    session_settings: BTreeMap::new(),
+                    definition_generations: vec![generation],
+                })
+                .unwrap();
+
+            assert_eq!(query.status.state, QueryState::Starting);
+            assert_eq!(query.definition.definition_generations, vec![generation]);
+            assert!(
+                backend
+                    .snapshot_at_generations(
+                        DEFAULT_CATALOG,
+                        DEFAULT_SCHEMA,
+                        &query.definition.definition_generations,
+                    )
+                    .unwrap()
+                    .model("detector")
+                    .is_some()
+            );
+
+            let mut running = query.status.clone();
+            running.state = QueryState::Running;
+            running.started_at = Some(running.updated_at);
+            let running = backend
+                .compare_and_swap_query_status(
+                    &query.definition.query_id,
+                    query.status.status_version,
+                    &running,
+                )
+                .unwrap();
+            assert_eq!(running.status_version, 2);
+            let error = backend
+                .compare_and_swap_query_status(
+                    &query.definition.query_id,
+                    query.status.status_version,
+                    &running,
+                )
+                .unwrap_err();
+            assert_eq!(error.code, CatalogErrorCode::Conflict);
+        }
+
+        #[test]
+        fn active_query_names_are_unique_and_terminal_history_is_prunable() {
+            let temp = tempdir().unwrap();
+            let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
+            backend.create_model(&model("detector")).unwrap();
+            let generation = backend
+                .snapshot(DEFAULT_CATALOG, DEFAULT_SCHEMA)
+                .unwrap()
+                .model("detector")
+                .unwrap()
+                .generation;
+            let create = CreateQuery {
+                catalog_name: DEFAULT_CATALOG.to_owned(),
+                schema_name: DEFAULT_SCHEMA.to_owned(),
+                name: "watch".to_owned(),
+                principal: "service".to_owned(),
+                normalized_sql: "INSERT INTO sink SELECT 1".to_owned(),
+                sql_redacted: "INSERT INTO sink SELECT 1".to_owned(),
+                session_settings: BTreeMap::new(),
+                definition_generations: vec![generation],
+            };
+            let first = backend.create_query(&create).unwrap();
+            assert_eq!(
+                backend.create_query(&create).unwrap_err().code,
+                CatalogErrorCode::AlreadyExists
+            );
+            let mut stopped = first.status.clone();
+            stopped.state = QueryState::Stopped;
+            stopped.stop_requested = true;
+            backend
+                .compare_and_swap_query_status(
+                    &first.definition.query_id,
+                    first.status.status_version,
+                    &stopped,
+                )
+                .unwrap();
+            backend.create_query(&create).unwrap();
+            assert_eq!(backend.prune_terminal_queries(Some(0), None).unwrap(), 1);
+            assert_eq!(backend.list_queries().unwrap().len(), 1);
         }
     }
 }

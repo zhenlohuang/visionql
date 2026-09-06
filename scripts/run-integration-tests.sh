@@ -86,4 +86,4 @@ cd "${repo_root}"
 VQL_INTEGRATION_TEST=1 \
 VQL_TEST_RTSP_URL="rtsp://127.0.0.1:${VQL_RTSP_PORT}/people" \
 VQL_TEST_KAFKA_BOOTSTRAP_SERVERS="127.0.0.1:${VQL_KAFKA_PORT}" \
-  cargo test -p vql-testing --features system-tests --locked -- --nocapture
+  cargo test -p vql-testing --features system-tests "$@" --locked -- --nocapture

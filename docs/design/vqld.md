@@ -60,7 +60,7 @@ Query creation validates every pinned generation and inserts the definition, dep
 | `/health/ready` | Catalog including persistent Query storage, instance lock, and Flight-listener readiness |
 | `/metrics` | Optional process and aggregate service metrics without per-query labels |
 
-`vqld` binds to loopback by default. A non-loopback listener requires TLS and one configured service credential mapped to one Catalog principal. Every non-health request must authenticate. v0.2 does not expose the Unity Catalog-compatible HTTP router over the network.
+`vqld` binds both surfaces to loopback by default. A non-loopback Flight listener requires TLS and one configured service credential mapped to one Catalog principal. The HTTP health and metrics listener remains loopback-only because v0.2 does not provide HTTP TLS termination. Every non-health request must authenticate. v0.2 does not expose the Unity Catalog-compatible HTTP router over the network.
 
 ## Kernel Host Contract
 
@@ -251,7 +251,7 @@ Service tests verify:
 - atomic Query creation, discovery after disconnect, bounded history, and idempotent stop;
 - restart of active RTSP Queries from the live position with fresh windows and an explicit gap;
 - missing generations or preparation incompatibility cause failure without falling back to current Catalog heads;
-- loopback defaults and rejection of non-loopback startup without TLS and a configured credential;
+- loopback defaults, rejection of non-loopback Flight startup without TLS and a configured credential, and rejection of a non-loopback HTTP listener;
 - aggregate metrics contain no per-query labels.
 
 The end-to-end acceptance test runs the PRD Scenario C through the selected Flight SQL or ADBC client integration.

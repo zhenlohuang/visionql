@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use arrow::record_batch::RecordBatch;
-use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
+use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode, TreeNodeRecursion};
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
@@ -44,6 +44,8 @@ pub(crate) struct PlannedStatement {
     pub(crate) stream_skip: usize,
     pub(crate) stream_fetch: Option<usize>,
     pub(crate) tumble: Option<TumblePlan>,
+    pub(crate) uses_inference: bool,
+    pub(crate) uses_source: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -56,11 +58,27 @@ pub(crate) async fn plan_statement(
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
+    unavailable_python_error: Option<crate::ErrorCode>,
 ) -> crate::Result<PlannedStatement> {
     let original_sql = sql;
     let sql = normalize::normalize_query(original_sql, snapshot)?;
     let dataframe = context.sql(&sql).await?;
     let (state, plan) = dataframe.into_parts();
+    if let Some(error_code) = unavailable_python_error
+        && let Some(name) = referenced_python_function(&plan, snapshot)?
+    {
+        return Err(if error_code == crate::ErrorCode::FeatureNotAvailable {
+            crate::VqlError::feature(
+                format!("function '{name}' is not available in the vqld service host"),
+                "未排期",
+            )
+        } else {
+            crate::VqlError::new(
+                error_code,
+                format!("function '{name}' requires the VisionQL Python host"),
+            )
+        });
+    }
     let stream_name = validate_streamability(&plan, snapshot, original_sql)?;
     let (plan, stream_skip, stream_fetch) = if stream_name.is_some() {
         strip_top_level_limit(plan)?
@@ -77,6 +95,8 @@ pub(crate) async fn plan_statement(
         budget,
     )
     .await?;
+    let uses_inference = inference::contains_inference(&plan);
+    let uses_source = contains_table_scan(&plan);
     let plan = annotate_explain(plan, snapshot)?;
     let dataframe = DataFrame::new(state, plan);
     let tumble = if stream_name.is_some() {
@@ -90,7 +110,45 @@ pub(crate) async fn plan_statement(
         stream_skip,
         stream_fetch,
         tumble,
+        uses_inference,
+        uses_source,
     })
+}
+
+fn contains_table_scan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::TableScan(_)) || plan.inputs().into_iter().any(contains_table_scan)
+}
+
+fn referenced_python_function(
+    plan: &LogicalPlan,
+    snapshot: &crate::catalog::DefinitionSnapshot,
+) -> crate::Result<Option<String>> {
+    for expression in plan.expressions() {
+        let mut found = None;
+        expression.apply(|nested| {
+            if let datafusion::logical_expr::Expr::ScalarFunction(call) = nested
+                && let Some((name, _)) = snapshot.functions().find(|(name, function)| {
+                    matches!(
+                        function.definition.implementation,
+                        crate::catalog::FunctionImplementation::Python { .. }
+                    ) && call.name().eq_ignore_ascii_case(name)
+                })
+            {
+                found = Some(name.to_owned());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+    for input in plan.inputs() {
+        if let Some(name) = referenced_python_function(input, snapshot)? {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
 }
 
 fn annotate_explain(

@@ -18,17 +18,17 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 - [x] Explore interactively in the SQL shell with multiline input, history, and `\q` exit; run scripts with `vql run`; or use Python through `sess.sql()` and Arrow.
 - [x] Reduce media processing with column, frame-sampling, and time-predicate pushdown.
 
-## v0.2 — Single-node service 📋
+## v0.2 — Single-node service ✅
 
 **Goal:** Keep an explicitly submitted continuous query running independently of its client through the smallest useful single-node service.
 
-- [ ] Run bounded and attached continuous SQL through a tested Arrow Flight SQL subset in `vqld`.
-- [ ] Submit, inspect, and stop persistent continuous Table writes explicitly.
-- [ ] Persist submitted Queries in the Catalog and keep them running after client disconnect.
-- [ ] Rediscover Catalog-backed Queries from another Session and restart active RTSP Queries from the live position with fresh window state and an explicit restart gap.
-- [ ] Bind to loopback by default; require TLS and one configured service credential for non-loopback access.
-- [ ] Return one bounded `IMAGE` thumbnail representation and expose per-query state through SQL.
-- [ ] Validate the complete service path with one selected Flight SQL or ADBC client integration.
+- [x] Run bounded and attached continuous SQL through a tested Arrow Flight SQL subset in `vqld`.
+- [x] Submit, inspect, and stop persistent continuous Table writes explicitly.
+- [x] Persist submitted Queries in the Catalog and keep them running after client disconnect.
+- [x] Rediscover Catalog-backed Queries from another Session and restart active RTSP Queries from the live position with fresh window state and an explicit restart gap.
+- [x] Bind both surfaces to loopback by default; require TLS and one configured service credential for non-loopback Flight access while keeping HTTP loopback-only.
+- [x] Return one bounded `IMAGE` thumbnail representation and expose per-query state through SQL.
+- [x] Validate the complete service path with one selected Flight SQL or ADBC client integration.
 
 ## v0.3 — Workbench 📋
 

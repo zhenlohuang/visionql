@@ -36,6 +36,10 @@ CLI tests own the literal `shell` and `run` surface, argument rejection, standal
 
 Python tests own connection arguments, query collection, PyArrow conversion, Python UDF registration and invocation, exception fields, HTML representation, and Python helper APIs. Rust workspace coverage excludes the extension crate; the Python CI job builds a wheel and publishes a separate Python coverage report.
 
+### `vql-server`
+
+Server tests own Flight SQL authentication and Session isolation, direct and prepared statement execution, query/update separation, execution tickets, attach and cancellation semantics, process-boundary IMAGE conversion, persistent Query lifecycle and recovery, daemon locking, health, and aggregate metrics. Protocol tests use the public Arrow Flight SQL Rust client instead of calling service internals.
+
 ### `vql-testing`
 
 `vql-testing` contains only real-artifact and external-service integration tests. It has no library target and no unit tests. Each Cargo test target has a top-level `<target>.rs` entry point; target-private harness code and SQL resources live under the same-named `tests/<target>/` directory. Behavior that can be proved inside one product crate stays with that crate.
@@ -56,10 +60,11 @@ vql-testing/
     ├── rtsp.rs                # RTSP system-test runner
     ├── rtsp/                  # RTSP setup and query scripts
     ├── kafka.rs               # Kafka system-test runner
-    └── kafka/                 # Kafka setup and publish scripts
+    ├── kafka/                 # Kafka setup and publish scripts
+    └── vqld.rs                # Flight SQL and persistent Query recovery runner
 ```
 
-All dependencies are dev-dependencies, and the explicit `image`, `video`, `model`, `rtsp`, and `kafka` integration-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
+All dependencies are dev-dependencies, and the explicit `image`, `video`, `model`, `rtsp`, `kafka`, and `vqld` integration-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
 
 ## Default gate
 
@@ -122,6 +127,7 @@ The targets prove these journeys:
 | `model` | `CREATE MODEL` → `RESOLVE MODEL` → direct call | A real Catalog Model resolves and produces a person detection |
 | `rtsp` | RTSP frames → `VQL_DETECT` → `TUMBLE` | Eight frames, positive detections, and two internally consistent closed windows |
 | `kafka` | `IMAGES` → `VQL_DETECT` → Kafka Sink | Broker acknowledgement and exact consumed JSON for the inferred semantic result |
+| `vqld` | Flight SQL → attached RTSP / persistent RTSP-to-Kafka Query → daemon restart | Direct and prepared statements, exact execution cancellation, client-independent delivery, stable Query identity, live-source reconnect gap, window-state reset, and terminal stop |
 
 Each target creates an isolated temporary `VQL_HOME`. Task-shaped inference targets install only their required release-managed artifacts under that home. Real-model execution is serial within each target to bound CPU and model memory. Exact Arrow field names, types, and nullability remain kernel owner contracts rather than system assertions.
 
@@ -129,6 +135,12 @@ The root `docker-compose.yaml` exposes pinned optional `rtsp` and `kafka` profil
 
 ```bash
 scripts/run-integration-tests.sh
+```
+
+Pass Cargo test filters through the wrapper to run one provisioned target, for example:
+
+```bash
+scripts/run-integration-tests.sh --test vqld
 ```
 
 The wrapper chooses free host ports, waits for both services, enables `system-tests`, sets `VQL_INTEGRATION_TEST=1`, emits service logs on failure, and always tears the project down. When a system target is invoked manually without strict mode, a missing prerequisite is reported as ignored. Strict mode turns every missing prerequisite into a failure.

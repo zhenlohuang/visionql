@@ -4,7 +4,7 @@
 
 ## Scope
 
-VisionQL's delivered v0.1 architecture is an embedded visual-query engine for local image and video directories, live RTSP streams, SQL model inference, event-time `TUMBLE` windows, Kafka output, and CLI and Python hosts. The [Roadmap](../ROADMAP.md) is the source of truth for release scope. The [`vqld` Service Design](./design/vqld.md) defines the planned v0.2 network host; [proposals](./proposals/README.md) define other later capabilities.
+VisionQL's v0.1 architecture is an embedded visual-query engine for local image and video directories, live RTSP streams, SQL model inference, event-time `TUMBLE` windows, Kafka output, and CLI and Python hosts. The v0.2 architecture adds the implemented single-node [`vqld` network host](./design/vqld.md), Flight SQL Sessions, and Catalog-backed persistent Queries. The [Roadmap](../ROADMAP.md) is the source of truth for release scope; [proposals](./proposals/README.md) define later capabilities.
 
 The architecture has five goals:
 
@@ -12,7 +12,7 @@ The architecture has five goals:
 2. `IMAGE` moves through columnar plans without repeated decoded-pixel copies.
 3. Model calls remain visible to the optimizer and scheduler.
 4. Filtering, asynchronous inference, and row-level failure cannot lose event-time progress, window state, or source progress.
-5. The kernel remains independent of its host process and can be embedded by both CLI and Python.
+5. The kernel remains independent of its host process and can be embedded by CLI, Python, and `vqld`.
 
 The embedded v0.1 design excludes persistent Query objects, restart recovery, cross-query decode sharing, model-result caching, multi-user security, and a network service. It also does not fork DataFusion, build a general SQL engine or video storage format, or force bounded and continuous statements to share physical operators. Syntax assigned to a later release may parse, but it must fail with `FEATURE_NOT_AVAILABLE`, identify the target release or state that it is unscheduled, and create no Catalog object.
 
@@ -42,6 +42,7 @@ flowchart TB
     subgraph HOSTS["Hosts"]
         PY["Python binding"]
         CLI["vql shell / run"]
+        DAEMON["vqld / Flight SQL"]
     end
 
     subgraph CORE["Embedded query engine"]
@@ -58,6 +59,7 @@ flowchart TB
 
     PY --> ENTRY
     CLI --> ENTRY
+    DAEMON --> ENTRY
     ENTRY --> SQL
     SQL <--> CAT
     SQL --> PLAN --> EXEC
@@ -65,7 +67,7 @@ flowchart TB
     SOURCES --> EXEC --> SINKS
 ```
 
-The CLI and Python binding are hosts. They load configuration, build an `Engine`, create a `Session`, present results, and own process-specific lifecycle. They do not implement SQL semantics.
+The CLI, Python binding, and `vqld` service are hosts. They load configuration, build an `Engine`, create Sessions, present results, and own process-specific lifecycle. They do not implement SQL semantics.
 
 `vql-kernel` owns planning and execution. `vql-catalog` owns persisted definitions and immutable definition snapshots and, in v0.2, persistent Query objects and mutable Query status. The kernel depends on the Catalog; the Catalog does not depend on execution, media, model, CLI, or Python code.
 
@@ -142,6 +144,7 @@ visionql/
 ├── vql-kernel/                   # planning, execution, media, models, connectors
 ├── vql-cli/                      # shell and script host
 ├── vql-python/                   # PyO3 and Python UDF host
+├── vql-server/                   # Flight SQL, Sessions, persistent Query control, health
 ├── vql-testing/                  # integration-test targets; no library
 └── docs/
 ```
@@ -149,6 +152,7 @@ visionql/
 ```text
 vql-cli ─────┐
 vql-python ──┼──→ vql-kernel ──→ vql-catalog
+vql-server ──┤
 vql-testing ─┘
 ```
 
@@ -158,7 +162,7 @@ Boundary rules:
 - `vql-catalog` cannot depend on DataFusion, media/model runtimes, Kafka, PyO3, Flight, or CLI behavior.
 - CLI and Python depend only on public kernel host interfaces; DataFusion types do not leak into their public APIs.
 - Breaking DataFusion or Arrow changes remain behind the kernel boundary and require focused planning, epoch, schema, and wire-format regression tests.
-- `vql-server` is a planned v0.2 crate defined by the [`vqld` Service Design](./design/vqld.md), not a current workspace member. Workbench is a planned v0.3 independent client defined by the [Workbench Design](./design/workbench.md) and uses only public service protocols.
+- `vql-server` is the v0.2 workspace crate defined by the [`vqld` Service Design](./design/vqld.md). It depends on public kernel and Catalog APIs and owns no SQL or provider semantics. Workbench is a planned v0.3 independent client defined by the [Workbench Design](./design/workbench.md) and uses only public service protocols.
 
 ## Architecture Decisions
 

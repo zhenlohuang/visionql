@@ -98,6 +98,17 @@ pub(crate) enum VqlStatement {
         kind: ShowKind,
         name: String,
     },
+    SubmitQuery {
+        name: String,
+        sql: String,
+    },
+    ShowQueries,
+    DescribeQuery {
+        query_id: String,
+    },
+    StopQuery {
+        query_id: String,
+    },
     Query {
         sql: String,
     },

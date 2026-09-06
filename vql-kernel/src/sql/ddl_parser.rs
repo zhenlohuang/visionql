@@ -33,9 +33,11 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
         "SELECT" | "WITH" | "VALUES" | "INSERT" => Ok(VqlStatement::Query {
             sql: sql.to_owned(),
         }),
-        "SUBMIT" | "PAUSE" | "RESUME" | "STOP" => Err(VqlError::feature(
-            format!("{first} requires a durable-query service and is not available"),
-            "v0.2",
+        "SUBMIT" => parse_submit_query(&tokens),
+        "STOP" => parse_stop_query(&tokens),
+        "PAUSE" | "RESUME" => Err(VqlError::feature(
+            format!("{first} QUERY is not available"),
+            "未排期",
         )),
         _ => Err(VqlError::new(
             ErrorCode::InvalidSql,
@@ -962,6 +964,9 @@ fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
 }
 
 fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
+    if tokens.len() == 2 && token_is(tokens.get(1), "QUERIES") {
+        return Ok(VqlStatement::ShowQueries);
+    }
     if token_is(tokens.get(1), "CREATE") {
         let mut index = 3;
         let name = qualified_identifier(tokens, &mut index, "object name")?;
@@ -1003,6 +1008,14 @@ fn singular_kind(token: Option<&Token>) -> Result<ShowKind> {
 }
 
 fn parse_describe(tokens: &[Token]) -> Result<VqlStatement> {
+    if token_is(tokens.get(1), "QUERY") {
+        if tokens.len() != 3 {
+            return invalid("expected DESCRIBE QUERY '<query_id>'");
+        }
+        return Ok(VqlStatement::DescribeQuery {
+            query_id: string_or_identifier(tokens.get(2), "query ID")?,
+        });
+    }
     let mut index = 1;
     let kind = match word(tokens.get(index)).as_deref() {
         Some("TABLE" | "MODEL" | "FUNCTION") => {
@@ -1018,6 +1031,34 @@ fn parse_describe(tokens: &[Token]) -> Result<VqlStatement> {
     } else {
         invalid("expected DESCRIBE [TABLE | MODEL | FUNCTION] <name>")
     }
+}
+
+fn parse_submit_query(tokens: &[Token]) -> Result<VqlStatement> {
+    expect_word(tokens.get(1), "QUERY")?;
+    let name = identifier(tokens.get(2), "query name")?;
+    expect_word(tokens.get(3), "AS")?;
+    if tokens.len() <= 4 {
+        return invalid("expected SUBMIT QUERY <name> AS INSERT INTO <table> SELECT ...");
+    }
+    let sql = tokens[4..]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if word(tokens.get(4)).is_none_or(|word| word != "INSERT") {
+        return invalid("SUBMIT QUERY accepts only INSERT INTO <table> SELECT ...");
+    }
+    Ok(VqlStatement::SubmitQuery { name, sql })
+}
+
+fn parse_stop_query(tokens: &[Token]) -> Result<VqlStatement> {
+    expect_word(tokens.get(1), "QUERY")?;
+    if tokens.len() != 3 {
+        return invalid("expected STOP QUERY '<query_id>'");
+    }
+    Ok(VqlStatement::StopQuery {
+        query_id: string_or_identifier(tokens.get(2), "query ID")?,
+    })
 }
 
 fn significant_tokens(sql: &str) -> Result<Vec<Token>> {
@@ -1078,6 +1119,10 @@ fn string_literal(token: Option<&Token>) -> Result<String> {
         }
         _ => invalid("expected quoted string literal"),
     }
+}
+
+fn string_or_identifier(token: Option<&Token>, label: &str) -> Result<String> {
+    string_literal(token).or_else(|_| identifier(token, label))
 }
 
 fn expect_token(token: Option<&Token>, expected: Token, label: &str) -> Result<()> {
@@ -1389,7 +1434,6 @@ mod tests {
                 "CREATE MODEL generator TYPE TEXT_GENERATION FROM 'model.gguf' USING LLAMA_CPP",
                 "未排期",
             ),
-            ("SUBMIT QUERY q AS SELECT 1", "v0.2"),
             ("CREATE AGGREGATE FUNCTION f", "未排期"),
             ("CREATE TABLE FUNCTION f", "未排期"),
         ];
@@ -1398,5 +1442,33 @@ mod tests {
             assert_eq!(error.code, ErrorCode::FeatureNotAvailable, "{sql}");
             assert_eq!(error.target_version.as_deref(), Some(target), "{sql}");
         }
+    }
+
+    #[test]
+    fn parses_persistent_query_control_statements() {
+        assert_eq!(
+            parse_statement("SUBMIT QUERY people AS INSERT INTO sink SELECT * FROM camera")
+                .unwrap(),
+            VqlStatement::SubmitQuery {
+                name: "people".to_owned(),
+                sql: "INSERT INTO sink SELECT * FROM camera".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse_statement("SHOW QUERIES").unwrap(),
+            VqlStatement::ShowQueries
+        );
+        assert_eq!(
+            parse_statement("DESCRIBE QUERY 'query-id'").unwrap(),
+            VqlStatement::DescribeQuery {
+                query_id: "query-id".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse_statement("STOP QUERY 'query-id'").unwrap(),
+            VqlStatement::StopQuery {
+                query_id: "query-id".to_owned(),
+            }
+        );
     }
 }

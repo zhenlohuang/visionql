@@ -20,7 +20,7 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::RtspTableConfig;
@@ -32,7 +32,7 @@ use crate::media::{FrameBufferLease, MediaRuntime};
 use crate::resources::{QueryBudget, QueryReservation};
 #[cfg(feature = "ffmpeg-native")]
 use crate::types::{ImageRef, ImageRefBuilder};
-use crate::{ErrorCode, Result, VqlError};
+use crate::{ErrorCode, QueryProgress, Result, SourceHealth, VqlError};
 
 #[cfg(feature = "ffmpeg-native")]
 const EPOCH_DURATION_MS: i64 = 200;
@@ -216,6 +216,7 @@ pub(crate) fn start_rtsp_source(
     fail_on_error: Arc<AtomicBool>,
     cancellation: CancellationToken,
     budget: QueryBudget,
+    progress: Option<watch::Sender<QueryProgress>>,
 ) -> Result<RtspEpochReceiver> {
     if !media.rtsp_available() {
         return Err(VqlError::new(
@@ -236,6 +237,7 @@ pub(crate) fn start_rtsp_source(
                 sender,
                 worker_cancel,
                 budget,
+                progress,
             )
         })
         .map_err(|error| {
@@ -489,6 +491,7 @@ fn run_source_worker(
     sender: mpsc::Sender<Result<StreamEpoch>>,
     cancellation: CancellationToken,
     budget: QueryBudget,
+    progress: Option<watch::Sender<QueryProgress>>,
 ) {
     #[cfg(feature = "ffmpeg-native")]
     {
@@ -499,13 +502,21 @@ fn run_source_worker(
             &sender,
             &cancellation,
             budget,
+            progress,
         ) {
             send_error(&sender, error);
         }
     }
     #[cfg(not(feature = "ffmpeg-native"))]
     {
-        let _ = (definition, media, fail_on_error, cancellation, budget);
+        let _ = (
+            definition,
+            media,
+            fail_on_error,
+            cancellation,
+            budget,
+            progress,
+        );
         send_error(
             &sender,
             VqlError::new(
@@ -524,6 +535,7 @@ fn run_native_source(
     sender: &mpsc::Sender<Result<StreamEpoch>>,
     cancellation: &CancellationToken,
     budget: QueryBudget,
+    progress: Option<watch::Sender<QueryProgress>>,
 ) -> Result<()> {
     use ffmpeg::format::Pixel;
     use ffmpeg::media::Type;
@@ -553,6 +565,7 @@ fn run_native_source(
         let mut input = match ffmpeg::format::input_with_dictionary(&definition.endpoint, options) {
             Ok(input) => input,
             Err(error) => {
+                update_progress(&progress, SourceHealth::Reconnecting, None);
                 tracing::warn!(
                     stream = %definition.name,
                     error = %error,
@@ -565,6 +578,7 @@ fn run_native_source(
                 continue;
             }
         };
+        update_progress(&progress, SourceHealth::Connected, None);
         let (stream_index, time_base, mut decoder) = {
             let stream = input.streams().best(Type::Video).ok_or_else(|| {
                 VqlError::new(ErrorCode::Execution, "RTSP source has no video stream")
@@ -629,6 +643,7 @@ fn run_native_source(
                         };
                     builder.push(event_time_ms, frame_id, frame);
                     frame_id = frame_id.saturating_add(1);
+                    update_progress(&progress, SourceHealth::Connected, Some(event_time_ms));
                 }
                 if builder.should_close(event_time_ms) {
                     if sender.capacity() == 0 {
@@ -656,12 +671,33 @@ fn run_native_source(
             decode_error = disconnected,
             "RTSP source disconnected; retrying"
         );
+        update_progress(&progress, SourceHealth::Reconnecting, None);
         if !sleep_with_cancel(backoff_seconds, cancellation) {
             break;
         }
         backoff_seconds = (backoff_seconds * 2).min(30);
     }
     Ok(())
+}
+
+#[cfg(feature = "ffmpeg-native")]
+fn update_progress(
+    sender: &Option<watch::Sender<QueryProgress>>,
+    source_health: SourceHealth,
+    last_event_time: Option<i64>,
+) {
+    if let Some(sender) = sender {
+        sender.send_modify(|progress| {
+            progress.source_health = Some(source_health);
+            if let Some(last_event_time) = last_event_time {
+                progress.last_event_time = Some(
+                    progress
+                        .last_event_time
+                        .map_or(last_event_time, |current| current.max(last_event_time)),
+                );
+            }
+        });
+    }
 }
 
 #[cfg(feature = "ffmpeg-native")]
@@ -995,6 +1031,7 @@ mod tests {
         assert!(crate::test_util::generate_test_video(&video));
         let media = Arc::new(MediaRuntime::new());
         let cancellation = CancellationToken::new();
+        let (progress_sender, progress) = watch::channel(QueryProgress::default());
         let definition = RtspTableConfig {
             name: "test".to_owned(),
             endpoint: video.to_string_lossy().into_owned(),
@@ -1009,6 +1046,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             cancellation.clone(),
             query_budget(16 * 1024 * 1024),
+            Some(progress_sender),
         )
         .unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1024,6 +1062,11 @@ mod tests {
         assert!(!epoch.batches.is_empty());
         assert!(epoch.batches[0].num_rows() > 0);
         assert!(epoch.watermark_ms.is_some());
+        assert_eq!(
+            progress.borrow().source_health,
+            Some(SourceHealth::Connected)
+        );
+        assert!(progress.borrow().last_event_time.is_some());
         let images = epoch.batches[0]
             .column(1)
             .as_any()

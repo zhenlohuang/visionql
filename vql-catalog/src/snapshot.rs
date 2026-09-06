@@ -76,4 +76,17 @@ impl DefinitionSnapshot {
     pub fn function(&self, name: &str) -> Option<&SnapshotObject<FunctionDef>> {
         self.functions.get(&name.to_ascii_lowercase())
     }
+
+    /// Return the opaque generations that fully identify this snapshot.
+    pub fn generations(&self) -> Vec<i64> {
+        let mut generations = self
+            .tables
+            .values()
+            .map(|value| value.generation)
+            .chain(self.models.values().map(|value| value.generation))
+            .chain(self.functions.values().map(|value| value.generation))
+            .collect::<Vec<_>>();
+        generations.sort_unstable();
+        generations
+    }
 }

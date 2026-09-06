@@ -2,6 +2,7 @@
 
 mod error;
 mod objects;
+mod query;
 mod snapshot;
 mod store;
 pub mod uc;
@@ -15,6 +16,7 @@ pub use objects::{
     TableDef, TableProvider, TableProviderKind, decode_schema, encode_schema, image_field,
     image_storage_fields, images_schema, provider_schema, rtsp_schema, videos_schema,
 };
+pub use query::{CreateQuery, PersistentQuery, QueryDefinition, QueryState, QueryStatus};
 pub use snapshot::{DefinitionSnapshot, SnapshotObject, SnapshotTable};
 pub use store::{CatalogBackend, CatalogStore};
 

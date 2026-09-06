@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -18,6 +19,7 @@ use crate::catalog::{
 use crate::connectors::images::{ImagesTableProvider, images_schema};
 use crate::connectors::rtsp::{rtsp_schema, start_rtsp_source};
 use crate::connectors::videos::{VideosTableProvider, videos_schema};
+use crate::engine::EngineRuntime;
 use crate::functions::{VqlFunctionFactory, materialize_batch_images};
 use crate::media::MediaRuntime;
 use crate::models::{canonical_model_options, semantic_fingerprint};
@@ -38,6 +40,7 @@ use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
 pub struct SessionBuilder {
     engine: Engine,
     python_udf_host: Option<PythonUdfHostRef>,
+    service_mode: bool,
 }
 
 impl SessionBuilder {
@@ -45,11 +48,17 @@ impl SessionBuilder {
         Self {
             engine,
             python_udf_host: None,
+            service_mode: false,
         }
     }
 
     pub fn with_python_udf_host(mut self, host: PythonUdfHostRef) -> Self {
         self.python_udf_host = Some(host);
+        self
+    }
+
+    pub fn for_service(mut self) -> Self {
+        self.service_mode = true;
         self
     }
 
@@ -63,6 +72,7 @@ impl SessionBuilder {
             active_query: Arc::new(Mutex::new(None)),
             fail_on_error: Arc::new(AtomicBool::new(false)),
             python_udf_host: self.python_udf_host,
+            service_mode: self.service_mode,
             memory_pool,
         })
     }
@@ -74,6 +84,7 @@ pub struct Session {
     active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     fail_on_error: Arc<AtomicBool>,
     python_udf_host: Option<PythonUdfHostRef>,
+    service_mode: bool,
     memory_pool: Arc<SessionMemoryPool>,
 }
 
@@ -82,6 +93,157 @@ pub enum QueryInterruptAction {
     NoActiveQuery,
     GracefulStopRequested,
     ImmediateCancellationRequested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementKind {
+    Query,
+    Update,
+    PersistentSubmission,
+}
+
+impl StatementKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Update => "update",
+            Self::PersistentSubmission => "persistent_submission",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryMode {
+    Bounded,
+    Unbounded,
+    NotApplicable,
+}
+
+impl QueryMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bounded => "bounded",
+            Self::Unbounded => "unbounded",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultMode {
+    Bounded,
+    Unbounded,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceHealth {
+    Connected,
+    Reconnecting,
+}
+
+impl SourceHealth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryProgress {
+    pub source_health: Option<SourceHealth>,
+    pub last_event_time: Option<i64>,
+}
+
+impl ResultMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bounded => "bounded",
+            Self::Unbounded => "unbounded",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatementInfo {
+    pub kind: StatementKind,
+    pub query_mode: QueryMode,
+    pub result_mode: ResultMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistentCommand {
+    Submit { name: String, sql: String },
+    Show,
+    Describe { query_id: String },
+    Stop { query_id: String },
+}
+
+#[derive(Debug, Clone)]
+enum PreparedOperation {
+    Query {
+        sql: String,
+        snapshot: crate::catalog::DefinitionSnapshot,
+        insert: bool,
+    },
+    Explain {
+        sql: String,
+        snapshot: crate::catalog::DefinitionSnapshot,
+    },
+    CatalogQuery {
+        command: CatalogQuery,
+        snapshot: crate::catalog::DefinitionSnapshot,
+    },
+    Update {
+        sql: String,
+    },
+    Persistent(PersistentCommand),
+}
+
+#[derive(Debug, Clone)]
+enum CatalogQuery {
+    Show(ShowKind),
+    ShowModelVersions { name: String },
+    ShowCreate { kind: ShowKind, name: String },
+    Describe { kind: ShowKind, name: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedStatement {
+    session: Session,
+    principal: String,
+    session_settings: BTreeMap<String, String>,
+    info: StatementInfo,
+    result_schema: SchemaRef,
+    definition_generations: Vec<i64>,
+    operation: PreparedOperation,
+    execution_profile: ExecutionProfile,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ExecutionProfile {
+    uses_inference: bool,
+    uses_source: bool,
+    uses_sink: bool,
+}
+
+impl ExecutionProfile {
+    fn from_handle(handle: &QueryHandle) -> Self {
+        Self {
+            uses_inference: handle.uses_inference(),
+            uses_source: handle.uses_source(),
+            uses_sink: handle.uses_sink(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PreparedResult {
+    Query(Box<QueryHandle>),
+    Batches(Vec<RecordBatch>),
 }
 
 #[derive(Debug, Clone)]
@@ -176,10 +338,98 @@ impl DdlResult {
     }
 }
 
+impl PreparedStatement {
+    pub const fn statement_info(&self) -> StatementInfo {
+        self.info
+    }
+
+    pub fn result_schema(&self) -> SchemaRef {
+        Arc::clone(&self.result_schema)
+    }
+
+    pub fn definition_generations(&self) -> &[i64] {
+        &self.definition_generations
+    }
+
+    pub fn principal(&self) -> &str {
+        &self.principal
+    }
+
+    pub fn session_settings(&self) -> &BTreeMap<String, String> {
+        &self.session_settings
+    }
+
+    pub fn persistent_command(&self) -> Option<&PersistentCommand> {
+        match &self.operation {
+            PreparedOperation::Persistent(command) => Some(command),
+            _ => None,
+        }
+    }
+
+    pub const fn uses_inference(&self) -> bool {
+        self.execution_profile.uses_inference
+    }
+
+    pub const fn uses_source(&self) -> bool {
+        self.execution_profile.uses_source
+    }
+
+    pub const fn uses_sink(&self) -> bool {
+        self.execution_profile.uses_sink
+    }
+
+    pub fn execute_query(&self) -> Result<PreparedResult> {
+        match &self.operation {
+            PreparedOperation::Query {
+                sql,
+                snapshot,
+                insert,
+            } => {
+                let session = self.session.execution_session(&self.session_settings)?;
+                let query = if *insert {
+                    session.insert_into_table_with_snapshot(sql, snapshot.clone())?
+                } else {
+                    session.query_with_snapshot(sql, snapshot.clone())?
+                };
+                Ok(PreparedResult::Query(Box::new(query)))
+            }
+            PreparedOperation::Explain { sql, snapshot } => self
+                .session
+                .execution_session(&self.session_settings)?
+                .explain_with_snapshot(sql, snapshot.clone())
+                .map(|query| PreparedResult::Query(Box::new(query))),
+            PreparedOperation::CatalogQuery { command, snapshot } => self
+                .session
+                .execute_catalog_query(command, snapshot)
+                .map(|result| PreparedResult::Batches(result.batches)),
+            PreparedOperation::Update { .. } => Err(VqlError::new(
+                ErrorCode::InvalidArgument,
+                "prepared update must be executed with execute_update",
+            )),
+            PreparedOperation::Persistent(_) => Err(VqlError::new(
+                ErrorCode::InvalidArgument,
+                "persistent Query commands must be executed by a service host",
+            )),
+        }
+    }
+
+    pub fn execute_update(&self) -> Result<i64> {
+        let PreparedOperation::Update { sql } = &self.operation else {
+            return Err(VqlError::new(
+                ErrorCode::InvalidArgument,
+                "prepared query must be executed with execute_query",
+            ));
+        };
+        let statement = self.session.sql(sql)?;
+        statement.collect()?;
+        Ok(0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryHandle {
     dataframe: DataFrame,
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<EngineRuntime>,
     cancellation: CancellationToken,
     graceful_stop: CancellationToken,
     active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
@@ -192,6 +442,10 @@ pub struct QueryHandle {
     fail_on_error: Arc<AtomicBool>,
     streaming: Option<StreamingQuery>,
     sink_target: Option<SinkTarget>,
+    progress: tokio::sync::watch::Sender<QueryProgress>,
+    uses_inference: bool,
+    uses_source: bool,
+    uses_sink: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +460,7 @@ struct StreamingQuery {
 
 #[derive(Debug, Clone)]
 struct QueryResources {
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<EngineRuntime>,
     active_query: Arc<Mutex<Option<ActiveQueryControl>>>,
     media: Arc<MediaRuntime>,
     catalog: Arc<crate::catalog::CatalogStore>,
@@ -226,11 +480,11 @@ impl Drop for ActiveQueryGuard {
 
 struct SinkCloseGuard {
     target: Option<SinkTarget>,
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<EngineRuntime>,
 }
 
 impl SinkCloseGuard {
-    fn new(target: SinkTarget, runtime: Arc<tokio::runtime::Runtime>) -> Self {
+    fn new(target: SinkTarget, runtime: Arc<EngineRuntime>) -> Self {
         Self {
             target: Some(target),
             runtime,
@@ -261,8 +515,11 @@ impl QueryHandle {
         cancellation: CancellationToken,
         resources: QueryResources,
         streaming: Option<StreamingQuery>,
+        uses_inference: bool,
+        uses_source: bool,
     ) -> Self {
         let output_schema = restamp_schema(dataframe.schema().inner());
+        let (progress, _) = tokio::sync::watch::channel(QueryProgress::default());
         Self {
             dataframe,
             runtime: resources.runtime,
@@ -278,6 +535,10 @@ impl QueryHandle {
             fail_on_error: resources.fail_on_error,
             streaming,
             sink_target: None,
+            progress,
+            uses_inference,
+            uses_source,
+            uses_sink: false,
         }
     }
 
@@ -285,8 +546,47 @@ impl QueryHandle {
         Arc::clone(&self.output_schema)
     }
 
+    pub fn subscribe_progress(&self) -> tokio::sync::watch::Receiver<QueryProgress> {
+        self.progress.subscribe()
+    }
+
     pub fn stream(&self) -> Result<SendableRecordBatchStream> {
         self.stream_with_output_budget(true)
+    }
+
+    /// Stream rows with every projected IMAGE materialized as encoded JPEG bytes.
+    ///
+    /// Network hosts use this boundary before applying their transport-specific
+    /// thumbnail and metadata sanitization policy.
+    pub fn stream_materialized_images(&self) -> Result<SendableRecordBatchStream> {
+        let input = self.stream_with_output_budget(false)?;
+        let schema = Arc::clone(&self.output_schema);
+        let stream_schema = Arc::clone(&schema);
+        let catalog = Arc::clone(&self.catalog);
+        let media = Arc::clone(&self.media);
+        let fail_on_error = Arc::clone(&self.fail_on_error);
+        let budget = self.budget.clone();
+        let stream = async_stream::try_stream! {
+            let mut input = input;
+            while let Some(batch) = input.next().await {
+                let materialized = materialize_batch_images(
+                    Arc::clone(&catalog),
+                    Arc::clone(&media),
+                    batch?,
+                    fail_on_error.load(Ordering::Relaxed),
+                    budget.clone(),
+                )
+                .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+                yield RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    materialized.batch.columns().to_vec(),
+                )?;
+            }
+        };
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            stream_schema,
+            stream,
+        )))
     }
 
     fn stream_with_output_budget(&self, reserve_output: bool) -> Result<SendableRecordBatchStream> {
@@ -379,6 +679,7 @@ impl QueryHandle {
             Arc::clone(&self.fail_on_error),
             self.graceful_stop.clone(),
             self.budget.clone(),
+            Some(self.progress.clone()),
         )?;
         let stream_name = streaming.name;
         let mut skip_remaining = streaming.skip;
@@ -559,6 +860,24 @@ impl QueryHandle {
             .is_some_and(|streaming| streaming.fetch.is_none())
     }
 
+    pub fn resets_window_state_on_restart(&self) -> bool {
+        self.streaming
+            .as_ref()
+            .is_some_and(|streaming| streaming.tumble.is_some())
+    }
+
+    pub const fn uses_inference(&self) -> bool {
+        self.uses_inference
+    }
+
+    pub const fn uses_source(&self) -> bool {
+        self.uses_source
+    }
+
+    pub const fn uses_sink(&self) -> bool {
+        self.uses_sink
+    }
+
     pub fn for_each_batch(
         &self,
         mut callback: impl FnMut(&RecordBatch) -> Result<()>,
@@ -617,7 +936,7 @@ fn keep_active_stream(
 fn close_sink_stream(
     input: SendableRecordBatchStream,
     target: SinkTarget,
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<EngineRuntime>,
     schema: SchemaRef,
 ) -> SendableRecordBatchStream {
     let stream_schema = Arc::clone(&schema);
@@ -689,6 +1008,234 @@ where
 }
 
 impl Session {
+    pub fn semantic_settings(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            "vql.on_error".to_owned(),
+            if self.fail_on_error.load(Ordering::Relaxed) {
+                "fail"
+            } else {
+                "null"
+            }
+            .to_owned(),
+        )])
+    }
+
+    pub fn prepare(
+        &self,
+        sql: &str,
+        principal: impl Into<String>,
+        session_settings: BTreeMap<String, String>,
+    ) -> Result<PreparedStatement> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        self.prepare_with_snapshot(sql, principal.into(), session_settings, snapshot)
+    }
+
+    pub fn prepare_pinned(
+        &self,
+        sql: &str,
+        principal: impl Into<String>,
+        session_settings: BTreeMap<String, String>,
+        definition_generations: &[i64],
+    ) -> Result<PreparedStatement> {
+        let snapshot = self
+            .engine
+            .inner
+            .catalog
+            .snapshot_at_generations(definition_generations)?;
+        self.prepare_with_snapshot(sql, principal.into(), session_settings, snapshot)
+    }
+
+    fn prepare_with_snapshot(
+        &self,
+        sql: &str,
+        principal: String,
+        session_settings: BTreeMap<String, String>,
+        snapshot: crate::catalog::DefinitionSnapshot,
+    ) -> Result<PreparedStatement> {
+        if principal.trim().is_empty() {
+            return Err(VqlError::new(
+                ErrorCode::InvalidArgument,
+                "statement principal cannot be empty",
+            ));
+        }
+        validate_semantic_settings(&session_settings)?;
+        let sql = normalize_statement_sql(sql)?;
+        let parsed = parse_statement(&sql)?;
+        let generations = snapshot.generations();
+        let prepared_session = self.execution_session(&session_settings)?;
+        let (info, result_schema, definition_generations, operation, execution_profile) =
+            match parsed {
+                VqlStatement::Query { sql: query_sql } => {
+                    let insert = query_sql
+                        .trim_start()
+                        .to_ascii_uppercase()
+                        .starts_with("INSERT");
+                    let handle = if insert {
+                        prepared_session
+                            .insert_into_table_with_snapshot(&query_sql, snapshot.clone())?
+                    } else {
+                        prepared_session.query_with_snapshot(&query_sql, snapshot.clone())?
+                    };
+                    let unbounded = handle.is_unbounded();
+                    let execution_profile = ExecutionProfile::from_handle(&handle);
+                    (
+                        StatementInfo {
+                            kind: StatementKind::Query,
+                            query_mode: if unbounded {
+                                QueryMode::Unbounded
+                            } else {
+                                QueryMode::Bounded
+                            },
+                            result_mode: if unbounded {
+                                ResultMode::Unbounded
+                            } else {
+                                ResultMode::Bounded
+                            },
+                        },
+                        handle.schema(),
+                        generations,
+                        PreparedOperation::Query {
+                            sql: query_sql,
+                            snapshot,
+                            insert,
+                        },
+                        execution_profile,
+                    )
+                }
+                VqlStatement::Explain { sql } => {
+                    let handle = prepared_session.explain_with_snapshot(&sql, snapshot.clone())?;
+                    let execution_profile = ExecutionProfile::from_handle(&handle);
+                    (
+                        StatementInfo {
+                            kind: StatementKind::Query,
+                            query_mode: QueryMode::Bounded,
+                            result_mode: ResultMode::Bounded,
+                        },
+                        handle.schema(),
+                        generations,
+                        PreparedOperation::Explain { sql, snapshot },
+                        execution_profile,
+                    )
+                }
+                VqlStatement::SubmitQuery { name, sql } => {
+                    let handle =
+                        prepared_session.insert_into_table_with_snapshot(&sql, snapshot.clone())?;
+                    if !handle.is_unbounded() {
+                        return Err(VqlError::new(
+                            ErrorCode::InvalidSql,
+                            "SUBMIT QUERY accepts exactly one unbounded INSERT INTO <table> SELECT ...",
+                        ));
+                    }
+                    let execution_profile = ExecutionProfile::from_handle(&handle);
+                    (
+                        StatementInfo {
+                            kind: StatementKind::PersistentSubmission,
+                            query_mode: QueryMode::Unbounded,
+                            result_mode: ResultMode::Bounded,
+                        },
+                        persistent_submission_schema(),
+                        generations,
+                        PreparedOperation::Persistent(PersistentCommand::Submit { name, sql }),
+                        execution_profile,
+                    )
+                }
+                VqlStatement::ShowQueries => (
+                    query_management_info(),
+                    show_queries_schema(),
+                    Vec::new(),
+                    PreparedOperation::Persistent(PersistentCommand::Show),
+                    ExecutionProfile::default(),
+                ),
+                VqlStatement::DescribeQuery { query_id } => (
+                    query_management_info(),
+                    describe_query_schema(),
+                    Vec::new(),
+                    PreparedOperation::Persistent(PersistentCommand::Describe { query_id }),
+                    ExecutionProfile::default(),
+                ),
+                VqlStatement::StopQuery { query_id } => (
+                    query_management_info(),
+                    persistent_submission_schema(),
+                    Vec::new(),
+                    PreparedOperation::Persistent(PersistentCommand::Stop { query_id }),
+                    ExecutionProfile::default(),
+                ),
+                statement @ (VqlStatement::Show(_)
+                | VqlStatement::ShowModelVersions { .. }
+                | VqlStatement::ShowCreate { .. }
+                | VqlStatement::Describe { .. }) => {
+                    let command = match statement {
+                        VqlStatement::Show(kind) => CatalogQuery::Show(kind),
+                        VqlStatement::ShowModelVersions { name } => {
+                            CatalogQuery::ShowModelVersions { name }
+                        }
+                        VqlStatement::ShowCreate { kind, name } => {
+                            CatalogQuery::ShowCreate { kind, name }
+                        }
+                        VqlStatement::Describe { kind, name } => {
+                            CatalogQuery::Describe { kind, name }
+                        }
+                        _ => unreachable!("catalog query arm contains only catalog queries"),
+                    };
+                    let result_schema = catalog_query_schema(&command);
+                    (
+                        StatementInfo {
+                            kind: StatementKind::Query,
+                            query_mode: QueryMode::Bounded,
+                            result_mode: ResultMode::Bounded,
+                        },
+                        result_schema,
+                        generations,
+                        PreparedOperation::CatalogQuery { command, snapshot },
+                        ExecutionProfile::default(),
+                    )
+                }
+                VqlStatement::CreateTable(_)
+                | VqlStatement::CreateModel(_)
+                | VqlStatement::ResolveModel { .. }
+                | VqlStatement::AlterModel { .. }
+                | VqlStatement::CreateFunction { .. }
+                | VqlStatement::Drop { .. }
+                | VqlStatement::Set { .. } => (
+                    StatementInfo {
+                        kind: StatementKind::Update,
+                        query_mode: QueryMode::NotApplicable,
+                        result_mode: ResultMode::None,
+                    },
+                    Arc::new(Schema::empty()),
+                    generations,
+                    PreparedOperation::Update { sql: sql.clone() },
+                    ExecutionProfile::default(),
+                ),
+            };
+        Ok(PreparedStatement {
+            session: self.clone(),
+            principal,
+            session_settings,
+            info,
+            result_schema: statement_schema_with_metadata(&result_schema, info),
+            definition_generations,
+            operation,
+            execution_profile,
+        })
+    }
+
+    fn execution_session(&self, settings: &BTreeMap<String, String>) -> Result<Self> {
+        validate_semantic_settings(settings)?;
+        let fail_on_error = settings
+            .get("vql.on_error")
+            .map(|value| value == "fail")
+            .unwrap_or_else(|| self.fail_on_error.load(Ordering::Relaxed));
+        Ok(Self {
+            engine: self.engine.clone(),
+            active_query: Arc::new(Mutex::new(None)),
+            fail_on_error: Arc::new(AtomicBool::new(fail_on_error)),
+            python_udf_host: self.python_udf_host.clone(),
+            service_mode: self.service_mode,
+            memory_pool: Arc::clone(&self.memory_pool),
+        })
+    }
+
     pub fn sql(&self, sql: &str) -> Result<Statement> {
         match parse_statement(sql)? {
             VqlStatement::CreateTable(create) => self.create_table(create).map(Statement::Ddl),
@@ -709,6 +1256,13 @@ impl Session {
                 self.show_create(kind, &name).map(Statement::Ddl)
             }
             VqlStatement::Describe { kind, name } => self.describe(kind, &name).map(Statement::Ddl),
+            VqlStatement::SubmitQuery { .. }
+            | VqlStatement::ShowQueries
+            | VqlStatement::DescribeQuery { .. }
+            | VqlStatement::StopQuery { .. } => Err(VqlError::new(
+                ErrorCode::InvalidArgument,
+                "persistent Query statements require the vqld service host",
+            )),
             VqlStatement::Query { sql }
                 if sql.trim_start().to_ascii_uppercase().starts_with("INSERT") =>
             {
@@ -748,20 +1302,14 @@ impl Session {
 
     fn query(&self, sql: &str) -> Result<QueryHandle> {
         let snapshot = self.engine.inner.catalog.snapshot()?;
-        if self.python_udf_host.is_none() {
-            let upper = sql.to_ascii_uppercase();
-            if let Some((name, _)) = snapshot.functions().find(|(name, function)| {
-                matches!(
-                    function.definition.implementation,
-                    FunctionImplementation::Python { .. }
-                ) && upper.contains(&format!("{}(", name.to_ascii_uppercase()))
-            }) {
-                return Err(VqlError::new(
-                    ErrorCode::PythonHostRequired,
-                    format!("function '{name}' requires the VisionQL Python host"),
-                ));
-            }
-        }
+        self.query_with_snapshot(sql, snapshot)
+    }
+
+    fn query_with_snapshot(
+        &self,
+        sql: &str,
+        snapshot: crate::catalog::DefinitionSnapshot,
+    ) -> Result<QueryHandle> {
         let budget = QueryBudget::for_session(Arc::clone(&self.memory_pool));
         let context = context_for_snapshot(
             &snapshot,
@@ -781,6 +1329,13 @@ impl Session {
             Arc::clone(&self.fail_on_error),
             cancellation.clone(),
             budget.clone(),
+            self.python_udf_host
+                .is_none()
+                .then_some(if self.service_mode {
+                    ErrorCode::FeatureNotAvailable
+                } else {
+                    ErrorCode::PythonHostRequired
+                }),
         ))?;
         let streaming = planned.stream_name.as_ref().map(|name| {
             let table = snapshot
@@ -810,10 +1365,21 @@ impl Session {
                 budget,
             },
             streaming,
+            planned.uses_inference,
+            planned.uses_source,
         ))
     }
 
     fn explain(&self, sql: &str) -> Result<QueryHandle> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        self.explain_with_snapshot(sql, snapshot)
+    }
+
+    fn explain_with_snapshot(
+        &self,
+        sql: &str,
+        snapshot: crate::catalog::DefinitionSnapshot,
+    ) -> Result<QueryHandle> {
         let sql = sql.trim();
         let (keyword, target) = sql
             .split_at_checked("EXPLAIN".len())
@@ -836,7 +1402,7 @@ impl Session {
             ));
         }
         if !target.to_ascii_uppercase().starts_with("INSERT") {
-            return self.query(sql);
+            return self.query_with_snapshot(sql, snapshot);
         }
 
         let mut parts = target.splitn(4, char::is_whitespace);
@@ -856,8 +1422,7 @@ impl Session {
         let query = parts.next().ok_or_else(|| {
             VqlError::new(ErrorCode::InvalidSql, "INSERT INTO requires a SELECT query")
         })?;
-        let snapshot = self.engine.inner.catalog.snapshot()?;
-        let table = snapshot.table(table_name).ok_or_else(|| {
+        let table = snapshot.table(table_name).cloned().ok_or_else(|| {
             VqlError::new(
                 ErrorCode::NotFound,
                 format!("table '{table_name}' does not exist"),
@@ -869,7 +1434,7 @@ impl Session {
                 format!("table '{table_name}' is not writable"),
             ));
         };
-        let mut handle = self.query(&format!("EXPLAIN {query}"))?;
+        let mut handle = self.query_with_snapshot(&format!("EXPLAIN {query}"), snapshot)?;
         let (state, plan) = handle.dataframe.into_parts();
         let datafusion::logical_expr::LogicalPlan::Explain(mut explain) = plan else {
             return Err(VqlError::new(
@@ -1339,6 +1904,15 @@ impl Session {
     }
 
     fn insert_into_table(&self, sql: &str) -> Result<QueryHandle> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        self.insert_into_table_with_snapshot(sql, snapshot)
+    }
+
+    fn insert_into_table_with_snapshot(
+        &self,
+        sql: &str,
+        snapshot: crate::catalog::DefinitionSnapshot,
+    ) -> Result<QueryHandle> {
         let mut parts = sql
             .trim()
             .trim_end_matches(';')
@@ -1372,8 +1946,7 @@ impl Session {
                 "INSERT INTO writes require SELECT or WITH",
             ));
         }
-        let snapshot = self.engine.inner.catalog.snapshot()?;
-        let table = snapshot.table(table_name).ok_or_else(|| {
+        let table = snapshot.table(table_name).cloned().ok_or_else(|| {
             VqlError::new(
                 ErrorCode::NotFound,
                 format!("table '{table_name}' does not exist"),
@@ -1385,7 +1958,7 @@ impl Session {
                 format!("table '{table_name}' is not writable"),
             ));
         };
-        let mut handle = self.query(query)?;
+        let mut handle = self.query_with_snapshot(query, snapshot)?;
         if !table.schema.fields().is_empty()
             && !schemas_are_write_compatible(&table.schema, &handle.output_schema)
         {
@@ -1416,6 +1989,7 @@ impl Session {
             handle.dataframe = wrap_sink(handle.dataframe, target.clone());
         }
         handle.sink_target = Some(target);
+        handle.uses_sink = true;
         Ok(handle)
     }
 
@@ -1447,17 +2021,35 @@ impl Session {
     }
 
     fn show_objects(&self, kind: ShowKind) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        self.show_objects_with_snapshot(kind, &snapshot)
+    }
+
+    fn show_objects_with_snapshot(
+        &self,
+        kind: ShowKind,
+        snapshot: &crate::catalog::DefinitionSnapshot,
+    ) -> Result<DdlResult> {
         if kind == ShowKind::Tables {
-            return self.show_tables();
+            return self.show_tables(snapshot);
         }
         if kind == ShowKind::Models {
-            return self.show_models();
+            return self.show_models(snapshot);
         }
-        self.show_functions()
+        self.show_functions(snapshot)
     }
 
     fn show_create(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
         let snapshot = self.engine.inner.catalog.snapshot()?;
+        self.show_create_with_snapshot(kind, name, &snapshot)
+    }
+
+    fn show_create_with_snapshot(
+        &self,
+        kind: ShowKind,
+        name: &str,
+        snapshot: &crate::catalog::DefinitionSnapshot,
+    ) -> Result<DdlResult> {
         let (object_type, create_sql) = match kind {
             ShowKind::Tables => (
                 "TABLE",
@@ -1518,8 +2110,7 @@ impl Session {
         }
     }
 
-    fn show_tables(&self) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
+    fn show_tables(&self, snapshot: &crate::catalog::DefinitionSnapshot) -> Result<DdlResult> {
         let mut names = Vec::new();
         let mut providers = Vec::new();
         let mut locations = Vec::new();
@@ -1535,11 +2126,7 @@ impl Session {
                     .to_owned(),
             );
         }
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("table_name", DataType::Utf8, false),
-            Field::new("provider", DataType::Utf8, false),
-            Field::new("location", DataType::Utf8, false),
-        ]));
+        let schema = show_tables_schema();
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -1557,18 +2144,9 @@ impl Session {
         })
     }
 
-    fn show_models(&self) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
+    fn show_models(&self, snapshot: &crate::catalog::DefinitionSnapshot) -> Result<DdlResult> {
         let models = snapshot.models().collect::<Vec<_>>();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("catalog", DataType::Utf8, false),
-            Field::new("schema", DataType::Utf8, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("interface", DataType::Utf8, false),
-            Field::new("versions", DataType::Int64, false),
-            Field::new("default_version", DataType::Utf8, true),
-            Field::new("comment", DataType::Utf8, true),
-        ]));
+        let schema = show_models_schema();
         let addresses = models
             .iter()
             .map(|(name, _)| object_address(name))
@@ -1632,6 +2210,14 @@ impl Session {
 
     fn show_model_versions(&self, name: &str) -> Result<DdlResult> {
         let snapshot = self.engine.inner.catalog.snapshot()?;
+        self.show_model_versions_with_snapshot(name, &snapshot)
+    }
+
+    fn show_model_versions_with_snapshot(
+        &self,
+        name: &str,
+        snapshot: &crate::catalog::DefinitionSnapshot,
+    ) -> Result<DdlResult> {
         let model = snapshot.model(name).ok_or_else(|| {
             VqlError::new(
                 ErrorCode::NotFound,
@@ -1640,17 +2226,7 @@ impl Session {
         })?;
         let (catalog, schema_name, object_name) = object_address(name);
         let versions = &model.definition.versions;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("catalog", DataType::Utf8, false),
-            Field::new("schema", DataType::Utf8, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("version", DataType::Utf8, false),
-            Field::new("status", DataType::Utf8, false),
-            Field::new("volatility", DataType::Utf8, false),
-            Field::new("fingerprint", DataType::Utf8, true),
-            Field::new("created_at", DataType::Int64, false),
-            Field::new("is_default", DataType::Boolean, false),
-        ]));
+        let schema = show_model_versions_schema();
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -1731,8 +2307,7 @@ impl Session {
         })
     }
 
-    fn show_functions(&self) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
+    fn show_functions(&self, snapshot: &crate::catalog::DefinitionSnapshot) -> Result<DdlResult> {
         let mut rows = snapshot
             .functions()
             .map(|(name, function)| {
@@ -1761,14 +2336,7 @@ impl Session {
         rows.sort_by(|left, right| {
             (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2))
         });
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("catalog", DataType::Utf8, false),
-            Field::new("schema", DataType::Utf8, false),
-            Field::new("name", DataType::Utf8, false),
-            Field::new("kind", DataType::Utf8, false),
-            Field::new("arguments", DataType::Utf8, false),
-            Field::new("return_type", DataType::Utf8, false),
-        ]));
+        let schema = show_functions_schema();
         let batch = RecordBatch::try_new(
             schema,
             (0..6)
@@ -1795,13 +2363,22 @@ impl Session {
     }
 
     fn describe(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
+        let snapshot = self.engine.inner.catalog.snapshot()?;
+        self.describe_with_snapshot(kind, name, &snapshot)
+    }
+
+    fn describe_with_snapshot(
+        &self,
+        kind: ShowKind,
+        name: &str,
+        snapshot: &crate::catalog::DefinitionSnapshot,
+    ) -> Result<DdlResult> {
         if kind == ShowKind::Models {
-            return self.describe_model(name);
+            return self.describe_model(name, snapshot);
         }
         if kind == ShowKind::Functions {
-            return self.describe_function(name);
+            return self.describe_function(name, snapshot);
         }
-        let snapshot = self.engine.inner.catalog.snapshot()?;
         let relation_schema = snapshot
             .table(name)
             .map(|table| Arc::clone(&table.schema))
@@ -1812,11 +2389,7 @@ impl Session {
                 )
             })?;
         let fields = relation_schema.fields();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("column_name", DataType::Utf8, false),
-            Field::new("data_type", DataType::Utf8, false),
-            Field::new("nullable", DataType::Utf8, false),
-        ]));
+        let schema = describe_table_schema();
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -1849,8 +2422,11 @@ impl Session {
         })
     }
 
-    fn describe_model(&self, name: &str) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
+    fn describe_model(
+        &self,
+        name: &str,
+        snapshot: &crate::catalog::DefinitionSnapshot,
+    ) -> Result<DdlResult> {
         let model = snapshot.model(name).ok_or_else(|| {
             VqlError::new(
                 ErrorCode::NotFound,
@@ -1872,8 +2448,11 @@ impl Session {
         )
     }
 
-    fn describe_function(&self, name: &str) -> Result<DdlResult> {
-        let snapshot = self.engine.inner.catalog.snapshot()?;
+    fn describe_function(
+        &self,
+        name: &str,
+        snapshot: &crate::catalog::DefinitionSnapshot,
+    ) -> Result<DdlResult> {
         let function = snapshot.function(name).ok_or_else(|| {
             VqlError::new(
                 ErrorCode::NotFound,
@@ -1909,6 +2488,25 @@ impl Session {
             &status,
             None,
         )
+    }
+
+    fn execute_catalog_query(
+        &self,
+        command: &CatalogQuery,
+        snapshot: &crate::catalog::DefinitionSnapshot,
+    ) -> Result<DdlResult> {
+        match command {
+            CatalogQuery::Show(kind) => self.show_objects_with_snapshot(*kind, snapshot),
+            CatalogQuery::ShowModelVersions { name } => {
+                self.show_model_versions_with_snapshot(name, snapshot)
+            }
+            CatalogQuery::ShowCreate { kind, name } => {
+                self.show_create_with_snapshot(*kind, name, snapshot)
+            }
+            CatalogQuery::Describe { kind, name } => {
+                self.describe_with_snapshot(*kind, name, snapshot)
+            }
+        }
     }
 }
 
@@ -2244,16 +2842,7 @@ fn callable_description_result(
     default_version: Option<&str>,
 ) -> Result<DdlResult> {
     let (catalog, schema_name, object_name) = object_address(name);
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("catalog", DataType::Utf8, false),
-        Field::new("schema", DataType::Utf8, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("kind", DataType::Utf8, false),
-        Field::new("arguments", DataType::Utf8, false),
-        Field::new("return_type", DataType::Utf8, false),
-        Field::new("status", DataType::Utf8, false),
-        Field::new("default_version", DataType::Utf8, true),
-    ]));
+    let schema = describe_callable_schema();
     let batch = RecordBatch::try_new(
         schema,
         vec![
@@ -2386,12 +2975,201 @@ fn message_result(message: String) -> DdlResult {
     }
 }
 
-fn show_create_result(name: &str, object_type: &str, create_sql: String) -> Result<DdlResult> {
-    let schema = Arc::new(Schema::new(vec![
+fn normalize_statement_sql(sql: &str) -> Result<String> {
+    let normalized = sql.trim().trim_end_matches(';').trim();
+    if normalized.is_empty() {
+        return Err(VqlError::new(ErrorCode::InvalidSql, "expected a statement"));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn validate_semantic_settings(settings: &BTreeMap<String, String>) -> Result<()> {
+    for (name, value) in settings {
+        match (name.as_str(), value.as_str()) {
+            ("vql.on_error", "null" | "fail") => {}
+            ("vql.on_error", _) => {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    "vql.on_error accepts 'null' or 'fail'",
+                ));
+            }
+            _ => {
+                return Err(VqlError::new(
+                    ErrorCode::InvalidOption,
+                    format!("unknown semantic session setting '{name}'"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn statement_schema_with_metadata(schema: &SchemaRef, info: StatementInfo) -> SchemaRef {
+    let mut metadata = schema.metadata().clone();
+    metadata.insert("vql.statement_info.version".to_owned(), "1".to_owned());
+    metadata.insert(
+        "vql.statement_info.kind".to_owned(),
+        info.kind.as_str().to_owned(),
+    );
+    metadata.insert(
+        "vql.statement_info.query_mode".to_owned(),
+        info.query_mode.as_str().to_owned(),
+    );
+    metadata.insert(
+        "vql.statement_info.result_mode".to_owned(),
+        info.result_mode.as_str().to_owned(),
+    );
+    Arc::new(Schema::new_with_metadata(schema.fields().clone(), metadata))
+}
+
+fn query_management_info() -> StatementInfo {
+    StatementInfo {
+        kind: StatementKind::Query,
+        query_mode: QueryMode::Bounded,
+        result_mode: ResultMode::Bounded,
+    }
+}
+
+fn catalog_query_schema(command: &CatalogQuery) -> SchemaRef {
+    match command {
+        CatalogQuery::Show(ShowKind::Tables) => show_tables_schema(),
+        CatalogQuery::Show(ShowKind::Models) => show_models_schema(),
+        CatalogQuery::Show(ShowKind::Functions) => show_functions_schema(),
+        CatalogQuery::ShowModelVersions { .. } => show_model_versions_schema(),
+        CatalogQuery::ShowCreate { .. } => show_create_schema(),
+        CatalogQuery::Describe {
+            kind: ShowKind::Tables,
+            ..
+        } => describe_table_schema(),
+        CatalogQuery::Describe { .. } => describe_callable_schema(),
+    }
+}
+
+fn show_tables_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("table_name", DataType::Utf8, false),
+        Field::new("provider", DataType::Utf8, false),
+        Field::new("location", DataType::Utf8, false),
+    ]))
+}
+
+fn show_models_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("catalog", DataType::Utf8, false),
+        Field::new("schema", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("interface", DataType::Utf8, false),
+        Field::new("versions", DataType::Int64, false),
+        Field::new("default_version", DataType::Utf8, true),
+        Field::new("comment", DataType::Utf8, true),
+    ]))
+}
+
+fn show_functions_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("catalog", DataType::Utf8, false),
+        Field::new("schema", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("arguments", DataType::Utf8, false),
+        Field::new("return_type", DataType::Utf8, false),
+    ]))
+}
+
+fn show_model_versions_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("catalog", DataType::Utf8, false),
+        Field::new("schema", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("version", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
+        Field::new("volatility", DataType::Utf8, false),
+        Field::new("fingerprint", DataType::Utf8, true),
+        Field::new("created_at", DataType::Int64, false),
+        Field::new("is_default", DataType::Boolean, false),
+    ]))
+}
+
+fn show_create_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
         Field::new("object_name", DataType::Utf8, false),
         Field::new("object_type", DataType::Utf8, false),
         Field::new("create_sql", DataType::Utf8, false),
-    ]));
+    ]))
+}
+
+fn describe_table_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("column_name", DataType::Utf8, false),
+        Field::new("data_type", DataType::Utf8, false),
+        Field::new("nullable", DataType::Utf8, false),
+    ]))
+}
+
+fn describe_callable_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("catalog", DataType::Utf8, false),
+        Field::new("schema", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("arguments", DataType::Utf8, false),
+        Field::new("return_type", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
+        Field::new("default_version", DataType::Utf8, true),
+    ]))
+}
+
+fn persistent_submission_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("query_id", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("state", DataType::Utf8, false),
+    ]))
+}
+
+fn timestamp_field(name: &str, nullable: bool) -> Field {
+    Field::new(
+        name,
+        DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+        nullable,
+    )
+}
+
+fn show_queries_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("query_id", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("state", DataType::Utf8, false),
+        Field::new("source_health", DataType::Utf8, true),
+        timestamp_field("last_event_time", true),
+        timestamp_field("started_at", true),
+        timestamp_field("updated_at", false),
+        Field::new("restart_gap_count", DataType::Int64, false),
+        Field::new("error_code", DataType::Utf8, true),
+        Field::new("error_message", DataType::Utf8, true),
+    ]))
+}
+
+fn describe_query_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("query_id", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("state", DataType::Utf8, false),
+        Field::new("sql_redacted", DataType::Utf8, false),
+        timestamp_field("created_at", false),
+        timestamp_field("started_at", true),
+        timestamp_field("updated_at", false),
+        timestamp_field("last_restart_at", true),
+        timestamp_field("restart_gap_started_at", true),
+        timestamp_field("restart_gap_ended_at", true),
+        Field::new("last_restart_reset_window_state", DataType::Boolean, false),
+        Field::new("error_code", DataType::Utf8, true),
+        Field::new("error_message", DataType::Utf8, true),
+    ]))
+}
+
+fn show_create_result(name: &str, object_type: &str, create_sql: String) -> Result<DdlResult> {
+    let schema = show_create_schema();
     let batch = RecordBatch::try_new(
         schema,
         vec![
@@ -4161,6 +4939,61 @@ mod tests {
     }
 
     #[test]
+    fn service_mode_rejects_python_functions_before_execution() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        engine
+            .session()
+            .build()
+            .unwrap()
+            .sql("CREATE FUNCTION py_double(x BIGINT) RETURNS BIGINT LANGUAGE PYTHON AS 'ops:double'")
+            .unwrap();
+        let session = engine.session().for_service().build().unwrap();
+
+        let error = session
+            .prepare(
+                "SELECT py_double(1)",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
+        assert_eq!(error.target_version.as_deref(), Some("未排期"));
+    }
+
+    #[test]
+    fn service_mode_python_detection_uses_the_planned_function_call() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        engine
+            .session()
+            .build()
+            .unwrap()
+            .sql("CREATE FUNCTION py_double(x BIGINT) RETURNS BIGINT LANGUAGE PYTHON AS 'ops:double'")
+            .unwrap();
+        let session = engine.session().for_service().build().unwrap();
+
+        session
+            .prepare(
+                "SELECT 'py_double(' AS text",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap();
+        let error = session
+            .prepare(
+                "SELECT py_double (1)",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
+        assert!(error.message.contains("py_double"));
+    }
+
+    #[test]
     fn inference_row_failure_is_null_by_default_and_fails_in_strict_mode() {
         let temp = tempdir().unwrap();
         let photos = temp.path().join("photos");
@@ -4786,5 +5619,175 @@ mod tests {
                 assert_eq!(averages.value(row), 1.0);
             }
         }
+    }
+
+    #[test]
+    fn prepare_classifies_statements_and_defers_catalog_mutation() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        let table_sql = format!(
+            "CREATE TABLE photos USING IMAGES LOCATION '{}'",
+            temp.path().display()
+        );
+        let prepared = session
+            .prepare(&table_sql, "service", session.semantic_settings())
+            .unwrap();
+        assert_eq!(prepared.statement_info().kind, StatementKind::Update);
+        assert!(
+            engine
+                .catalog()
+                .snapshot()
+                .unwrap()
+                .table("photos")
+                .is_none()
+        );
+        prepared.execute_update().unwrap();
+        assert!(
+            engine
+                .catalog()
+                .snapshot()
+                .unwrap()
+                .table("photos")
+                .is_some()
+        );
+
+        let prepared = session
+            .prepare(
+                "SELECT 42 AS answer",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap();
+        assert_eq!(prepared.statement_info().query_mode, QueryMode::Bounded);
+        assert_eq!(
+            prepared
+                .result_schema()
+                .metadata()
+                .get("vql.statement_info.kind")
+                .map(String::as_str),
+            Some("query")
+        );
+        let PreparedResult::Query(query) = prepared.execute_query().unwrap() else {
+            panic!("SELECT must create a query handle")
+        };
+        assert_eq!(query.collect().unwrap()[0].num_rows(), 1);
+    }
+
+    #[test]
+    fn prepared_query_keeps_its_definition_snapshot_after_drop() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
+                temp.path().display()
+            ))
+            .unwrap();
+        let prepared = session
+            .prepare(
+                "SELECT uri FROM photos",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap();
+        let explained = session
+            .prepare(
+                "EXPLAIN SELECT uri FROM photos",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap();
+        let generations = prepared.definition_generations().to_vec();
+        session.sql("DROP TABLE photos").unwrap();
+
+        let PreparedResult::Query(query) = prepared.execute_query().unwrap() else {
+            panic!("SELECT must create a query handle")
+        };
+        assert_eq!(
+            query
+                .collect()
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            0
+        );
+        let PreparedResult::Query(explain) = explained.execute_query().unwrap() else {
+            panic!("EXPLAIN must create a query handle")
+        };
+        assert!(!explain.collect().unwrap().is_empty());
+        let pinned = session
+            .prepare_pinned(
+                "SELECT uri FROM photos",
+                "service",
+                session.semantic_settings(),
+                &generations,
+            )
+            .unwrap();
+        assert_eq!(pinned.definition_generations(), generations);
+    }
+
+    #[test]
+    fn prepared_catalog_query_defers_execution_and_uses_its_snapshot() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        let missing = session
+            .prepare(
+                "SHOW CREATE TABLE missing",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap();
+        assert_eq!(missing.result_schema().fields().len(), 3);
+        assert_eq!(
+            missing.execute_query().unwrap_err().code,
+            ErrorCode::NotFound
+        );
+
+        session
+            .sql(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}'",
+                temp.path().display()
+            ))
+            .unwrap();
+        let prepared = session
+            .prepare("SHOW TABLES", "service", session.semantic_settings())
+            .unwrap();
+        session.sql("DROP TABLE photos").unwrap();
+
+        let PreparedResult::Batches(batches) = prepared.execute_query().unwrap() else {
+            panic!("SHOW TABLES must produce bounded batches")
+        };
+        assert_eq!(batches[0].num_rows(), 1);
+    }
+
+    #[test]
+    fn prepared_execution_profile_tracks_sources_and_sinks() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(&format!(
+                "CREATE TABLE photos USING IMAGES LOCATION '{}';
+                 CREATE TABLE events (uri STRING) USING KAFKA OPTIONS (
+                   bootstrap_servers = '127.0.0.1:9092', topic = 'events');",
+                temp.path().display()
+            ))
+            .unwrap();
+
+        let prepared = session
+            .prepare(
+                "INSERT INTO events SELECT uri FROM photos",
+                "service",
+                session.semantic_settings(),
+            )
+            .unwrap();
+
+        assert!(prepared.uses_source());
+        assert!(prepared.uses_sink());
+        assert!(!prepared.uses_inference());
     }
 }

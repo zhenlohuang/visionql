@@ -2,6 +2,16 @@
 
 All notable changes to VisionQL are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Add the single-node `vqld` host with Arrow Flight SQL Sessions, direct and prepared statement execution, opaque execution tickets, exact cancellation, health endpoints, and aggregate metrics.
+- Add Catalog-backed persistent Queries through `SUBMIT QUERY`, `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY`, including atomic definition-generation pinning and compare-and-swap status transitions.
+- Recover active live-source Queries after daemon restart with the same Query identity, an explicit restart gap, and honest in-memory window-state reset reporting.
+- Convert process-local `IMAGE` values to bounded encoded thumbnails at the Flight boundary and reject unsupported service-hosted Python Functions explicitly.
+- Add owner tests and a real Flight SQL, RTSP, and Kafka system journey for attached execution, cancellation, client-independent delivery, and recovery.
+
 ## [0.1.0] - 2026-08-25
 
 VisionQL v0.1.0 is the first public release of the embedded batch and streaming engine for visual data.

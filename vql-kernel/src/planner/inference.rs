@@ -344,6 +344,14 @@ pub(crate) async fn extract_inference(
     .map_err(Into::into)
 }
 
+pub(crate) fn contains_inference(plan: &LogicalPlan) -> bool {
+    matches!(
+        plan,
+        LogicalPlan::Extension(extension)
+            if extension.node.as_any().downcast_ref::<InferenceNode>().is_some()
+    ) || plan.inputs().into_iter().any(contains_inference)
+}
+
 #[derive(Default)]
 struct ResolvedBuiltinModels {
     classifier: Option<ResolvedModelDef>,
