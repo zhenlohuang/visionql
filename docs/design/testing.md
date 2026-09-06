@@ -9,7 +9,7 @@ VisionQL tests prove a contract at the narrowest boundary that owns it. The defa
 | Layer | Location | Proves | Dependencies | Default gate |
 | --- | --- | --- | --- | --- |
 | Unit | Owning module | Pure logic, branches, validation, state transitions | In-memory values and fakes | Yes |
-| Owner contract | `<crate>/tests/` or owning module | Public crate/API schemas, errors, persistence, and process behavior | Temporary directories, generated fixtures, `mock://` | Yes |
+| Crate integration / owner contract | `<crate>/tests/` or owning module | Public crate/API schemas, errors, persistence, and process behavior | Temporary directories, generated fixtures, `mock://`, local listeners | Yes |
 | Kernel SQL contract | `vql-kernel/tests/slt/` | Stable embedded Engine SQL behavior | Generated images, empty directories, `mock://` | Yes |
 | Python API | `vql-python/tests/` | PyO3/PyArrow conversion, Python UDF hosting, and Python errors | Built extension and generated fixtures | Separate CI job |
 | System | `vql-testing/tests/` | Real ONNX/media execution and external-service boundaries | Downloaded artifacts, FFmpeg, Docker Compose | No |
@@ -42,7 +42,7 @@ Server tests own Flight SQL authentication and Session isolation, direct and pre
 
 ### `vql-testing`
 
-`vql-testing` contains only real-artifact and external-service integration tests. It has no library target and no unit tests. Each Cargo test target has a top-level `<target>.rs` entry point; target-private harness code and SQL resources live under the same-named `tests/<target>/` directory. Behavior that can be proved inside one product crate stays with that crate.
+`vql-testing` contains only system tests over real artifacts, external services, or shipped process boundaries. It has no library target and no unit tests. Each Cargo test target has a top-level `<target>.rs` entry point; target-private harness code and SQL resources live under the same-named `tests/<target>/` directory. Behavior that can be proved inside one product crate stays with that crate. A system target may depend on a product crate when that crate's public embedded API is the boundary under test, but a process-boundary target must use the shipped executable and public protocol rather than importing host internals.
 
 Its layout is:
 
@@ -61,10 +61,10 @@ vql-testing/
     ├── rtsp/                  # RTSP setup and query scripts
     ├── kafka.rs               # Kafka system-test runner
     ├── kafka/                 # Kafka setup and publish scripts
-    └── vqld.rs                # Flight SQL and persistent Query recovery runner
+    └── vqld.rs                # containerized Flight SQL and persistent Query recovery runner
 ```
 
-All dependencies are dev-dependencies, and the explicit `image`, `video`, `model`, `rtsp`, `kafka`, and `vqld` integration-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
+All dependencies are dev-dependencies, and the explicit `image`, `video`, `model`, `rtsp`, `kafka`, and `vqld` system-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
 
 ## Default gate
 
@@ -109,7 +109,7 @@ python scripts/export_yolo26.py --task classify --size n
 Run the real image, video, and Catalog Model targets without external services with:
 
 ```bash
-VQL_INTEGRATION_TEST=1 \
+VQL_SYSTEM_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
   --test image \
@@ -127,23 +127,23 @@ The targets prove these journeys:
 | `model` | `CREATE MODEL` → `RESOLVE MODEL` → direct call | A real Catalog Model resolves and produces a person detection |
 | `rtsp` | RTSP frames → `VQL_DETECT` → `TUMBLE` | Eight frames, positive detections, and two internally consistent closed windows |
 | `kafka` | `IMAGES` → `VQL_DETECT` → Kafka Sink | Broker acknowledgement and exact consumed JSON for the inferred semantic result |
-| `vqld` | Flight SQL, including `vql shell --endpoint`, → attached RTSP / persistent RTSP-to-Kafka Query → daemon restart | Direct and prepared statements, shell query/update routing, structured errors, exact execution cancellation, client-independent delivery, stable Query identity, live-source reconnect gap, window-state reset, and terminal stop |
+| `vqld` | Packaged `vql shell --endpoint` and Flight SQL → attached RTSP / persistent RTSP-to-Kafka Query → container restart | Image contents, TLS and credential wiring, query/update routing, structured errors, exact execution cancellation, client-independent delivery, Catalog-backed stable Query identity, live-source reconnect gap, window-state reset, and terminal stop |
 
-Each target creates an isolated temporary `VQL_HOME`. Task-shaped inference targets install only their required release-managed artifacts under that home. Real-model execution is serial within each target to bound CPU and model memory. Exact Arrow field names, types, and nullability remain kernel owner contracts rather than system assertions.
+Embedded targets create an isolated temporary `VQL_HOME`. The `vqld` target uses an isolated Compose project and named volume so `$VQL_HOME/catalog/vql.db` survives the tested container restart and is removed during teardown. Task-shaped inference targets install only their required release-managed artifacts under their home. Real-model execution is serial within each target to bound CPU and model memory. Exact Arrow field names, types, and nullability remain kernel owner contracts rather than system assertions.
 
-The root `docker-compose.yaml` exposes pinned optional `rtsp` and `kafka` profiles. Compose owns long-running services; the RTSP test owns its FFmpeg publisher and the Kafka test owns its topic and consumer group. Run every strict system target in an isolated Compose project with:
-
-```bash
-scripts/run-integration-tests.sh
-```
-
-Pass Cargo test filters through the wrapper to run one provisioned target, for example:
+The root `docker-compose.yaml` defines pinned `mediamtx`, `kafka`, and `vqld` services. Compose owns the long-running dependencies and packaged daemon; the RTSP test owns its FFmpeg publisher and the Kafka test owns its topic and consumer group. The `vqld` service mounts an ephemeral TLS certificate and a project-scoped named volume, exposes only authenticated TLS Flight SQL, and keeps HTTP health checks on the container loopback interface. Run every strict system target in an isolated Compose project with:
 
 ```bash
-scripts/run-integration-tests.sh --test vqld
+scripts/run-system-tests.sh
 ```
 
-The wrapper chooses free host ports, waits for both services, enables `system-tests`, sets `VQL_INTEGRATION_TEST=1`, emits service logs on failure, and always tears the project down. When a system target is invoked manually without strict mode, a missing prerequisite is reported as ignored. Strict mode turns every missing prerequisite into a failure.
+Pass Cargo test filters through the wrapper to run one target, for example:
+
+```bash
+scripts/run-system-tests.sh --test vqld
+```
+
+The wrapper provisions only the services required by selected targets: none for `image`, `video`, or `model`; MediaMTX for `rtsp`; Kafka for `kafka`; and MediaMTX, Kafka, and the locally built `vqld` image for `vqld`. It chooses free host ports, generates an ephemeral TLS certificate, waits for readiness, enables `system-tests`, sets `VQL_SYSTEM_TEST=1`, emits selected-service logs on failure, and always removes containers, named volumes, and temporary credentials. The `vqld` target uses separate host and Compose-network RTSP/Kafka addresses, invokes only public clients, and asks Compose to restart the daemon. When a system target is invoked manually without strict mode, a missing prerequisite is reported as ignored. Strict mode turns every missing prerequisite into a failure.
 
 ## Python API gate
 
@@ -200,6 +200,6 @@ Coverage work prioritizes public error branches, catalog transactions, planner r
 | Static analysis | Formatting, Compose configuration, workspace Clippy |
 | Rust tests and coverage | One deterministic default workspace run under coverage instrumentation |
 | Python API | Wheel build, Python API tests, Python source coverage |
-| System suite | Explicit local or release validation through `scripts/run-integration-tests.sh` |
+| System suite | Explicit local or release validation through `scripts/run-system-tests.sh` |
 
 System scenarios remain outside the default pull-request matrix because they require downloaded artifacts and provisioned services. Changes to media decoding, ONNX execution, RTSP, Kafka, or their system contracts must report the relevant explicit system run in the pull request.

@@ -65,7 +65,7 @@ cargo llvm-cov report --ignore-filename-regex '/vql-python/' --summary-only
 
 Open `target/llvm-cov/html/index.html` for file-level results. Coverage is informational rather than a merge threshold. Rust coverage includes the default unit, owner-contract, kernel SQL, and CLI process tests. Feature-gated system targets are excluded. Python source coverage is published separately because it cannot be meaningfully combined with Rust instrumentation.
 
-### Integration tests
+### Crate integration and system tests
 
 Kernel-owned SQL behavior runs with the rest of the kernel tests:
 
@@ -87,7 +87,7 @@ python scripts/export_yolo26.py --task classify --size n
 Then run the real-data/model targets that do not require external services:
 
 ```bash
-VQL_INTEGRATION_TEST=1 \
+VQL_SYSTEM_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
   --test image \
@@ -96,29 +96,29 @@ VQL_INTEGRATION_TEST=1 \
   --locked
 ```
 
-`vql-testing` has no library or unit-test target. Its dependencies are test-only, and every integration-test target requires `system-tests`, so the package contributes no target to the default Cargo test graph. Without strict mode, a manually selected system target reports missing prerequisites as ignored; `VQL_INTEGRATION_TEST=1` makes them fail.
+`vql-testing` has no library or unit-test target. Its dependencies are test-only, and every system-test target requires `system-tests`, so the package contributes no target to the default Cargo test graph. Without strict mode, a manually selected system target reports missing prerequisites as ignored; `VQL_SYSTEM_TEST=1` makes them fail. Deterministic integration and owner-contract tests remain under the crate that owns the behavior.
 
-Real cases are grouped by their primary boundary under `vql-testing/tests/{image,video,model,rtsp,kafka}`. Every target pairs a top-level Rust runner with same-named SQL resources, receives an isolated temporary catalog, and asserts stable semantic outcomes instead of model-specific score snapshots. Task-shaped scenarios use `VQL_CLASSIFY` or `VQL_DETECT`; the `model` target preserves the public Catalog Model resolve/direct-call journey. Read the [Testing Design](docs/design/testing.md) before adding a case.
+Real cases are grouped by their primary boundary under `vql-testing/tests/{image,video,model,rtsp,kafka,vqld}`. SQL-driven targets pair a top-level Rust runner with same-named resources and assert stable semantic outcomes instead of model-specific score snapshots. Task-shaped scenarios use `VQL_CLASSIFY` or `VQL_DETECT`; the `model` target preserves the public Catalog Model resolve/direct-call journey. The `vqld` target treats the locally built container as a black box and uses only the packaged CLI, public Flight SQL, and Compose lifecycle operations. Read the [Testing Design](docs/design/testing.md) before adding a case.
 
 If a change affects media decoding, ONNX preprocessing, batching, or postprocessing, run this suite and state in the pull request that it passed.
 
-### Real-model integration scenario
+### Real-model system scenario
 
 The image target exercises classification, detection, unknown-class filtering, and mixed-size ONNX batching through public SQL:
 
 ```bash
-VQL_INTEGRATION_TEST=1 \
+VQL_SYSTEM_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
   --test image \
   --locked
 ```
 
-The real RTSP scenario uses the `rtsp` profile in the root `docker-compose.yaml`. Run every strict
-integration case in an isolated Compose project with:
+The real RTSP, Kafka, and `vqld` scenarios use services in the root `docker-compose.yaml`. Run every
+strict system case in an isolated Compose project with:
 
 ```bash
-scripts/run-integration-tests.sh
+scripts/run-system-tests.sh
 ```
 
 ## Git hooks

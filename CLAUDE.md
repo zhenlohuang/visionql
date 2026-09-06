@@ -25,9 +25,9 @@ Tests:
 ```bash
 cargo test -p vql-kernel --test slt --locked                      # kernel-owned SQL contracts
 VQL_TEST_CASE=models/object_detection cargo test -p vql-kernel --test slt --locked # filter cases
-VQL_INTEGRATION_TEST=1 cargo test -p vql-testing --features system-tests --test image --test video --test model --locked # real artifacts
+VQL_SYSTEM_TEST=1 cargo test -p vql-testing --features system-tests --test image --test video --test model --locked # real artifacts
 cargo test -p vql-kernel session::tests::model_calls_are          # single Rust unit test by path
-scripts/run-integration-tests.sh                                  # strict suite with profiled Compose services
+scripts/run-system-tests.sh                                       # strict suite with target-selected Compose services
 ```
 
 Python (`vql-python` is a PyO3/Maturin extension, not a pure-Python package):
@@ -44,7 +44,7 @@ Toolchain is pinned to Rust 1.91.1 by `rust-toolchain.toml` (workspace MSRV is 1
 
 ## Architecture
 
-Five crates: `vql-catalog` (catalog domains, snapshots, backend ports, SQLite, Arrow storage schemas, and the UC-compatible API), `vql-kernel` (engine and owner tests), `vql-cli` (clap + reedline shell), `vql-python` (PyO3 bindings + Python UDF host), and `vql-testing` (integration-test targets only; no library or unit tests). The hosts only inject config and optional capabilities; `vql-kernel` never depends on clap or PyO3, never opens a port, and reads no global singletons.
+Six crates: `vql-catalog` (catalog domains, snapshots, backend ports, SQLite, Arrow storage schemas, and the UC-compatible API), `vql-kernel` (engine and owner tests), `vql-cli` (clap + reedline shell), `vql-python` (PyO3 bindings + Python UDF host), `vql-server` (`vqld` Flight SQL host), and `vql-testing` (system-test targets only; no library or unit tests). The hosts only inject config and optional capabilities; `vql-kernel` never depends on clap or PyO3, never opens a port, and reads no global singletons.
 
 `Engine` (`engine.rs`) owns four long-lived pieces shared by every session: the SQLite `CatalogStore`, a Tokio runtime, `MediaRuntime`, and `ModelRuntime`. `Session` is a cheap clone over the engine plus per-session state (`fail_on_error`, active-query cancellation token, optional Python UDF host).
 
@@ -110,7 +110,7 @@ The `slt` target and every `vql-testing` target set `harness = false` and run on
 
 Kernel SQL contracts use `sqllogictest-rs` through `vql-kernel/tests/slt.rs`. Cases are grouped by owner under `tests/slt/{ddl,connectors,functions,models}`, and every case gets a fresh Engine, catalog, and temporary `VQL_HOME`. Exact field names and nullability stay in `tests/result_schema.rs`; branch behavior such as invalid TUMBLE widths and connector projection stays beside its implementation. There is no synthetic `scenarios` layer.
 
-Each `vql-testing` target pairs a top-level entry point with same-named private SQL resources. `image`, `video`, `model`, `rtsp`, and `kafka` cover real media/model execution and external-service journeys; shared isolated-session helpers live under `tests/support/`. Task-shaped scenarios call `VQL_CLASSIFY` or `VQL_DETECT`, while the `model` target preserves the real Catalog Model resolve/direct-call contract. Every target requires the `system-tests` feature and runs serially where needed. Fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`. `VQL_INTEGRATION_TEST=1` turns a missing requirement into a failure. The root `docker-compose.yaml` provides optional external services through profiles (`rtsp`, `kafka`), and `scripts/run-integration-tests.sh` starts isolated dependencies and runs the strict suite. See `docs/design/testing.md`.
+Each `vql-testing` target pairs a top-level entry point with same-named private SQL resources where applicable. `image`, `video`, `model`, `rtsp`, and `kafka` cover real media/model execution and external-service journeys; `vqld` treats the locally built container as a black box and uses its packaged CLI, public Flight SQL, and Compose restart. Shared isolated-session helpers live under `tests/support/`. Task-shaped scenarios call `VQL_CLASSIFY` or `VQL_DETECT`, while the `model` target preserves the real Catalog Model resolve/direct-call contract. Every target requires the `system-tests` feature and runs serially where needed. Fixtures are gitignored and fetched by `scripts/fetch_datasets.py` and `scripts/export_yolo26.py`. `VQL_SYSTEM_TEST=1` turns a missing requirement into a failure. The root `docker-compose.yaml` defines the `mediamtx`, `kafka`, and `vqld` services, and `scripts/run-system-tests.sh` starts only selected dependencies and runs the strict suite. See `docs/design/testing.md`.
 
 `cargo test --workspace` executes the same deterministic tests on a fresh clone and a fixture-rich checkout. CI runs Rust coverage and a separate built-wheel Python API job; it does not run real external-service E2E.
 

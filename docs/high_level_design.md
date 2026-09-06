@@ -148,7 +148,7 @@ visionql/
 ├── vql-cli/                      # shell and script host
 ├── vql-python/                   # PyO3 and Python UDF host
 ├── vql-server/                   # Flight SQL, Sessions, persistent Query control, health
-├── vql-testing/                  # integration-test targets; no library
+├── vql-testing/                  # system-test targets; no library
 └── docs/
 ```
 

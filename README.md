@@ -53,7 +53,7 @@ The [PRD](docs/prd.md) covers target users, representative Physical AI workflows
 VisionQL v0.1.0 is currently distributed as source through the
 [GitHub release](https://github.com/zhenlohuang/visionql/releases/tag/v0.1.0). The Python package has
 not yet been published to PyPI. Build the repository from source for the Python API, standalone
-`vql` CLI, examples, and integration-test assets.
+`vql` CLI, examples, and system-test assets.
 
 ### Build from source
 
@@ -239,7 +239,7 @@ GROUP BY 1;
 
 The shell and `vql run` print unbounded results incrementally. During embedded execution, the first Ctrl-C stops source intake, drains admitted epochs, and flushes an attached table write; press Ctrl-C again while that shutdown is in progress to cancel immediately. A remote shell instead cancels the exact active Flight execution. An unbounded statement must be last in a `vql run` script so stopping it cannot start later SQL. `Projection`, `Filter`, `UNNEST`, scalar functions, typed inference, and one `TUMBLE` aggregate are accepted. Streaming windows support `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`; they close only after the watermark reaches the window end. `DISTINCT`, media-valued state, and unsupported unbounded plan shapes are rejected during planning. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
 
-Kafka output is a writable table declared with `CREATE TABLE ... USING KAFKA`. Authentication uses an opaque `credential_ref`; embedding hosts install a `SecretProvider` on `EngineConfig`, and resolved credentials never enter the Catalog or SQL text. `KafkaAuthentication` and `KafkaTlsConfig` are VisionQL-owned public types supporting TLS/mTLS, SASL/PLAIN, SCRAM-SHA-256/512, and static OAUTHBEARER tokens without exposing the internal Kafka client. The repository's local Compose profile uses plaintext Kafka and does not require a reference.
+Kafka output is a writable table declared with `CREATE TABLE ... USING KAFKA`. Authentication uses an opaque `credential_ref`; embedding hosts install a `SecretProvider` on `EngineConfig`, and resolved credentials never enter the Catalog or SQL text. `KafkaAuthentication` and `KafkaTlsConfig` are VisionQL-owned public types supporting TLS/mTLS, SASL/PLAIN, SCRAM-SHA-256/512, and static OAUTHBEARER tokens without exposing the internal Kafka client. The repository's local Compose service uses plaintext Kafka and does not require a reference.
 
 ## Python API
 
@@ -390,11 +390,11 @@ generates its fixtures and uses `mock://` models, so the default workspace suite
 downloaded data or models. Real data, models, RTSP, and Kafka remain in the feature-gated
 `vql-testing` system suite.
 
-Optional development and system-test services use profiles in the root Compose file. For example:
+Development and system-test services are defined in the root Compose file. Start an individual service by name, or use the system-test wrapper to select dependencies automatically:
 
 ```bash
-docker compose --profile rtsp up -d mediamtx
-scripts/run-integration-tests.sh
+docker compose up -d mediamtx
+scripts/run-system-tests.sh
 ```
 
 Install the Git hooks with [pre-commit](https://pre-commit.com/):
@@ -407,18 +407,19 @@ pre-commit run --hook-stage pre-push --all-files
 ```
 
 The feature-gated system suite owns real datasets, models, RTSP, and Kafka. Run the real-image
-task-shaped inference target after installing the integration fixtures with:
+task-shaped inference target after installing the system fixtures with:
 
 ```bash
-VQL_INTEGRATION_TEST=1 \
+VQL_SYSTEM_TEST=1 \
   cargo test -p vql-testing \
   --features system-tests \
   --test image \
   --locked
 ```
 
-The complete strict suite runs the image, video, Catalog Model, RTSP, and Kafka targets through
-`scripts/run-integration-tests.sh`.
+The complete strict suite runs the image, video, Catalog Model, RTSP, Kafka, and containerized
+`vqld` targets through `scripts/run-system-tests.sh`. When one or more `--test` targets are
+selected, the wrapper starts only their required Compose services.
 
 ## Contributing
 

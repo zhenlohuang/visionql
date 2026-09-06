@@ -1,33 +1,18 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use arrow::array::{Array, BooleanArray};
-use libtest_mimic::{Completion, Failed};
 use tempfile::TempDir;
 use vql_kernel::{Engine, EngineConfig, Session};
 
-pub(crate) const REQUIRE_ENV: &str = "VQL_INTEGRATION_TEST";
+mod system;
 
-#[derive(Debug, Clone)]
-pub(crate) struct FixturePaths {
-    pub(crate) images: PathBuf,
-    pub(crate) videos: PathBuf,
-    pub(crate) detector: PathBuf,
-    pub(crate) classifier: PathBuf,
-}
-
-impl FixturePaths {
-    pub(crate) fn from_workspace(workspace: &Path) -> Self {
-        Self {
-            images: workspace.join("data/datasets/images/coco128/images"),
-            videos: workspace.join("data/datasets/videos/sample-videos"),
-            detector: workspace.join("data/models/yolo26n.onnx"),
-            classifier: workspace.join("data/models/yolo26n-cls.onnx"),
-        }
-    }
-}
+#[allow(unused_imports)]
+pub(crate) use system::{
+    FixturePaths, escape_sql_literal, missing_path, prerequisite_result, workspace_root,
+};
 
 pub(crate) struct SystemSession {
     pub(crate) session: Session,
@@ -64,35 +49,6 @@ impl SystemSession {
     }
 }
 
-pub(crate) fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("vql-testing has a workspace parent")
-        .to_path_buf()
-}
-
-pub(crate) fn missing_path(path: &Path, command: &str) -> Option<String> {
-    (!path.exists()).then(|| format!("{} (run: {command})", path.display()))
-}
-
-pub(crate) fn prerequisite_result(
-    boundary: &str,
-    missing: &[String],
-) -> Option<Result<Completion, Failed>> {
-    if missing.is_empty() {
-        return None;
-    }
-    let message = format!(
-        "missing {boundary} integration dependencies:\n  {}",
-        missing.join("\n  ")
-    );
-    Some(if std::env::var_os(REQUIRE_ENV).is_some() {
-        Err(Failed::from(message))
-    } else {
-        Ok(Completion::ignored_with(message))
-    })
-}
-
 pub(crate) fn collect_one_bool(
     session: &Session,
     sql: &str,
@@ -120,8 +76,4 @@ pub(crate) fn collect_one_bool(
         return Err(format!("{context} result is NULL"));
     }
     Ok(values.value(0))
-}
-
-pub(crate) fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
 }

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog objects and persistence; `vql-kernel/` contains SQL planning, media connectors, models, and execution; `vql-cli/` provides the `vql` shell and script runner; `vql-python/` contains the PyO3/Maturin package; and `vql-testing/` holds real-artifact and external-service tests. Keep examples in `examples/`, helper utilities in `scripts/`, fixture documentation in `data/`, and architecture or product decisions in `docs/`. `ROADMAP.md` defines release scope.
+VisionQL is a Rust workspace with six crates. `vql-catalog/` owns catalog objects and persistence; `vql-kernel/` contains SQL planning, media connectors, models, and execution; `vql-cli/` provides the `vql` shell and script runner; `vql-python/` contains the PyO3/Maturin package; `vql-server/` provides the `vqld` Flight SQL host; and `vql-testing/` holds real-artifact, external-service, and shipped-process system tests. Keep examples in `examples/`, helper utilities in `scripts/`, fixture documentation in `data/`, and architecture or product decisions in `docs/`. `ROADMAP.md` defines release scope.
 
 ## Build, Test, and Development Commands
 
@@ -13,7 +13,7 @@ VisionQL is a Rust workspace with five crates. `vql-catalog/` owns catalog objec
 - `cargo test --workspace --locked` runs the deterministic default Rust suite.
 - `cargo test -p vql-kernel --test slt --locked` runs SQL logic tests.
 - From `vql-python/`, run `maturin develop --locked`; from the root, run `python -m pytest -q vql-python/tests`.
-- `scripts/run-integration-tests.sh` provisions Compose services and runs strict system tests.
+- `scripts/run-system-tests.sh` provisions only the required Compose services and runs strict system tests.
 
 Set `VQL_HOME="$PWD/data/.vql"` for reproducible local state. Install Git hooks with `pre-commit install`.
 
@@ -23,7 +23,7 @@ Use rustfmt defaults and four-space indentation. Follow Rust naming conventions:
 
 ## Testing Guidelines
 
-Place Rust unit tests beside their modules and crate-level contract tests under `<crate>/tests/`. Put deterministic SQL cases in focused `.slt` files under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`; filter them with `VQL_TEST_CASE=models/object_detection`. Real media, ONNX, RTSP, and Kafka scenarios belong in `vql-testing/` and require `--features system-tests`. There is no numeric coverage threshold, but behavior changes and bug fixes should include focused regression tests. See `docs/design/testing.md` before adding system cases.
+Place Rust unit tests beside their modules and crate-level integration or contract tests under `<crate>/tests/`. Put deterministic SQL cases in focused `.slt` files under `vql-kernel/tests/slt/{ddl,connectors,functions,models}`; filter them with `VQL_TEST_CASE=models/object_detection`. Real media, ONNX, RTSP, Kafka, and containerized `vqld` journeys belong in `vql-testing/` and require `--features system-tests`. Process-boundary system tests must use shipped executables and public protocols rather than importing host internals. There is no numeric coverage threshold, but behavior changes and bug fixes should include focused regression tests. See `docs/design/testing.md` before adding system cases.
 
 ## Commit & Pull Request Guidelines
 

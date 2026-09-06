@@ -5013,10 +5013,8 @@ dependencies = [
  "rdkafka",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tonic",
  "vql-kernel",
- "vql-server",
 ]
 
 [[package]]

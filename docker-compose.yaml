@@ -1,7 +1,6 @@
 services:
   mediamtx:
     image: bluenviron/mediamtx:1.20.0
-    profiles: [rtsp]
     environment:
       MTX_RTSPTRANSPORTS: tcp
     ports:
@@ -9,7 +8,6 @@ services:
 
   kafka:
     image: apache/kafka:4.1.2
-    profiles: [kafka]
     ports:
       - "${VQL_KAFKA_PORT:-9092}:9094"
     environment:
@@ -26,3 +24,23 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  vqld:
+    build:
+      context: .
+    environment:
+      VQLD_FLIGHT_ADDR: 0.0.0.0:6031
+      VQLD_SERVICE_TOKEN: "${VQLD_SERVICE_TOKEN:-vql-system-test-token}"
+      VQLD_TLS_CERT: /run/vqld-tls/server.crt
+      VQLD_TLS_KEY: /run/vqld-tls/server.key
+    ports:
+      - "${VQLD_FLIGHT_PORT:-6031}:6031"
+    volumes:
+      - vqld-home:/var/lib/visionql
+      - type: bind
+        source: "${VQLD_TLS_DIR:-./data/.vqld-system-test/tls}"
+        target: /run/vqld-tls
+        read_only: true
+
+volumes:
+  vqld-home:

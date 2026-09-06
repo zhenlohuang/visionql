@@ -1,6 +1,7 @@
 ARG RUST_VERSION=1.91.1
+ARG DEBIAN_SUITE=trixie
 
-FROM rust:${RUST_VERSION}-bookworm AS builder
+FROM rust:${RUST_VERSION}-${DEBIAN_SUITE} AS builder
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
@@ -29,7 +30,7 @@ RUN cargo build \
         --package vql-cli \
         --package vql-server
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:${DEBIAN_SUITE}-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/zhenlohuang/visionql" \
       org.opencontainers.image.licenses="Apache-2.0"
