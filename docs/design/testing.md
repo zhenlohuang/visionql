@@ -127,7 +127,7 @@ The targets prove these journeys:
 | `model` | `CREATE MODEL` → `RESOLVE MODEL` → direct call | A real Catalog Model resolves and produces a person detection |
 | `rtsp` | RTSP frames → `VQL_DETECT` → `TUMBLE` | Eight frames, positive detections, and two internally consistent closed windows |
 | `kafka` | `IMAGES` → `VQL_DETECT` → Kafka Sink | Broker acknowledgement and exact consumed JSON for the inferred semantic result |
-| `vqld` | Flight SQL → attached RTSP / persistent RTSP-to-Kafka Query → daemon restart | Direct and prepared statements, exact execution cancellation, client-independent delivery, stable Query identity, live-source reconnect gap, window-state reset, and terminal stop |
+| `vqld` | Flight SQL, including `vql shell --endpoint`, → attached RTSP / persistent RTSP-to-Kafka Query → daemon restart | Direct and prepared statements, shell query/update routing, structured errors, exact execution cancellation, client-independent delivery, stable Query identity, live-source reconnect gap, window-state reset, and terminal stop |
 
 Each target creates an isolated temporary `VQL_HOME`. Task-shaped inference targets install only their required release-managed artifacts under that home. Real-model execution is serial within each target to bound CPU and model memory. Exact Arrow field names, types, and nullability remain kernel owner contracts rather than system assertions.
 

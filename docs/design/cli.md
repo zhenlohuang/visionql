@@ -4,7 +4,7 @@
 
 ## Boundary
 
-`vql-cli` owns clap command parsing, terminal input, SQL-script loading, result rendering, history, and process signals. It loads `EngineConfig`, constructs one embedded `Engine` and `Session`, and uses only public kernel APIs.
+`vql-cli` owns clap command parsing, terminal input, SQL-script loading, result rendering, history, and process signals. The shell is one front end over two execution backends: `EmbeddedBackend` constructs a local `Engine` and `Session`, while `FlightBackend` connects to `vqld` through its public Arrow Flight SQL profile. `vql run` remains embedded. Neither backend changes SQL semantics.
 
 It does not own SQL syntax, planning, Catalog semantics, memory policy, model loading, or connector behavior. It does not embed Python, so a Python UDF encountered by the CLI fails with guidance to use the Python host.
 
@@ -13,13 +13,15 @@ It does not own SQL syntax, planning, Catalog semantics, memory policy, model lo
 The executable exposes exactly two subcommands:
 
 ```text
-vql shell
+vql shell [--endpoint URI] [--token TOKEN] [--tls-ca PEM]
 vql run <script.sql>
 ```
 
 SQL `EXPLAIN` is a SQL statement executed through either host path. It is not a CLI subcommand.
 
-Engine settings are not CLI flags. `VQL_HOME` selects the instance and its strict `config.toml`; `VQL_LOG_LEVEL` may override the configured log level. In repository development, `cargo run -p vql-cli -- shell` and `cargo run -p vql-cli -- run <script.sql>` replace the installed executable.
+Without `--endpoint`, `vql shell` uses `EmbeddedBackend` and the local instance selected by `VQL_HOME`. With an `http://` or `https://` endpoint, it uses `FlightBackend`, performs one Flight SQL handshake, and preserves that logical service Session across statements. Loopback development needs no client configuration. A protected endpoint accepts its single credential through `--token`; when that flag is absent, the shell falls back to `VQLD_SERVICE_TOKEN`. The flag takes precedence. The server maps the credential to its configured Catalog principal, so the shell has no principal setting. `--tls-ca` adds a PEM CA certificate to the platform trust roots and is valid only with an `https://` endpoint. The endpoint URI never implies access to a local Catalog. Because command arguments may be visible to other local processes, use the environment fallback when that exposure matters.
+
+Engine settings are not CLI flags. `VQL_HOME` selects embedded engine configuration and the shell history location; `VQL_LOG_LEVEL` may override the configured log level. In repository development, `cargo run -p vql-cli -- shell`, `cargo run -p vql-cli -- shell --endpoint http://127.0.0.1:6031`, and `cargo run -p vql-cli -- run <script.sql>` replace the installed executable.
 
 ## Interactive Shell
 
@@ -31,9 +33,10 @@ On start the shell prints a banner naming the package version and the exit keys.
 - Ctrl-D exits;
 - a trailing incomplete statement in stdin mode returns `INVALID_SQL`;
 - bounded statements collect and render once;
-- unbounded statements render each `RecordBatch` as it arrives.
+- unbounded statements render each `RecordBatch` as it arrives;
+- remote update statements use Flight SQL `ExecuteUpdate` and print the affected-row count.
 
-At an interactive prompt, Ctrl-C clears pending input. While a query is active, signal handling follows the shared cancellation lifecycle: the first Ctrl-C requests a graceful stop; a second Ctrl-C requests immediate cancellation.
+At an interactive prompt, Ctrl-C clears pending input. While an embedded unbounded query is active, the first Ctrl-C requests a graceful stop and a second requests immediate cancellation. `EmbeddedBackend` forwards that lifecycle to the kernel Session. `FlightBackend` instead sends `CancelFlightInfo` for the active server execution ID; the public Flight profile provides exact cancellation rather than the embedded graceful-drain extension. Dropping or completing the result stream clears the shell's active remote execution.
 
 A statement error is printed and the interactive shell continues with the next statement. Script-splitting, terminal input, and history failures terminate the host with a structured kernel error.
 
@@ -56,6 +59,8 @@ Error output uses the stable `[VQL-CCDDD] SYMBOL: message` kernel format. Shell 
 CLI-owned tests protect:
 
 - the exact `shell` and `run` command surface;
+- selection of embedded execution by default and Flight execution only with `--endpoint`;
+- Flight prepare metadata, query/update routing, logical Session reuse, and structured VQL error decoding;
 - absence of `explain`, metrics, Catalog-path, and memory-limit CLI options;
 - standalone `\q` behavior in both terminal loops;
 - rejection of an unbounded statement before later script SQL;

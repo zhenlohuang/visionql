@@ -579,11 +579,11 @@ impl FlightSqlService for VqlFlightSqlService {
             .map_err(|_| Status::unauthenticated("invalid Basic authentication"))?;
         let decoded = str::from_utf8(&decoded)
             .map_err(|_| Status::unauthenticated("invalid Basic authentication"))?;
-        let (principal, credential) = decoded
+        let (_client_name, credential) = decoded
             .split_once(':')
             .ok_or_else(|| Status::unauthenticated("invalid Basic authentication"))?;
         let expected = self.config.service_token.as_deref().unwrap_or_default();
-        if principal != self.config.principal || credential != expected {
+        if credential != expected {
             return Err(Status::unauthenticated("invalid service credential"));
         }
         let session_token = uuid::Uuid::new_v4().to_string();

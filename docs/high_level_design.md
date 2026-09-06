@@ -41,7 +41,8 @@ The Python distribution and import name remain `visionql`, and repository URLs a
 flowchart TB
     subgraph HOSTS["Hosts"]
         PY["Python binding"]
-        CLI["vql shell / run"]
+        SHELL["vql shell"]
+        RUN["vql run"]
         DAEMON["vqld / Flight SQL"]
     end
 
@@ -58,7 +59,9 @@ flowchart TB
     SINKS["Foreground results / Kafka"]
 
     PY --> ENTRY
-    CLI --> ENTRY
+    SHELL -->|EmbeddedBackend| ENTRY
+    SHELL -->|FlightBackend / Flight SQL| DAEMON
+    RUN --> ENTRY
     DAEMON --> ENTRY
     ENTRY --> SQL
     SQL <--> CAT
@@ -67,7 +70,7 @@ flowchart TB
     SOURCES --> EXEC --> SINKS
 ```
 
-The CLI, Python binding, and `vqld` service are hosts. They load configuration, build an `Engine`, create Sessions, present results, and own process-specific lifecycle. They do not implement SQL semantics.
+The CLI, Python binding, and `vqld` service are hosts. `vql run`, Python, and the shell's `EmbeddedBackend` build a local `Engine` and Session. The same shell front end can instead select `FlightBackend`, which reaches the Session owned by `vqld` only through public Flight SQL. Hosts present results and own process-specific lifecycle; they do not implement SQL semantics.
 
 `vql-kernel` owns planning and execution. `vql-catalog` owns persisted definitions and immutable definition snapshots and, in v0.2, persistent Query objects and mutable Query status. The kernel depends on the Catalog; the Catalog does not depend on execution, media, model, CLI, or Python code.
 

@@ -1,16 +1,19 @@
 pub(crate) mod shell;
 
 use std::path::Path;
+use std::sync::Arc;
 
-use vql_kernel::{ErrorCode, QueryInterruptAction, Result, Session, VqlError, split_statements};
+use vql_kernel::{ErrorCode, Result, Session, VqlError, split_statements};
 
-pub(crate) fn install_interrupt_handler(session: Session) -> Result<()> {
-    ctrlc::set_handler(move || match session.interrupt_active_query() {
-        QueryInterruptAction::NoActiveQuery => {}
-        QueryInterruptAction::GracefulStopRequested => {
+use crate::backend::{EmbeddedBackend, InterruptAction, ShellBackend};
+
+pub(crate) fn install_interrupt_handler(backend: Arc<dyn ShellBackend>) -> Result<()> {
+    ctrlc::set_handler(move || match backend.interrupt_active_query() {
+        InterruptAction::NoActiveQuery => {}
+        InterruptAction::GracefulStopRequested => {
             eprintln!("graceful stop requested; press Ctrl-C again to cancel immediately");
         }
-        QueryInterruptAction::ImmediateCancellationRequested => {
+        InterruptAction::CancellationRequested => {
             eprintln!("cancelling active query immediately");
         }
     })
@@ -24,7 +27,7 @@ pub(crate) fn install_interrupt_handler(session: Session) -> Result<()> {
 
 pub(crate) fn run_file(session: &Session, path: &Path) -> Result<()> {
     let script = std::fs::read_to_string(path)?;
-    install_interrupt_handler(session.clone())?;
+    install_interrupt_handler(Arc::new(EmbeddedBackend::new(session.clone())))?;
     run_statements(session, split_statements(&script)?)
 }
 

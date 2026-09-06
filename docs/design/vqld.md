@@ -92,6 +92,8 @@ The concrete Rust API may use different names, but it preserves these contracts:
 
 v0.2 implements the smallest Flight SQL profile required by one selected Flight SQL or ADBC client integration. Its compatibility test, not a speculative capability matrix, defines the required metadata calls and prepared-statement behavior. Unsupported optional Flight SQL operations return a standard unimplemented status.
 
+`vql shell --endpoint <URI>` is a first-party client of this same public profile. Its `FlightBackend` performs one authenticated handshake, keeps the returned logical Session across sequential statements, routes execution from prepared schema metadata, and never imports `vql-server` internals. Omitting `--endpoint` selects the shell's independent embedded backend.
+
 The required product behavior is:
 
 - bounded queries return Arrow batches through `DoGet`;
@@ -213,6 +215,7 @@ RTSP remains non-replayable. Restart loses unavailable source frames and open-wi
 ## Security
 
 - The configured credential maps to one principal; v0.2 has no user directory, role model, per-relation policy, or delegated identity.
+- The Flight SQL Basic username is a compatibility field, not an identity selector. `vqld` authenticates the credential and always supplies the server-configured principal to the Kernel.
 - A logical Session is opaque, short-lived, and bound to that principal.
 - Raw credentials, authorization metadata, URI user information, signed query parameters, and resolved secret values never enter Query objects, errors, metrics, or public logs.
 - Query execution uses the normal secret-provider boundary at runtime; secrets are not persisted with a Query.

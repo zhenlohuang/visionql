@@ -104,6 +104,12 @@ curl http://127.0.0.1:6032/health/ready
 
 Use a Flight SQL client to prepare and execute ordinary SQL or manage a persistent continuous Table write:
 
+```bash
+cargo run -q -p vql-cli -- shell --endpoint http://127.0.0.1:6031
+```
+
+The same shell front end now has two execution backends: without `--endpoint` it embeds `vql-kernel::Session`; with `--endpoint` it executes through Flight SQL against `vqld`. Loopback development needs no client environment variables. For a secured endpoint, pass `--token <token>`; if the flag is absent, the shell falls back to `VQLD_SERVICE_TOKEN`. The daemon maps that credential to its configured principal. Use `--tls-ca <ca.pem>` when the server certificate requires an additional CA. Prefer the environment fallback when the token must not appear in process arguments.
+
 ```sql
 SUBMIT QUERY people_per_minute AS
 INSERT INTO people_sink SELECT ... FROM cam_entrance;
@@ -113,7 +119,7 @@ DESCRIBE QUERY '<query_id>';
 STOP QUERY '<query_id>';
 ```
 
-Loopback development accepts a Flight SQL handshake with principal `service` and an empty credential. Logical Sessions expire after 15 idle minutes by default. For non-loopback Flight access, configure `VQLD_SERVICE_TOKEN`, `--tls-cert`, and `--tls-key`; startup rejects an externally bound Flight listener without all three security inputs. The HTTP health and metrics listener remains loopback-only because v0.2 does not terminate TLS for that surface. Run `vqld --help` for Session and attach timeouts, result limits, Query-history retention, and listener options.
+Loopback development accepts a Flight SQL handshake with an empty credential and maps it to the daemon's configured principal, `service` by default. Logical Sessions expire after 15 idle minutes by default. For non-loopback Flight access, configure `VQLD_SERVICE_TOKEN`, `--tls-cert`, and `--tls-key`; startup rejects an externally bound Flight listener without all three security inputs. The HTTP health and metrics listener remains loopback-only because v0.2 does not terminate TLS for that surface. Run `vqld --help` for Session and attach timeouts, result limits, Query-history retention, and listener options.
 
 ## Examples
 
@@ -213,7 +219,7 @@ FROM cam_entrance
 GROUP BY 1;
 ```
 
-The shell and `vql run` print unbounded results incrementally. The first Ctrl-C stops source intake, drains admitted epochs, and flushes an attached table write; press Ctrl-C again while that shutdown is in progress to cancel immediately. An unbounded statement must be last in a `vql run` script so stopping it cannot start later SQL. `Projection`, `Filter`, `UNNEST`, scalar functions, typed inference, and one `TUMBLE` aggregate are accepted. Streaming windows support `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`; they close only after the watermark reaches the window end. `DISTINCT`, media-valued state, and unsupported unbounded plan shapes are rejected during planning. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
+The shell and `vql run` print unbounded results incrementally. During embedded execution, the first Ctrl-C stops source intake, drains admitted epochs, and flushes an attached table write; press Ctrl-C again while that shutdown is in progress to cancel immediately. A remote shell instead cancels the exact active Flight execution. An unbounded statement must be last in a `vql run` script so stopping it cannot start later SQL. `Projection`, `Filter`, `UNNEST`, scalar functions, typed inference, and one `TUMBLE` aggregate are accepted. Streaming windows support `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`; they close only after the watermark reaches the window end. `DISTINCT`, media-valued state, and unsupported unbounded plan shapes are rejected during planning. Live frames use epoch-scoped frame buffers internally and are encoded before crossing the result boundary. Cataloged endpoints currently reject embedded credentials and query parameters so secrets cannot be persisted accidentally.
 
 Kafka output is a writable table declared with `CREATE TABLE ... USING KAFKA`. Authentication uses an opaque `credential_ref`; embedding hosts install a `SecretProvider` on `EngineConfig`, and resolved credentials never enter the Catalog or SQL text. `KafkaAuthentication` and `KafkaTlsConfig` are VisionQL-owned public types supporting TLS/mTLS, SASL/PLAIN, SCRAM-SHA-256/512, and static OAUTHBEARER tokens without exposing the internal Kafka client. The repository's local Compose profile uses plaintext Kafka and does not require a reference.
 
@@ -253,13 +259,13 @@ Python-hosted UDFs receive and return Arrow arrays in batches. They require the 
 ## CLI
 
 ```text
-vql shell
+vql shell [--endpoint URI] [--token TOKEN] [--tls-ca PEM]
 vql run <script.sql>
 ```
 
 SQL `EXPLAIN` adds bounded/continuous mode, source pushdowns, stream topology, resolved inference semantics, and Table-write placement without opening sources or probing models and services. Run it through the shell or a SQL script like any other statement. During source development, replace `vql` with `cargo run -p vql-cli --`. Set `VQL_LOG_LEVEL=debug` when diagnosing execution.
 
-In `vql shell`, enter `\q` on its own line or press Ctrl-D to exit. Ctrl-C clears pending input at the prompt; during an unbounded query, the first Ctrl-C requests a graceful stop and the second cancels immediately.
+In `vql shell`, enter `\q` on its own line or press Ctrl-D to exit. The shell uses the embedded engine unless `--endpoint` selects `vqld`. Ctrl-C clears pending input at the prompt; embedded unbounded queries support graceful stop followed by immediate cancellation, while a remote active query is cancelled by its Flight execution ID.
 
 ## Runtime state
 

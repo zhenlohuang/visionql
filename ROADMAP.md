@@ -23,6 +23,7 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 **Goal:** Keep an explicitly submitted continuous query running independently of its client through the smallest useful single-node service.
 
 - [x] Run bounded and attached continuous SQL through a tested Arrow Flight SQL subset in `vqld`.
+- [x] Connect the existing `vql shell` front end to either its embedded Session or one `vqld` Flight SQL endpoint.
 - [x] Submit, inspect, and stop persistent continuous Table writes explicitly.
 - [x] Persist submitted Queries in the Catalog and keep them running after client disconnect.
 - [x] Rediscover Catalog-backed Queries from another Session and restart active RTSP Queries from the live position with fresh window state and an explicit restart gap.

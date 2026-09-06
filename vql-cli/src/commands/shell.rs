@@ -1,24 +1,29 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use reedline::{DefaultPrompt, FileBackedHistory, Reedline, Signal};
-use vql_kernel::{
-    ErrorCode, Result, Session, VqlError, ends_with_statement_terminator, split_statements,
-};
+use vql_kernel::{ErrorCode, Result, VqlError, ends_with_statement_terminator, split_statements};
 
-pub(crate) fn run(session: Session, history_path: &Path) -> Result<()> {
-    super::install_interrupt_handler(session.clone())?;
+use crate::backend::{ExecutionOutput, ShellBackend};
+
+pub(crate) fn run(backend: Arc<dyn ShellBackend>, history_path: &Path) -> Result<()> {
+    super::install_interrupt_handler(Arc::clone(&backend))?;
 
     println!(
-        "VisionQL v{} — terminate statements with ';'; use \\q or Ctrl-D to exit",
-        env!("CARGO_PKG_VERSION")
+        "VisionQL v{} — {} — terminate statements with ';'; use \\q or Ctrl-D to exit",
+        env!("CARGO_PKG_VERSION"),
+        backend.description(),
     );
     if !std::io::stdin().is_terminal()
         || std::env::var("TERM").is_ok_and(|term| term.eq_ignore_ascii_case("dumb"))
     {
-        return run_basic(&session);
+        return run_basic(backend.as_ref());
     }
 
+    if let Some(parent) = history_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let history =
         FileBackedHistory::with_file(1_000, history_path.to_path_buf()).map_err(|error| {
             VqlError::new(
@@ -42,7 +47,7 @@ pub(crate) fn run(session: Session, history_path: &Path) -> Result<()> {
                 }
                 let statements = split_statements(&pending)?;
                 pending.clear();
-                execute(&session, statements)?;
+                execute(backend.as_ref(), statements)?;
             }
             Ok(Signal::CtrlC) => {
                 pending.clear();
@@ -61,7 +66,7 @@ pub(crate) fn run(session: Session, history_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_basic(session: &Session) -> Result<()> {
+fn run_basic(backend: &dyn ShellBackend) -> Result<()> {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut pending = String::new();
@@ -79,7 +84,7 @@ fn run_basic(session: &Session) -> Result<()> {
         if ends_with_statement_terminator(&pending)? {
             let statements = split_statements(&pending)?;
             pending.clear();
-            execute(session, statements)?;
+            execute(backend, statements)?;
         }
     }
     if !pending.trim().is_empty() {
@@ -95,17 +100,15 @@ fn is_quit_command(line: &str) -> bool {
     line.trim() == r"\q"
 }
 
-fn execute(session: &Session, statements: Vec<String>) -> Result<()> {
+fn execute(backend: &dyn ShellBackend, statements: Vec<String>) -> Result<()> {
     for sql in statements {
-        let result = session.sql(&sql).and_then(|statement| {
-            if statement.is_unbounded() {
-                statement.for_each_batch(|batch| {
-                    super::super::render::print_batches(std::slice::from_ref(batch))
-                })
-            } else {
-                super::super::render::print_batches(&statement.collect()?)
-            }?;
-            Ok(())
+        let result = backend.execute(&sql, &mut |output| match output {
+            ExecutionOutput::Batches(batches) => super::super::render::print_batches(&batches),
+            ExecutionOutput::Update { affected_rows } => {
+                let suffix = if affected_rows == 1 { "row" } else { "rows" };
+                println!("OK ({affected_rows} {suffix} affected)");
+                Ok(())
+            }
         });
         match result {
             Ok(()) => {}

@@ -11,6 +11,7 @@ All notable changes to VisionQL are documented in this file.
 - Recover active live-source Queries after daemon restart with the same Query identity, an explicit restart gap, and honest in-memory window-state reset reporting.
 - Convert process-local `IMAGE` values to bounded encoded thumbnails at the Flight boundary and reject unsupported service-hosted Python Functions explicitly.
 - Add owner tests and a real Flight SQL, RTSP, and Kafka system journey for attached execution, cancellation, client-independent delivery, and recovery.
+- Let `vql shell` select either its existing embedded Session or a `vqld` Flight SQL endpoint, including flag- or environment-supplied service credentials, TLS trust configuration, exact remote cancellation, and structured VQL error preservation.
 
 ## [0.1.0] - 2026-08-25
 

@@ -39,7 +39,10 @@ async fn start_server() -> (
         .await
         .unwrap();
     let mut client = FlightSqlServiceClient::new(channel);
-    client.handshake("service", "").await.unwrap();
+    client
+        .handshake("client-name-is-not-an-identity", "")
+        .await
+        .unwrap();
     (client, task)
 }
 
