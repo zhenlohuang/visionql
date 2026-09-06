@@ -1,46 +1,20 @@
 # VisionQL Workbench Design
 
-Workbench is the v0.3 visual SQL client for VisionQL. It shortens the loop between writing a bounded query and understanding image-based results without creating a second engine or control-plane API.
+Workbench is the visual SQL client for VisionQL. It shortens the loop between writing a bounded query and understanding image-based results without creating a second engine or control-plane API. Release scope and sequencing are maintained in the [Roadmap](../../ROADMAP.md).
 
 ## Purpose
 
-Generic SQL clients can execute VisionQL SQL but do not naturally render `IMAGE`, `BOX2D`, or arrays of detections. The v0.3 workflow is deliberately narrow:
+Generic SQL clients can execute VisionQL SQL but do not naturally render `IMAGE`, `BOX2D`, or arrays of detections. Workbench centers on one visual-query workflow:
 
 > A data or ML engineer writes one bounded visual query and inspects image thumbnails with detection boxes in a browser.
-
-Catalog administration, persistent-Query operations, dashboards, cost reporting, team sharing, and a general BI experience are separate capabilities and are not part of v0.3.
-
-## v0.3 Scope
-
-The v0.3 release contains only:
-
-- one endpoint and one authenticated Session;
-- a single-statement SQL editor with run and cancel;
-- a bounded result table;
-- rendering of the v0.2 `IMAGE` thumbnail representation;
-- `BOX2D` overlays for detection results;
-- structured error display using the public VQL error fields.
-
-The release excludes:
-
-- multi-statement scripts, tabs, saved queries, and collaboration;
-- live-stream preview;
-- Catalog browsing or mutation;
-- persistent-Query submission or operation;
-- original-media lookup or locator handling;
-- metrics, cost views, dashboards, and Prometheus access;
-- a Workbench-owned identity or permission model;
-- mobile-specific behavior and production deployment topology.
-
-Each excluded capability requires its own observed user task before it is added.
 
 ## Architecture Constraints
 
 Workbench is an independent client. It uses public Arrow Flight SQL, SQL, and structured errors. It never reads SQLite files, imports engine crates, or requires a Workbench-only `vqld` RPC.
 
-A small browser-facing adapter may be used if direct browser Flight SQL support is insufficient. That adapter owns only transport conversion, a short-lived browser Session, cancellation propagation, and bounded in-memory thumbnails. It stores no Catalog objects, Query definitions, permissions, or business data.
+The reference implementation includes a small Workbench backend because the selected browser stack does not implement Flight SQL directly. The backend is a transport bridge: it owns only transport conversion, a short-lived browser Session, cancellation propagation, and bounded in-memory thumbnails. It stores no Catalog objects, Query definitions, permissions, or business data.
 
-The adapter must not:
+The backend must not:
 
 - rewrite user SQL to add sampling, filters, or `LIMIT`;
 - parse SQL to infer boundedness or side effects;
@@ -48,37 +22,107 @@ The adapter must not:
 - cache credentials or original media in browser storage;
 - keep an attached query alive after its browser result stream disappears.
 
+## Reference UI Mapping
+
+The Workbench screen follows the reference prototype's three-region structure:
+
+1. a connection strip showing the configured `vqld` endpoint and current Session state;
+2. one SQL editor with Run and Cancel actions;
+3. one result region that switches between an Arrow-backed table, an empty state, progress, and a structured error.
+
+The result table exposes a transient Overlay Config that maps one `IMAGE` column to one `BOX2D` column and optional label and confidence columns. This configuration changes presentation only, remains in page memory, and is cleared with the Session.
+
+## Reference Implementation
+
+`vql-workbench/` is a separate project with two implementation parts:
+
+```text
+vql-workbench/
+  frontend/  # browser SPA
+  backend/   # loopback Workbench backend and Flight SQL client
+```
+
+The frontend and backend use one same-origin HTTP endpoint. The backend serves the production static assets, owns one short-lived in-memory browser Session, and connects to the configured `vqld` endpoint as an ordinary Flight SQL client. It imports neither `vql-server` nor engine crates. Its Rust Arrow and Flight dependencies stay on the same pinned Arrow release as `vqld` so schema metadata and IPC behavior are tested against one implementation baseline.
+
+The backend binds to loopback. It accepts the `vqld` endpoint, TLS inputs, and service credential when establishing a Session, keeps credential material only in backend memory, and gives the browser an opaque `HttpOnly`, `SameSite=Strict` Session cookie. Closing or expiring the Session drops prepared statements, credentials, buffered thumbnails, and active execution state.
+
+The internal browser transport is intentionally small:
+
+- establish or close the one browser Session;
+- prepare and execute one SQL statement using the public Flight SQL profile;
+- stream bounded results as `application/vnd.apache.arrow.stream` without converting rows to JSON;
+- expose the public server execution ID and propagate cancellation for exactly that execution;
+- translate gRPC status and the versioned VQL error payload into JSON containing the original `code`, `symbol`, `message`, and optional `target_version` fields.
+
+These HTTP routes are private implementation details of Workbench, not a second VisionQL API. Preparing and classifying SQL remains a `vqld` operation. If `vql.statement_info.result_mode` is not `bounded`, the backend refuses execution without opening a result stream and returns a Workbench-local problem response that is visually distinct from a forwarded VQL error. It must not invent a VQL identifier for a client-side policy decision.
+
+## Technology Selection
+
+The frontend baseline is React + TypeScript + Vite + Tailwind CSS, with shadcn/ui as the component system.
+
+| Layer | Selection | Contract in Workbench |
+|---|---|---|
+| Language and UI | React and strict TypeScript | Client-rendered single-page application; typed components for Session, editor, execution, result, and error states |
+| Build and packages | Vite and pnpm | Development server and production asset build; exact JavaScript dependencies are committed in `pnpm-lock.yaml` |
+| Component system | shadcn/ui with Radix UI primitives and Lucide React | Generated component source is committed under `frontend/src/components/ui`; Radix supplies accessible interaction behavior and Lucide supplies the shared icon set |
+| SQL editor | CodeMirror 6 with `@codemirror/lang-sql` | Line numbers, SQL highlighting, bracket matching, and Run shortcut; VisionQL keywords and types extend highlighting only and never validate or rewrite SQL |
+| Result model | Apache Arrow JavaScript | Incrementally reads Arrow IPC record batches from `fetch()` and preserves Arrow schema, nullability, nested values, and extension metadata |
+| Result table | TanStack Table with semantic HTML | Headless column and row state with custom cells for `IMAGE`, `BOX2D`, nested values, timestamps, and numeric values; pagination is local and never rewrites the submitted SQL |
+| Image overlay | native `<img>` plus SVG | JPEG bytes become revocable Blob URLs; an absolutely aligned SVG renders boxes and labels without rasterizing the thumbnail again |
+| Styling | Tailwind CSS through `@tailwindcss/vite` | Utility classes implement the prototype's shell, spacing, typography, status colors, and resizable editor/result split; CSS custom properties hold VisionQL-specific design tokens |
+| Backend | Rust, Tokio, Axum, `arrow-flight`, and Tonic | Serves the frontend and performs same-origin HTTP streaming, Flight SQL authentication and preparation, Flight-to-IPC conversion, cancellation, and structured-error preservation |
+| Client tests | Vitest and Testing Library | Covers reducers, schema-to-column mapping, scalar formatting, Blob URL cleanup, overlay geometry, and accessible interaction states |
+| End-to-end tests | Playwright | Runs the built Workbench and shipped `vqld`, then verifies the complete Workbench acceptance path through the browser |
+
+shadcn/ui owns reusable controls and accessibility wiring, not page composition or application state. Workbench keeps the editor, Arrow result model, media cells, and overlay renderer as dedicated components, and uses Tailwind design tokens to give generated controls the VisionQL visual language.
+
+Workbench has one explicit execution state machine: `disconnected`, `idle`, `preparing`, `running`, `cancelling`, `completed`, or `failed`. React owns this state through a typed reducer. The reference frontend uses no client router, global state framework, service worker, offline cache, or browser database. Starting a second execution is disabled until the first reaches a terminal state.
+
+The browser consumes the response body as a stream and appends complete record batches to the bounded in-memory result. Browser abort, navigation, Session expiry, and the Cancel action all trigger backend-side Flight cancellation before local state is discarded. Blob URLs are revoked when their batch, result, or Session is released.
+
 ## Media Contract
 
-Workbench consumes the one bounded thumbnail representation defined by the [`vqld` Service Design](./vqld.md#image-flight-boundary). It does not request inline originals, dereference media locators, or persist query results.
+Workbench consumes the bounded thumbnail representation defined by the [`vqld` Service Design](./vqld.md#image-flight-boundary). It does not request inline originals, dereference media locators, or persist query results.
 
-Thumbnail dimensions and byte bounds are service configuration, not Workbench protocol extensions. The UI scales the received thumbnail and maps `BOX2D` pixel coordinates to its displayed dimensions.
+Thumbnail dimensions and byte bounds are service configuration, not Workbench protocol extensions. A `BOX2D` value uses the Kernel contract's normalized top-left `x`, `y`, `w`, and `h` coordinates. The overlay maps those coordinates to the displayed image content rectangle, including any letterboxing, and clips invalid drawing geometry without changing the value shown in the ordinary `BOX2D` cell.
+
+An `IMAGE` cell renders only when the field carries `ARROW:extension:name=vql.image`, the encoded payload is present, and the encoding is a browser-supported image type. Missing or invalid thumbnails render a typed empty or error cell rather than a broken image. The client never renders a URI or locator as an image source.
 
 ## Query and Error Contract
 
-v0.3 executes only bounded statements. It uses prepared schema metadata from `vqld` to reject an unbounded result before opening a browser stream. Cancellation targets the server execution ID returned by the public Flight boundary.
+Workbench executes only bounded statements. It uses prepared schema metadata from `vqld` to reject an unbounded result before opening a browser stream. Cancellation targets the server execution ID returned by the public Flight boundary.
 
 Errors use the versioned VQL representation and standard gRPC status. The UI may add local editor context, but it does not parse messages to infer codes or retryability.
 
+Browser, backend, and connectivity failures use a separate Workbench problem type with an explicit local source. They never reuse or synthesize a `VQL-*` identifier, and a forwarded VQL error is rendered from its structured fields without changing its machine-readable identity.
+
 ## Validation
 
-The v0.3 acceptance path demonstrates all of the following with a real visual query:
+The acceptance path demonstrates all of the following with a real visual query:
 
 - connection to an existing `vqld` instance without a private engine API;
+- rejection of an unbounded result from prepared statement metadata without client-side SQL parsing;
+- incremental Arrow IPC decoding without JSON row conversion or loss of extension metadata;
 - correct thumbnail and box rendering for bounded results;
 - cancellation of exactly the active query;
 - useful structured error presentation;
 - the same query and result semantics as the Python/notebook path.
 
-## Deferred Capabilities
+Unit fixtures include scalar, null, nested, `vql.image`, and `BOX2D` Arrow columns. Browser tests cover image decode failure, multiple aspect ratios, overlay clipping, keyboard execution, cancellation during streaming, Session expiry, and Blob URL cleanup. The end-to-end acceptance test uses the built frontend, Workbench backend, and shipped `vqld`; mocks alone cannot satisfy the acceptance path.
 
-Later evidence may justify one capability at a time:
+## References
 
-- attached live-result preview;
-- persistent-Query inspection using `SHOW QUERIES` and `DESCRIBE QUERY`;
-- Query submission and stop controls through public SQL;
-- Catalog browsing through the supported Flight SQL metadata profile;
-- original-media access after a separate authorization and transport design;
-- per-query operational views from service query-status data rather than Prometheus.
-
-None of these capabilities is part of v0.3.
+- [React with TypeScript](https://react.dev/learn/typescript)
+- [Vite Guide](https://vite.dev/guide/)
+- [Tailwind CSS with Vite](https://tailwindcss.com/docs/installation/using-vite)
+- [shadcn/ui with Vite](https://ui.shadcn.com/docs/installation/vite)
+- [Radix Primitives](https://www.radix-ui.com/primitives/docs/overview/introduction)
+- [Lucide React](https://lucide.dev/guide/react)
+- [CodeMirror Reference Manual](https://codemirror.net/docs/ref/)
+- [CodeMirror SQL language package](https://github.com/codemirror/lang-sql)
+- [Apache Arrow JavaScript](https://arrow.apache.org/js/current/)
+- [Apache Arrow Flight SQL Rust client](https://docs.rs/arrow-flight/latest/arrow_flight/sql/client/)
+- [TanStack Table](https://tanstack.com/table/latest/docs/overview)
+- [Axum](https://docs.rs/axum/latest/axum/)
+- [Vitest](https://vitest.dev/guide/)
+- [Playwright](https://playwright.dev/docs/intro)
