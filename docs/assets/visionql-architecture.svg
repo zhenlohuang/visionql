@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" role="img" aria-labelledby="diagram-title diagram-desc">
+  <title id="diagram-title">VisionQL architecture</title>
+  <desc id="diagram-desc">The primary VisionQL component paths from vql-cli, vql-python, and vql-workbench through vqld or directly to vql-kernel and vql-catalog.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/>
+    </marker>
+    <style>
+      text { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .heading { fill: #f8fafc; font-size: 20px; font-weight: 700; }
+      .diagram-subtitle { fill: #94a3b8; font-size: 10px; }
+      .boundary-title { fill: #34d399; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; }
+      .box-title { fill: #f8fafc; font-size: 13px; font-weight: 700; text-anchor: middle; }
+      .box-subtitle { fill: #cbd5e1; font-size: 9px; text-anchor: middle; }
+      .box-detail { fill: #94a3b8; font-size: 8px; text-anchor: middle; }
+      .edge-label { fill: #94a3b8; font-size: 8px; text-anchor: middle; paint-order: stroke; stroke: #020617; stroke-width: 4px; stroke-linejoin: round; }
+      .legend { fill: #94a3b8; font-size: 8px; }
+      .component-bg { fill: #0f172a; }
+      .host { fill: #083344; fill-opacity: 0.65; stroke: #22d3ee; stroke-width: 1.5; }
+      .runtime { fill: #064e3b; fill-opacity: 0.58; stroke: #34d399; stroke-width: 1.5; }
+      .state { fill: #4c1d95; fill-opacity: 0.55; stroke: #a78bfa; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="620" fill="#020617"/>
+  <rect width="1200" height="620" fill="url(#grid)"/>
+  <circle cx="28" cy="31" r="6" fill="#22d3ee"/>
+  <text x="44" y="38" class="heading">VisionQL architecture</text>
+  <text x="44" y="58" class="diagram-subtitle">Primary request and dependency paths in the current workspace</text>
+
+  <!-- Connections are drawn before boxes so component fills mask the lines. -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 190 130 V 95 H 995 V 248" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arrow-cyan)"/>
+    <path d="M 330 175 H 390 V 285 H 448" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#arrow-cyan)"/>
+    <path d="M 330 320 H 448" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#arrow-cyan)"/>
+    <path d="M 750 285 H 843" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+    <path d="M 600 360 V 385 H 900 V 398" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow-violet)"/>
+    <path d="M 1050 350 V 398" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow-violet)"/>
+    <path d="M 330 465 H 790 V 375 H 995 V 352" stroke="#34d399" stroke-width="1.6" marker-end="url(#arrow-emerald)"/>
+  </g>
+
+  <rect x="820" y="210" width="350" height="335" rx="12" fill="#34d399" fill-opacity="0.025" stroke="#34d399" stroke-width="1" stroke-dasharray="8 4"/>
+  <text x="840" y="232" class="boundary-title">SHARED CORE LIBRARIES</text>
+
+  <g>
+    <rect x="50" y="130" width="280" height="90" rx="7" class="component-bg"/>
+    <rect x="50" y="130" width="280" height="90" rx="7" class="host"/>
+    <text x="190" y="161" class="box-title">vql-cli</text>
+    <text x="190" y="182" class="box-subtitle">command-line client</text>
+    <text x="190" y="202" class="box-detail">shell / run • embedded or --endpoint</text>
+  </g>
+
+  <g>
+    <rect x="450" y="260" width="300" height="100" rx="7" class="component-bg"/>
+    <rect x="450" y="260" width="300" height="100" rx="7" class="runtime"/>
+    <text x="600" y="293" class="box-title">vqld</text>
+    <text x="600" y="316" class="box-subtitle">vql-server</text>
+    <text x="600" y="338" class="box-detail">Flight SQL • Sessions • persistent Query lifecycle</text>
+  </g>
+
+  <g>
+    <rect x="845" y="250" width="300" height="100" rx="7" class="component-bg"/>
+    <rect x="845" y="250" width="300" height="100" rx="7" class="runtime"/>
+    <text x="995" y="281" class="box-title">vql-kernel</text>
+    <text x="995" y="304" class="box-subtitle">SQL planning + execution</text>
+    <text x="995" y="328" class="box-detail">DataFusion • streaming • media • inference</text>
+  </g>
+
+  <g>
+    <rect x="50" y="275" width="280" height="90" rx="7" class="component-bg"/>
+    <rect x="50" y="275" width="280" height="90" rx="7" class="host"/>
+    <text x="190" y="306" class="box-title">vql-workbench</text>
+    <text x="190" y="327" class="box-subtitle">browser client</text>
+    <text x="190" y="347" class="box-detail">bounded visual SQL • public Flight SQL</text>
+  </g>
+
+  <g>
+    <rect x="50" y="420" width="280" height="90" rx="7" class="component-bg"/>
+    <rect x="50" y="420" width="280" height="90" rx="7" class="host"/>
+    <text x="190" y="451" class="box-title">vql-python</text>
+    <text x="190" y="472" class="box-subtitle">Python binding</text>
+    <text x="190" y="492" class="box-detail">PyO3 host • direct Engine / Session</text>
+  </g>
+
+  <g>
+    <rect x="845" y="400" width="300" height="100" rx="7" class="component-bg"/>
+    <rect x="845" y="400" width="300" height="100" rx="7" class="state"/>
+    <text x="995" y="431" class="box-title">vql-catalog</text>
+    <text x="995" y="454" class="box-subtitle">definitions • snapshots • Query status</text>
+    <text x="995" y="478" class="box-detail">SQLite • $VQL_HOME/catalog/vql.db</text>
+  </g>
+
+  <text x="600" y="88" class="edge-label">local: embedded Engine / Session</text>
+  <text x="360" y="165" class="edge-label">remote</text>
+  <text x="389" y="310" class="edge-label">Flight SQL</text>
+  <text x="797" y="275" class="edge-label">host API</text>
+  <text x="730" y="377" class="edge-label">persistent Query control</text>
+  <text x="1090" y="378" class="edge-label">definitions / snapshots</text>
+  <text x="560" y="456" class="edge-label">PyO3 embedded host</text>
+
+  <!-- Legend sits below the lowest component and boundary. -->
+  <g transform="translate(45 585)">
+    <text x="0" y="0" fill="#f8fafc" font-size="9" font-weight="700">LEGEND</text>
+    <rect x="62" y="-10" width="16" height="10" rx="2" class="host"/>
+    <text x="84" y="-1" class="legend">client host</text>
+    <rect x="220" y="-10" width="16" height="10" rx="2" class="runtime"/>
+    <text x="242" y="-1" class="legend">runtime component</text>
+    <rect x="430" y="-10" width="16" height="10" rx="2" class="state"/>
+    <text x="452" y="-1" class="legend">durable-state owner</text>
+    <line x1="660" y1="-5" x2="690" y2="-5" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+    <text x="699" y="-1" class="legend">request / dependency</text>
+  </g>
+</svg>

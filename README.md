@@ -331,21 +331,23 @@ CLI output uses that form. Python raises `visionql.VisionQLError`, a `RuntimeErr
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    CLIENTS["Flight SQL clients"] --> SERVER["vql-server / vqld"]
-    HOSTS["CLI / Python"] --> API["Engine / Session"]
-    SERVER --> API
-    API --> FRONTEND["VQL SQL"]
-    FRONTEND --> CATALOG["vql-catalog / vql.default"]
-    CATALOG --> FRONTEND
-    FRONTEND --> PLAN["Planner + DataFusion"]
-    PLAN --> RUNTIME["Media + Model Runtimes"]
-    RUNTIME --> ARROW["Arrow RecordBatches"]
-    ARROW --> HOSTS
-```
+[![VisionQL architecture](docs/assets/visionql-architecture.svg)](docs/architecture.html)
 
-The CLI, Python, and `vqld` hosts share `vql-kernel`, which owns SQL planning, prepared-statement classification, DataFusion execution, epoch-driven RTSP ingestion, media decoding, and model inference. `vql-server` adds Flight SQL Sessions, exact execution cancellation, network-safe `IMAGE` thumbnails, persistent Query control, restart orchestration, health, and aggregate metrics. The separate `vql-catalog` crate owns catalog domains, definition snapshots, persistent Query definitions and CAS status, backend ports, the SQLite implementation, and the Unity Catalog-compatible REST surface. SQL resolves unqualified names in `vql.default`. See the [High-Level Design](docs/high_level_design.md) and focused component designs below.
+At component level, `vql-cli` either connects to `vqld` over Flight SQL or embeds `vql-kernel`
+directly. `vql-python` is a second embedded host through PyO3. `vqld` delegates SQL planning and
+execution to `vql-kernel`, while retaining ownership of service Sessions and persistent Query
+lifecycle.
+
+`vql-kernel` resolves definitions and immutable snapshots through `vql-catalog`. Both the kernel and
+`vqld` use the Catalog-owned Query contract; `vql-catalog` persists definitions and Query status in
+`$VQL_HOME/catalog/vql.db`, so there is no separate service database.
+
+`vql-workbench` is an independent browser client. It connects only through `vqld`'s public Flight
+SQL boundary and does not import `vql-kernel` or `vql-catalog`.
+
+Open the [self-contained architecture diagram](docs/architecture.html) locally to inspect it at full
+size or export PNG/PDF. See the [High-Level Design](docs/high_level_design.md) and focused component
+designs below for normative contracts.
 
 ## Documentation
 

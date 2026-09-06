@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VisionQL Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js" integrity="sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/" crossorigin="anonymous"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      padding: 2rem;
+      color: #f8fafc;
+      background: #020617;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .container { max-width: 1120px; margin: 0 auto; }
+    .header { margin-bottom: 1.5rem; }
+    .header-row { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 11px; height: 11px; border-radius: 50%; background: #22d3ee; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { margin-left: 1.85rem; color: #94a3b8; font-size: 0.83rem; }
+    .diagram-container {
+      overflow-x: auto;
+      padding: 1.25rem;
+      border: 1px solid #1e293b;
+      border-radius: 1rem;
+      background: rgba(15, 23, 42, 0.5);
+    }
+    svg { display: block; width: 100%; min-width: 820px; }
+    .footer { margin-top: 1.25rem; color: #475569; font-size: 0.72rem; text-align: center; }
+    .toolbar { display: flex; flex-shrink: 0; align-items: center; gap: 0.5rem; margin-left: auto; }
+    .toolbar-toggle { padding: 0.25rem 0.5rem; border: 0; border-radius: 0.375rem; color: #475569; background: transparent; cursor: pointer; font-size: 1.25rem; line-height: 1; }
+    .toolbar-toggle:hover { color: #94a3b8; background: rgba(30, 41, 59, 0.5); }
+    .toolbar-actions { display: none; gap: 0.5rem; }
+    .toolbar.expanded .toolbar-actions { display: flex; }
+    .toolbar-actions button { padding: 0.375rem 0.75rem; border: 1px solid #334155; border-radius: 0.375rem; color: #94a3b8; background: rgba(30, 41, 59, 0.8); cursor: pointer; font: inherit; font-size: 0.72rem; white-space: nowrap; }
+    .toolbar-actions button:hover { color: #fff; border-color: #475569; background: rgba(51, 65, 85, 0.8); }
+    @media (max-width: 720px) { body { padding: 1rem; } h1 { font-size: 1.15rem; } .subtitle { margin-left: 0; } }
+    @media print { body { padding: 1rem; background: #020617; } .toolbar { display: none !important; } }
+  </style>
+</head>
+<body>
+  <div class="container" id="report-container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>VisionQL architecture</h1>
+        <div class="toolbar">
+          <div class="toolbar-actions">
+            <button onclick="copyAsImage(this)">📋 Copy</button>
+            <button onclick="downloadPNG(this)">🖼️ PNG</button>
+            <button onclick="downloadPDF(this)">📄 PDF</button>
+          </div>
+          <button class="toolbar-toggle" onclick="this.parentElement.classList.toggle('expanded')" title="Export options" aria-label="Export options">⋯</button>
+        </div>
+      </div>
+      <p class="subtitle">The core component path, without internal runtime or connector detail.</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" role="img" aria-labelledby="diagram-title diagram-desc">
+        <title id="diagram-title">VisionQL architecture</title>
+        <desc id="diagram-desc">The primary VisionQL component paths from vql-cli, vql-python, and vql-workbench through vqld or directly to vql-kernel and vql-catalog.</desc>
+        <defs>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+          <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/></marker>
+          <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/></marker>
+          <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/></marker>
+          <style>
+            text { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+            .heading { fill: #f8fafc; font-size: 20px; font-weight: 700; }
+            .diagram-subtitle { fill: #94a3b8; font-size: 10px; }
+            .boundary-title { fill: #34d399; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; }
+            .box-title { fill: #f8fafc; font-size: 13px; font-weight: 700; text-anchor: middle; }
+            .box-subtitle { fill: #cbd5e1; font-size: 9px; text-anchor: middle; }
+            .box-detail { fill: #94a3b8; font-size: 8px; text-anchor: middle; }
+            .edge-label { fill: #94a3b8; font-size: 8px; text-anchor: middle; paint-order: stroke; stroke: #020617; stroke-width: 4px; stroke-linejoin: round; }
+            .legend { fill: #94a3b8; font-size: 8px; }
+            .component-bg { fill: #0f172a; }
+            .host { fill: #083344; fill-opacity: 0.65; stroke: #22d3ee; stroke-width: 1.5; }
+            .runtime { fill: #064e3b; fill-opacity: 0.58; stroke: #34d399; stroke-width: 1.5; }
+            .state { fill: #4c1d95; fill-opacity: 0.55; stroke: #a78bfa; stroke-width: 1.5; }
+          </style>
+        </defs>
+
+        <rect width="1200" height="620" fill="#020617"/>
+        <rect width="1200" height="620" fill="url(#grid)"/>
+        <circle cx="28" cy="31" r="6" fill="#22d3ee"/>
+        <text x="44" y="38" class="heading">VisionQL architecture</text>
+        <text x="44" y="58" class="diagram-subtitle">Primary request and dependency paths in the current workspace</text>
+
+        <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M 190 130 V 95 H 995 V 248" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arrow-cyan)"/>
+          <path d="M 330 175 H 390 V 285 H 448" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#arrow-cyan)"/>
+          <path d="M 330 320 H 448" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#arrow-cyan)"/>
+          <path d="M 750 285 H 843" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+          <path d="M 600 360 V 385 H 900 V 398" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow-violet)"/>
+          <path d="M 1050 350 V 398" stroke="#a78bfa" stroke-width="1.7" marker-end="url(#arrow-violet)"/>
+          <path d="M 330 465 H 790 V 375 H 995 V 352" stroke="#34d399" stroke-width="1.6" marker-end="url(#arrow-emerald)"/>
+        </g>
+
+        <rect x="820" y="210" width="350" height="335" rx="12" fill="#34d399" fill-opacity="0.025" stroke="#34d399" stroke-width="1" stroke-dasharray="8 4"/>
+        <text x="840" y="232" class="boundary-title">SHARED CORE LIBRARIES</text>
+
+        <g><rect x="50" y="130" width="280" height="90" rx="7" class="component-bg"/><rect x="50" y="130" width="280" height="90" rx="7" class="host"/><text x="190" y="161" class="box-title">vql-cli</text><text x="190" y="182" class="box-subtitle">command-line client</text><text x="190" y="202" class="box-detail">shell / run • embedded or --endpoint</text></g>
+        <g><rect x="450" y="260" width="300" height="100" rx="7" class="component-bg"/><rect x="450" y="260" width="300" height="100" rx="7" class="runtime"/><text x="600" y="293" class="box-title">vqld</text><text x="600" y="316" class="box-subtitle">vql-server</text><text x="600" y="338" class="box-detail">Flight SQL • Sessions • persistent Query lifecycle</text></g>
+        <g><rect x="845" y="250" width="300" height="100" rx="7" class="component-bg"/><rect x="845" y="250" width="300" height="100" rx="7" class="runtime"/><text x="995" y="281" class="box-title">vql-kernel</text><text x="995" y="304" class="box-subtitle">SQL planning + execution</text><text x="995" y="328" class="box-detail">DataFusion • streaming • media • inference</text></g>
+        <g><rect x="50" y="275" width="280" height="90" rx="7" class="component-bg"/><rect x="50" y="275" width="280" height="90" rx="7" class="host"/><text x="190" y="306" class="box-title">vql-workbench</text><text x="190" y="327" class="box-subtitle">browser client</text><text x="190" y="347" class="box-detail">bounded visual SQL • public Flight SQL</text></g>
+        <g><rect x="50" y="420" width="280" height="90" rx="7" class="component-bg"/><rect x="50" y="420" width="280" height="90" rx="7" class="host"/><text x="190" y="451" class="box-title">vql-python</text><text x="190" y="472" class="box-subtitle">Python binding</text><text x="190" y="492" class="box-detail">PyO3 host • direct Engine / Session</text></g>
+        <g><rect x="845" y="400" width="300" height="100" rx="7" class="component-bg"/><rect x="845" y="400" width="300" height="100" rx="7" class="state"/><text x="995" y="431" class="box-title">vql-catalog</text><text x="995" y="454" class="box-subtitle">definitions • snapshots • Query status</text><text x="995" y="478" class="box-detail">SQLite • $VQL_HOME/catalog/vql.db</text></g>
+
+        <text x="600" y="88" class="edge-label">local: embedded Engine / Session</text>
+        <text x="360" y="165" class="edge-label">remote</text>
+        <text x="389" y="310" class="edge-label">Flight SQL</text>
+        <text x="797" y="275" class="edge-label">host API</text>
+        <text x="730" y="377" class="edge-label">persistent Query control</text>
+        <text x="1090" y="378" class="edge-label">definitions / snapshots</text>
+        <text x="560" y="456" class="edge-label">PyO3 embedded host</text>
+
+        <g transform="translate(45 585)">
+          <text x="0" y="0" fill="#f8fafc" font-size="9" font-weight="700">LEGEND</text>
+          <rect x="62" y="-10" width="16" height="10" rx="2" class="host"/><text x="84" y="-1" class="legend">client host</text>
+          <rect x="220" y="-10" width="16" height="10" rx="2" class="runtime"/><text x="242" y="-1" class="legend">runtime component</text>
+          <rect x="430" y="-10" width="16" height="10" rx="2" class="state"/><text x="452" y="-1" class="legend">durable-state owner</text>
+          <line x1="660" y1="-5" x2="690" y2="-5" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow-emerald)"/><text x="699" y="-1" class="legend">request / dependency</text>
+        </g>
+      </svg>
+    </div>
+
+    <p class="footer">VisionQL • current Rust workspace implementation • updated 2026-09-06</p>
+  </div>
+
+  <script>
+    async function capture() {
+      const el = document.getElementById('report-container');
+      const r = el.getBoundingClientRect();
+      const pad = 32;
+      return html2canvas(document.body, {
+        backgroundColor: '#020617', scale: 2, useCORS: true,
+        ignoreElements: (e) => e.classList && e.classList.contains('toolbar'),
+        x: r.left + window.scrollX - pad, y: r.top + window.scrollY - pad,
+        width: r.width + pad * 2, height: r.height + pad * 2
+      });
+    }
+    async function copyAsImage(btn) {
+      const orig = btn.textContent;
+      try {
+        const canvas = await capture();
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        btn.textContent = '✓ Copied!';
+      } catch (error) { btn.textContent = '✗ Failed'; }
+      setTimeout(() => { btn.textContent = orig; }, 2000);
+    }
+    async function downloadPNG(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const canvas = await capture();
+        const link = document.createElement('a');
+        link.download = 'visionql-architecture.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+        btn.textContent = '✓ Done!';
+      } catch (error) { btn.textContent = '✗ Failed'; }
+      setTimeout(() => { btn.textContent = orig; }, 2000);
+    }
+    async function downloadPDF(btn) {
+      const orig = btn.textContent;
+      btn.textContent = '⏳ ...';
+      try {
+        const canvas = await capture();
+        const imgData = canvas.toDataURL('image/png');
+        const { jsPDF } = window.jspdf;
+        const orientation = canvas.width > canvas.height ? 'landscape' : 'portrait';
+        const pdf = new jsPDF({ orientation, unit: 'px', format: [canvas.width, canvas.height], hotfixes: ['px_scaling'] });
+        pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+        pdf.save('visionql-architecture.pdf');
+        btn.textContent = '✓ Done!';
+      } catch (error) { btn.textContent = '✗ Failed'; }
+      setTimeout(() => { btn.textContent = orig; }, 2000);
+    }
+  </script>
+</body>
+</html>
