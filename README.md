@@ -90,6 +90,24 @@ LIMIT 5;
 
 VisionQL persists the table definition, so a new shell session can query `sample_images` without registering it again.
 
+### Build the container image
+
+The image contains both `vqld` and the `vql` CLI, persists local state under
+`/var/lib/visionql`, and starts `vqld` by default:
+
+```bash
+docker build -t visionql .
+docker run --rm visionql vql --version
+docker run --rm -it \
+  --mount source=visionql-home,target=/var/lib/visionql \
+  visionql vql shell
+```
+
+The daemon keeps its secure listener defaults inside the container. To publish Flight SQL outside
+the container, mount a certificate and key, set `VQLD_SERVICE_TOKEN`, and explicitly bind
+`VQLD_FLIGHT_ADDR` to a non-loopback address. The HTTP health endpoint remains loopback-only and is
+used by the image health check.
+
 ### Run `vqld`
 
 The single-node service listens for Arrow Flight SQL on `127.0.0.1:6031` and exposes health and aggregate metrics on `127.0.0.1:6032`:
