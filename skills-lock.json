@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "architecture-diagram": {
+      "source": "cocoon-ai/architecture-diagram-generator",
+      "sourceType": "github",
+      "skillPath": "architecture-diagram/SKILL.md",
+      "computedHash": "799076ad2f6cc6661f86e8f5561430daa60a06706ba04ddcdeb8962ac18eae96"
+    }
+  }
+}
