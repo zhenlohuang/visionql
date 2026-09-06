@@ -5452,16 +5452,16 @@ mod tests {
                 .downcast_ref::<Int64Array>()
                 .unwrap();
             for row in 0..batch.num_rows() {
-                assert!(counts.value(row) > 0);
-                assert!(minimums.value(row) <= maximums.value(row));
-                assert_eq!(
-                    sums.value(row),
-                    counts.value(row) * (minimums.value(row) + maximums.value(row)) / 2
-                );
-                assert_eq!(
-                    averages.value(row),
-                    sums.value(row) as f64 / counts.value(row) as f64
-                );
+                let count = counts.value(row);
+                let sum = sums.value(row);
+                let minimum = minimums.value(row);
+                let maximum = maximums.value(row);
+                assert!(count > 0);
+                assert!(minimum <= maximum);
+                // Bounded source backpressure may leave gaps between sampled frame IDs.
+                assert!(sum >= count * minimum);
+                assert!(sum <= count * maximum);
+                assert_eq!(averages.value(row), sum as f64 / count as f64);
             }
         }
     }

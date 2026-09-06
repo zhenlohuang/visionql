@@ -4,7 +4,7 @@
     <a href="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml">
       <img alt="CI" src="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml/badge.svg?branch=main">
     </a>
-    <img alt="Version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-6f42c1">
+    <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-6f42c1">
     <img alt="Rust 1.88 or newer" src="https://img.shields.io/badge/Rust-1.88%2B-black?logo=rust">
     <img alt="Python 3.10 or newer" src="https://img.shields.io/badge/Python-3.10%2B-3776AB">
     <a href="LICENSE">
@@ -26,7 +26,7 @@
 VisionQL is a unified batch and streaming engine for querying and processing multimodal data. With SQL, users can work with images, video files, and live video streams through the same query model. A chainable DataFrame API remains a future candidate rather than a scheduled contract.
 
 > [!IMPORTANT]
-> VisionQL v0.1.0 is the first public release. It supports image sets, historical video, typed inference, RTSP ingestion, streaming `TUMBLE`, attached foreground execution, and Kafka output. The current source tree also contains the v0.2 single-node `vqld` implementation; it has not yet been published as a release. The focused Workbench visual SQL client remains planned for v0.3. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
+> VisionQL v0.2.0 adds the single-node `vqld` service, Arrow Flight SQL access, and Catalog-backed persistent continuous Queries to the embedded batch and streaming engine introduced in v0.1. The focused Workbench visual SQL client remains planned for v0.3. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
 
 ## Why VisionQL
 
@@ -34,8 +34,8 @@ Physical AI systems continuously produce camera, vehicle, and robot data. Vision
 
 - **Replace one-off pipelines with queries.** Images become rows and sampled video frames become time-aware relations. Compose visual inference with familiar filters, joins, `UNNEST`, and aggregations instead of rebuilding orchestration for every question.
 - **Optimize inference, not just SQL.** Model calls stay visible in the plan rather than hiding inside black-box UDFs. VisionQL can push down frame sampling and time predicates, batch inference, and avoid decoding columns the query never reads.
-- **Develop on history, move to live data.** v0.1 uses one query model for bounded image/video data and unbounded RTSP camera streams, with attached execution and Kafka output.
-- **Keep execution close to the data.** The v0.1 engine runs in-process and does not require media uploads, a scheduler, or a control plane.
+- **Develop on history, move to live data.** One query model covers bounded image/video data and unbounded RTSP camera streams, with attached execution or explicit persistent Table writes.
+- **Keep execution close to the data.** Run the engine in-process or host it through the single-node `vqld` service without requiring media uploads, a scheduler, or a control plane.
 
 The [PRD](docs/prd.md) covers target users, representative Physical AI workflows, product boundaries, and the longer-term batch/stream value proposition.
 
@@ -50,8 +50,8 @@ The [PRD](docs/prd.md) covers target users, representative Physical AI workflows
 
 ### Package availability
 
-VisionQL v0.1.0 is currently distributed as source through the
-[GitHub release](https://github.com/zhenlohuang/visionql/releases/tag/v0.1.0). The Python package has
+VisionQL v0.2.0 is currently distributed as source through the
+[GitHub release](https://github.com/zhenlohuang/visionql/releases/tag/v0.2.0). The Python package has
 not yet been published to PyPI. Build the repository from source for the Python API, standalone
 `vql` CLI, examples, and system-test assets.
 

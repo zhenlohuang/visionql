@@ -18,4 +18,4 @@ table = session.sql("SELECT 1 AS value").collect()
 print(table)
 ```
 
-See the [project README](https://github.com/zhenlohuang/visionql#readme) for prerequisites, visual SQL examples, model setup, configuration, and the complete v0.1 scope.
+See the [project README](https://github.com/zhenlohuang/visionql#readme) for prerequisites, visual SQL examples, model setup, configuration, and the current release scope.

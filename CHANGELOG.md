@@ -4,7 +4,11 @@ All notable changes to VisionQL are documented in this file.
 
 ## [Unreleased]
 
-### Added
+## [0.2.0] - 2026-09-06
+
+VisionQL v0.2.0 adds the smallest useful single-node service for remote SQL and client-independent continuous queries while preserving the embedded v0.1 engine.
+
+### Highlights
 
 - Add the single-node `vqld` host with Arrow Flight SQL Sessions, direct and prepared statement execution, opaque execution tickets, exact cancellation, health endpoints, and aggregate metrics.
 - Add Catalog-backed persistent Queries through `SUBMIT QUERY`, `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY`, including atomic definition-generation pinning and compare-and-swap status transitions.
@@ -12,6 +16,12 @@ All notable changes to VisionQL are documented in this file.
 - Convert process-local `IMAGE` values to bounded encoded thumbnails at the Flight boundary and reject unsupported service-hosted Python Functions explicitly.
 - Add owner tests and a real Flight SQL, RTSP, and Kafka system journey for attached execution, cancellation, client-independent delivery, and recovery.
 - Let `vql shell` select either its existing embedded Session or a `vqld` Flight SQL endpoint, including flag- or environment-supplied service credentials, TLS trust configuration, exact remote cancellation, and structured VQL error preservation.
+
+### Scope boundaries
+
+- `vqld` is a single-node, one-principal service. Non-loopback Flight access requires TLS and one configured service token; the HTTP health and metrics surface remains loopback-only.
+- Restart recovery resumes RTSP Queries from the current live position with fresh in-memory window state and an explicit gap. v0.2.0 does not provide serialized checkpoints, `PAUSE` / `RESUME`, replay, or exactly-once delivery.
+- Service-side Python Functions, multi-user authorization, original-media Flight tickets, the DataFrame API, and Workbench are not part of v0.2.0.
 
 ## [0.1.0] - 2026-08-25
 
@@ -35,4 +45,6 @@ VisionQL v0.1.0 is the first public release of the embedded batch and streaming 
 - A focused Workbench client for bounded visual SQL results is planned for v0.3.
 - RTSP execution is attached, best-effort, and non-replayable; v0.1.0 does not promise exactly-once delivery or restart recovery.
 
+[Unreleased]: https://github.com/zhenlohuang/visionql/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/zhenlohuang/visionql/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/zhenlohuang/visionql/releases/tag/v0.1.0

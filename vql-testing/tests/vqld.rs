@@ -232,13 +232,7 @@ fn run_case(config: &SystemConfig, video: &Path) -> Result<(), String> {
         )
         .await?;
         wait_for_running(&mut client, &restart_id, 1).await?;
-        let described =
-            execute_query(&mut client, &format!("DESCRIBE QUERY '{restart_id}'")).await?;
-        let gap_start = timestamp_value(&described, 8, 0)?;
-        let gap_end = timestamp_value(&described, 9, 0)?;
-        if gap_start.is_none() || gap_end.is_none() {
-            return Err("restarted Query did not report a closed restart gap".to_owned());
-        }
+        let described = wait_for_closed_restart_gap(&mut client, &restart_id).await?;
         let reset = described[0]
             .column(10)
             .as_any()
@@ -506,6 +500,23 @@ async fn wait_for_running(
     Err(format!(
         "Query {query_id} did not become RUNNING with restart_gap_count={restart_gap_count}"
     ))
+}
+
+async fn wait_for_closed_restart_gap(
+    client: &mut FlightSqlServiceClient<Channel>,
+    query_id: &str,
+) -> Result<Vec<RecordBatch>, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline {
+        let described = execute_query(client, &format!("DESCRIBE QUERY '{query_id}'")).await?;
+        if timestamp_value(&described, 8, 0)?.is_some()
+            && timestamp_value(&described, 9, 0)?.is_some()
+        {
+            return Ok(described);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("restarted Query did not report a closed restart gap".to_owned())
 }
 
 async fn create_topic(bootstrap_servers: &str, topic: &str) -> Result<(), String> {

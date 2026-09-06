@@ -116,6 +116,6 @@ Each `vql-testing` target pairs a top-level entry point with same-named private 
 
 ## Docs
 
-`docs/high_level_design.md` is the authoritative system boundary and `docs/prd.md` the product scope. Component contracts live in `docs/design/{kernel,catalog,cli,python_binding,testing,error_codes}.md`, with `vqld.md` and `workbench.md` covering the planned v0.2/v0.3 hosts. `ROADMAP.md` remains the source of truth for version scope, and `docs/proposals/` holds later-feature designs.
+`docs/high_level_design.md` is the authoritative system boundary and `docs/prd.md` the product scope. Component contracts live in `docs/design/{kernel,catalog,cli,python_binding,testing,error_codes}.md`; `vqld.md` covers the v0.2 service host, while `workbench.md` covers the planned v0.3 client. `ROADMAP.md` remains the source of truth for version scope, and `docs/proposals/` holds later-feature designs.
 
 Write the HLD and the `docs/design/` documents as final-state specifications: fold an agreed outcome into the normative text directly, without change logs, before/after narratives, rejected alternatives, or "after discussion"-style meta phrasing. Decision history belongs in a dated proposal. When a public contract changes, update the README, PRD, Roadmap, HLD, and the owning component design together.
