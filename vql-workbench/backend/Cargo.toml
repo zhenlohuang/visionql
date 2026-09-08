@@ -1,0 +1,34 @@
+[package]
+name = "vql-workbench-backend"
+description = "Loopback HTTP and Arrow Flight SQL bridge for VisionQL Workbench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+arrow.workspace = true
+arrow-flight.workspace = true
+axum.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[[bin]]
+name = "vql-workbench"
+path = "src/main.rs"
