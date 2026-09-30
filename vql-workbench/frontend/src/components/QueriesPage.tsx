@@ -34,6 +34,7 @@ export function QueriesPage({
   request,
   onConnect,
   onLoadSql,
+  busy = false,
 }: {
   connected: boolean;
   active?: boolean;
@@ -41,6 +42,7 @@ export function QueriesPage({
   request: (sql: string, signal: AbortSignal) => Promise<QueryResult>;
   onConnect: () => void;
   onLoadSql: (sql: string, name: string) => void;
+  busy?: boolean;
 }) {
   const [queries, setQueries] = useState<PersistentQuery[] | null>(null);
   const [search, setSearch] = useState("");
@@ -219,7 +221,7 @@ export function QueriesPage({
               ) : null}
               <Button
                 size="icon"
-                disabled={!connected || operating}
+                disabled={!connected || operating || busy}
                 onClick={() => void operate(refresh)}
                 aria-label="Refresh queries"
               >
@@ -308,7 +310,7 @@ export function QueriesPage({
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
                       <button
                         className="break-all text-left font-mono text-[14px] font-semibold transition-colors hover:text-accent disabled:pointer-events-none"
-                        disabled={operating}
+                        disabled={operating || busy}
                         onClick={() => showSql(query)}
                         aria-label={`Inspect ${query.name}`}
                       >
@@ -346,7 +348,7 @@ export function QueriesPage({
                   <Button
                     size="sm"
                     className="font-mono text-[11px] shadow-none"
-                    disabled={operating}
+                    disabled={operating || busy}
                     onClick={() => showSql(query)}
                   >
                     <Code2 size={14} />
@@ -355,7 +357,7 @@ export function QueriesPage({
                   <Button
                     size="sm"
                     className="font-mono text-[11px] text-danger shadow-none hover:border-danger/25 hover:bg-danger/5 hover:text-danger"
-                    disabled={operating || !canStopQuery(query.state)}
+                    disabled={operating || busy || !canStopQuery(query.state)}
                     onClick={() => stopQuery(query)}
                   >
                     <Square size={12} />
@@ -494,7 +496,7 @@ export function QueriesPage({
           </div>
           <footer className="flex justify-end border-t border-hairline bg-canvas-soft px-5 py-3">
             <Button
-              disabled={!details || operating}
+              disabled={!details || operating || busy}
               onClick={() => {
                 if (details) onLoadSql(details.sql, details.name);
               }}

@@ -163,6 +163,8 @@ FROM sample_images;
 
 Use `SHOW MODELS`, `SHOW MODEL VERSIONS yolo`, and `DESCRIBE MODEL yolo` to inspect the aggregate, versions, and callable interface. `SHOW CREATE TABLE|MODEL|FUNCTION <name>` returns sanitized canonical DDL; credential references are redacted.
 
+`SHOW CREATE MODEL yolo` returns a complete `CREATE MODEL` declaration for the most recently added live version, independently of the default version. Use `SHOW CREATE MODEL yolo VERSION 'v1'` to inspect an exact version. Both include an explicit `VERSION` in the DDL and the actual `version` in the result; missing Models or versions return `NOT_FOUND`. `SHOW MODEL VERSIONS yolo` lists version state and the default marker.
+
 ### Built-in AI functions
 
 The v0.1 built-in AI surface is organized by task shape: `VQL_CLASSIFY` judges a whole input,

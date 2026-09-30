@@ -201,6 +201,8 @@ RESOLVE MODEL yolo26n;
 
 `SHOW MODELS` exposes aggregate identity, interface, live version count, default, and comment. `SHOW MODEL VERSIONS name` exposes status, volatility, fingerprint, creation time, and default marker.
 
+`SHOW CREATE MODEL name` returns the complete declaration of the most recently added live version, which can differ from the default version. `SHOW CREATE MODEL name VERSION 'version'` returns one exact, case-sensitive version or `NOT_FOUND`. Both return a standalone `CREATE MODEL` with an explicit `VERSION`, persisted interface, source, Runtime, options, and current comment, plus the actual `version` result field. Version state and publication metadata remain available through `SHOW MODEL VERSIONS`.
+
 `.onnx` and `triton+http(s)` sources have permanent Runtime defaults. ONNX resolution inspects names, shapes, layout, output metadata, and labels; ambiguous facts fail while naming the exact fallback option. A Triton URI carries the served model and optional routing version; service-backed versions are always volatile.
 
 `OPTIONS` contains result-affecting artifact, Runtime, input, or output facts, not deployment policy. Device placement, replicas, queue capacity, batch size, maximum wait, concurrency, timeout, and credentials belong to scheduler configuration or the secret provider. Unknown options fail rather than being silently retained.
@@ -444,6 +446,8 @@ The first users will be two or three design partners working with the team on on
 | `CREATE MODEL ... { TYPE ... \| (...) RETURNS ... } ... [OPTIONS (...)]` | DDL | Store a fast, unresolved Model aggregate with an immutable interface and first version |
 | `ALTER MODEL ... ADD\|DROP VERSION / SET DEFAULT_VERSION / SET COMMENT / RENAME TO` | DDL | Mutate a versioned Model aggregate without changing its persisted interface |
 | `RESOLVE MODEL <name> [VERSION '<version>']` | DDL | Perform the potentially slow artifact download/cache or service validation step for one version |
+| `SHOW CREATE MODEL <name> [VERSION '<version>']` | Inspection | Return a complete declaration and actual version for the latest live or an exact named version |
+| `SHOW MODEL VERSIONS <name>` | Inspection | List live versions with state, creation time, fingerprint, and the default marker |
 | `<model>(arguments [, version => '<version>', named semantic arguments])` | Typed inference | Call a Model directly; planning resolves the call target and version and extracts an `Inference` node |
 | `CREATE FUNCTION ... RETURN <expression> / LANGUAGE PYTHON AS '<entry>'` | DDL | Register a DataFusion-backed SQL expression or batched Python function |
 | `TUMBLE(ts, interval)` | Time bucket | Define a tumbling window for batch or streaming `GROUP BY` |

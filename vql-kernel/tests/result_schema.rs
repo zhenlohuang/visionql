@@ -1,6 +1,58 @@
+use std::collections::BTreeMap;
+
 use arrow::datatypes::DataType;
 use tempfile::tempdir;
 use vql_kernel::{Engine, EngineConfig, Session, Statement};
+
+#[test]
+fn show_create_model_returns_its_actual_version_in_direct_and_prepared_results() {
+    let temp = tempdir().expect("create test directory");
+    let engine =
+        Engine::new(EngineConfig::from_home(temp.path().join("vql-home"))).expect("create engine");
+    let session = engine.session().build().expect("create session");
+    session
+        .run_script(
+            "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';
+         CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1;",
+        )
+        .expect("create catalog objects");
+    for (sql, has_version) in [
+        ("SHOW CREATE MODEL detector", true),
+        ("SHOW CREATE MODEL detector VERSION 'v1'", true),
+        ("SHOW CREATE FUNCTION plus_one", false),
+    ] {
+        let prepared = session
+            .prepare(sql, "service", BTreeMap::new())
+            .expect("prepare SHOW CREATE");
+        let batches = session
+            .sql(sql)
+            .expect("execute SHOW CREATE")
+            .collect()
+            .expect("collect SHOW CREATE");
+        let mut expected = vec![
+            ("object_name", DataType::Utf8, false),
+            ("object_type", DataType::Utf8, false),
+            ("create_sql", DataType::Utf8, false),
+        ];
+        if has_version {
+            expected.push(("version", DataType::Utf8, false));
+        }
+        for schema in [prepared.result_schema(), batches[0].schema()] {
+            let fields = schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    (
+                        field.name().as_str(),
+                        field.data_type().clone(),
+                        field.is_nullable(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(fields, expected, "unexpected schema for {sql}");
+        }
+    }
+}
 
 #[test]
 fn ddl_results_keep_the_kernel_owned_schema_contract() {

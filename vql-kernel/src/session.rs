@@ -31,7 +31,7 @@ use crate::planner::{
 use crate::resources::{QueryBudget, QueryReservation, SessionMemoryPool};
 use crate::sql::{
     AlterModel, CreateModel, CreateTable, ModelInterfaceSpec, ShowKind, TableColumn, VqlStatement,
-    parse_statement, render_create, render_create_table,
+    parse_statement, render_create, render_create_model, render_create_table,
 };
 use crate::types::{image_field, is_image_storage};
 use crate::{Engine, ErrorCode, PythonUdfHostRef, Result, VqlError};
@@ -206,9 +206,18 @@ enum PreparedOperation {
 #[derive(Debug, Clone)]
 enum CatalogQuery {
     Show(ShowKind),
-    ShowModelVersions { name: String },
-    ShowCreate { kind: ShowKind, name: String },
-    Describe { kind: ShowKind, name: String },
+    ShowModelVersions {
+        name: String,
+    },
+    ShowCreate {
+        kind: ShowKind,
+        name: String,
+        version: Option<String>,
+    },
+    Describe {
+        kind: ShowKind,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1169,9 +1178,15 @@ impl Session {
                         VqlStatement::ShowModelVersions { name } => {
                             CatalogQuery::ShowModelVersions { name }
                         }
-                        VqlStatement::ShowCreate { kind, name } => {
-                            CatalogQuery::ShowCreate { kind, name }
-                        }
+                        VqlStatement::ShowCreate {
+                            kind,
+                            name,
+                            version,
+                        } => CatalogQuery::ShowCreate {
+                            kind,
+                            name,
+                            version,
+                        },
                         VqlStatement::Describe { kind, name } => {
                             CatalogQuery::Describe { kind, name }
                         }
@@ -1252,9 +1267,13 @@ impl Session {
             VqlStatement::ShowModelVersions { name } => {
                 self.show_model_versions(&name).map(Statement::Ddl)
             }
-            VqlStatement::ShowCreate { kind, name } => {
-                self.show_create(kind, &name).map(Statement::Ddl)
-            }
+            VqlStatement::ShowCreate {
+                kind,
+                name,
+                version,
+            } => self
+                .show_create(kind, &name, version.as_deref())
+                .map(Statement::Ddl),
             VqlStatement::Describe { kind, name } => self.describe(kind, &name).map(Statement::Ddl),
             VqlStatement::SubmitQuery { .. }
             | VqlStatement::ShowQueries
@@ -2039,17 +2058,47 @@ impl Session {
         self.show_functions(snapshot)
     }
 
-    fn show_create(&self, kind: ShowKind, name: &str) -> Result<DdlResult> {
+    fn show_create(&self, kind: ShowKind, name: &str, version: Option<&str>) -> Result<DdlResult> {
         let snapshot = self.engine.inner.catalog.snapshot()?;
-        self.show_create_with_snapshot(kind, name, &snapshot)
+        self.show_create_with_snapshot(kind, name, version, &snapshot)
     }
 
     fn show_create_with_snapshot(
         &self,
         kind: ShowKind,
         name: &str,
+        version: Option<&str>,
         snapshot: &crate::catalog::DefinitionSnapshot,
     ) -> Result<DdlResult> {
+        if kind == ShowKind::Models {
+            let model = snapshot.model(name).ok_or_else(|| {
+                VqlError::new(
+                    ErrorCode::NotFound,
+                    format!("model '{name}' does not exist"),
+                )
+            })?;
+            let model = &model.definition;
+            let selected = match version {
+                Some(version) => model.version(version).ok_or_else(|| {
+                    VqlError::new(
+                        ErrorCode::NotFound,
+                        format!("model '{name}' has no version '{version}'"),
+                    )
+                })?,
+                None => model.versions.last().ok_or_else(|| {
+                    VqlError::new(
+                        ErrorCode::Catalog,
+                        format!("model '{name}' has no live versions"),
+                    )
+                })?,
+            };
+            return show_create_result(
+                &model.name,
+                kind,
+                render_create_model(model, selected),
+                Some(&selected.name),
+            );
+        }
         let (object_type, create_sql) = match kind {
             ShowKind::Tables => (
                 "TABLE",
@@ -2057,12 +2106,9 @@ impl Session {
                     .table(name)
                     .map(|object| render_create_table(&object.definition, &object.schema)),
             ),
-            ShowKind::Models => (
-                "MODEL",
-                snapshot
-                    .model(name)
-                    .map(|object| render_create(&object.definition)),
-            ),
+            ShowKind::Models => {
+                unreachable!("Model definitions are rendered with a selected version")
+            }
             ShowKind::Functions => (
                 "FUNCTION",
                 snapshot
@@ -2080,7 +2126,7 @@ impl Session {
                 ),
             )
         })??;
-        show_create_result(name, object_type, create_sql)
+        show_create_result(name, kind, create_sql, None)
     }
 
     fn set(&self, sql: &str) -> Result<DdlResult> {
@@ -2500,9 +2546,11 @@ impl Session {
             CatalogQuery::ShowModelVersions { name } => {
                 self.show_model_versions_with_snapshot(name, snapshot)
             }
-            CatalogQuery::ShowCreate { kind, name } => {
-                self.show_create_with_snapshot(*kind, name, snapshot)
-            }
+            CatalogQuery::ShowCreate {
+                kind,
+                name,
+                version,
+            } => self.show_create_with_snapshot(*kind, name, version.as_deref(), snapshot),
             CatalogQuery::Describe { kind, name } => {
                 self.describe_with_snapshot(*kind, name, snapshot)
             }
@@ -3036,7 +3084,7 @@ fn catalog_query_schema(command: &CatalogQuery) -> SchemaRef {
         CatalogQuery::Show(ShowKind::Models) => show_models_schema(),
         CatalogQuery::Show(ShowKind::Functions) => show_functions_schema(),
         CatalogQuery::ShowModelVersions { .. } => show_model_versions_schema(),
-        CatalogQuery::ShowCreate { .. } => show_create_schema(),
+        CatalogQuery::ShowCreate { kind, .. } => show_create_schema(*kind),
         CatalogQuery::Describe {
             kind: ShowKind::Tables,
             ..
@@ -3090,12 +3138,16 @@ fn show_model_versions_schema() -> SchemaRef {
     ]))
 }
 
-fn show_create_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
+fn show_create_schema(kind: ShowKind) -> SchemaRef {
+    let mut fields = vec![
         Field::new("object_name", DataType::Utf8, false),
         Field::new("object_type", DataType::Utf8, false),
         Field::new("create_sql", DataType::Utf8, false),
-    ]))
+    ];
+    if kind == ShowKind::Models {
+        fields.push(Field::new("version", DataType::Utf8, false));
+    }
+    Arc::new(Schema::new(fields))
 }
 
 fn describe_table_schema() -> SchemaRef {
@@ -3168,17 +3220,27 @@ fn describe_query_schema() -> SchemaRef {
     ]))
 }
 
-fn show_create_result(name: &str, object_type: &str, create_sql: String) -> Result<DdlResult> {
-    let schema = show_create_schema();
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(StringArray::from(vec![name])) as ArrayRef,
-            Arc::new(StringArray::from(vec![object_type])),
-            Arc::new(StringArray::from(vec![create_sql.as_str()])),
-        ],
-    )
-    .map_err(|error| {
+fn show_create_result(
+    name: &str,
+    kind: ShowKind,
+    create_sql: String,
+    version: Option<&str>,
+) -> Result<DdlResult> {
+    let schema = show_create_schema(kind);
+    let object_type = match kind {
+        ShowKind::Tables => "TABLE",
+        ShowKind::Models => "MODEL",
+        ShowKind::Functions => "FUNCTION",
+    };
+    let mut columns = vec![
+        Arc::new(StringArray::from(vec![name])) as ArrayRef,
+        Arc::new(StringArray::from(vec![object_type])),
+        Arc::new(StringArray::from(vec![create_sql.as_str()])),
+    ];
+    if let Some(version) = version {
+        columns.push(Arc::new(StringArray::from(vec![version])));
+    }
+    let batch = RecordBatch::try_new(schema, columns).map_err(|error| {
         VqlError::new(ErrorCode::Execution, "failed to build SHOW CREATE result").with_source(error)
     })?;
     Ok(DdlResult {
@@ -3414,8 +3476,8 @@ mod tests {
         let unresolved_model = show_create_sql(&session, "SHOW CREATE MODEL detector");
         session.sql("RESOLVE MODEL detector").unwrap();
         let resolved_model = show_create_sql(&session, "SHOW CREATE MODEL detector");
-        assert!(resolved_model.starts_with(&unresolved_model));
-        assert!(resolved_model.contains("SET DEFAULT_VERSION = 'v1'"));
+        assert_eq!(resolved_model, unresolved_model);
+        assert!(resolved_model.contains("VERSION 'v1'"));
 
         let statements = [
             show_create_sql(&session, "SHOW CREATE TABLE photos"),
@@ -3468,6 +3530,145 @@ mod tests {
         let error = session.sql("SHOW CREATE FUNCTION missing").unwrap_err();
         assert_eq!(error.code, ErrorCode::NotFound);
         assert_eq!(error.message, "function 'missing' does not exist");
+    }
+
+    #[test]
+    fn show_create_model_selects_latest_live_or_exact_version_independently_of_default() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(
+                "CREATE MODEL quality.detector TYPE OBJECT_DETECTION VERSION 'v10'
+                   FROM 'mock://person' COMMENT 'Vision''s detector';
+                 RESOLVE MODEL quality.detector VERSION 'v10';
+                 ALTER MODEL quality.detector ADD VERSION 'v2' FROM 'mock://candidate';",
+            )
+            .unwrap();
+        let latest = show_create_sql(&session, "SHOW CREATE MODEL quality.detector");
+        assert_eq!(
+            latest,
+            "CREATE MODEL \"quality.detector\" TYPE OBJECT_DETECTION VERSION 'v2' FROM 'mock://candidate' USING ONNX_RUNTIME COMMENT 'Vision''s detector'"
+        );
+        assert!(!latest.contains("ALTER MODEL"));
+        let first = show_create_sql(&session, "SHOW CREATE MODEL quality.detector VERSION 'v10'");
+        assert!(first.contains("VERSION 'v10' FROM 'mock://person'"));
+
+        // Each returned definition can create its selected version on its own.
+        for (index, sql) in [&latest, &first].into_iter().enumerate() {
+            let copy = Engine::new(EngineConfig::new(
+                temp.path().join(format!("copy-{index}.db")),
+            ))
+            .unwrap();
+            let copy_session = copy.session().build().unwrap();
+            copy_session.run_script(sql).unwrap();
+            assert_eq!(
+                show_create_sql(&copy_session, "SHOW CREATE MODEL quality.detector"),
+                *sql
+            );
+        }
+
+        session
+            .sql("ALTER MODEL quality.detector ADD VERSION 'Release''2;Blue' FROM 'mock://blue'")
+            .unwrap();
+        let escaped = show_create_sql(
+            &session,
+            "SHOW CREATE MODEL quality.detector VERSION 'Release''2;Blue'",
+        );
+        assert!(escaped.contains("VERSION 'Release''2;Blue' FROM 'mock://blue'"));
+        assert_eq!(
+            show_create_sql(&session, "SHOW CREATE MODEL quality.detector"),
+            escaped
+        );
+        session
+            .sql("ALTER MODEL quality.detector DROP VERSION 'Release''2;Blue'")
+            .unwrap();
+        assert_eq!(
+            show_create_sql(&session, "SHOW CREATE MODEL quality.detector"),
+            latest
+        );
+        session
+            .sql("ALTER MODEL quality.detector DROP VERSION 'v2'")
+            .unwrap();
+        assert_eq!(
+            show_create_sql(&session, "SHOW CREATE MODEL quality.detector"),
+            first
+        );
+        let error = session
+            .sql("SHOW CREATE MODEL quality.detector VERSION 'v2'")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        assert_eq!(
+            error.message,
+            "model 'quality.detector' has no version 'v2'"
+        );
+        let error = session
+            .sql("SHOW CREATE MODEL quality.detector VERSION 'V10'")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        session
+            .sql("ALTER MODEL quality.detector ADD VERSION 'v2' FROM 'mock://reused'")
+            .unwrap();
+        assert!(
+            show_create_sql(&session, "SHOW CREATE MODEL quality.detector")
+                .contains("VERSION 'v2' FROM 'mock://reused'")
+        );
+    }
+
+    #[test]
+    fn prepared_show_create_model_pins_latest_and_explicit_versions_to_its_snapshot() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .run_script(
+                "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person';
+             ALTER MODEL detector ADD VERSION 'v2' FROM 'mock://candidate';",
+            )
+            .unwrap();
+        let prepared = [
+            "SHOW CREATE MODEL detector",
+            "SHOW CREATE MODEL detector VERSION 'v2'",
+        ]
+        .map(|sql| {
+            session
+                .prepare(sql, "service", session.semantic_settings())
+                .unwrap()
+        });
+        session
+            .run_script(
+                "ALTER MODEL detector ADD VERSION 'v3' FROM 'mock://third';
+             ALTER MODEL detector DROP VERSION 'v2';",
+            )
+            .unwrap();
+        for query in prepared {
+            let schema = query.result_schema();
+            let PreparedResult::Batches(batches) = query.execute_query().unwrap() else {
+                panic!("SHOW CREATE must return catalog batches");
+            };
+            assert_eq!(schema.fields(), batches[0].schema().fields());
+            assert_eq!(
+                batches[0]
+                    .column_by_name("version")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(0),
+                "v2"
+            );
+            assert!(
+                batches[0]
+                    .column_by_name("create_sql")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(0)
+                    .contains("VERSION 'v2' FROM 'mock://candidate'")
+            );
+        }
+        assert!(show_create_sql(&session, "SHOW CREATE MODEL detector").contains("VERSION 'v3'"));
     }
 
     #[test]

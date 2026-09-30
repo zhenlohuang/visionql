@@ -1,11 +1,9 @@
 import {
   BookOpen,
-  Box,
   Braces,
   Cable,
   CircleStop,
   FileClock,
-  FunctionSquare,
   History,
   Menu,
   PanelLeftClose,
@@ -16,7 +14,6 @@ import {
   Settings,
   Sparkles,
   SquareTerminal,
-  Table2,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -68,8 +65,14 @@ import { SqlEditor, type SqlEditorHandle } from "./components/SqlEditor";
 import { Button } from "./components/ui/button";
 import { Tooltip, TooltipProvider } from "./components/ui/tooltip";
 import { cn } from "./lib/cn";
-import { executeCatalogStatement, type CatalogSection } from "./lib/catalog";
+import {
+  executeCatalogStatement,
+  type CatalogObject,
+  type CatalogSection,
+} from "./lib/catalog";
 import { CatalogWorkspace } from "./components/CatalogWorkspace";
+import { CatalogTree } from "./components/CatalogTree";
+import { useCatalogNavigation } from "./lib/useCatalogNavigation";
 
 type WorkspacePage = "editor" | "queries" | CatalogSection;
 
@@ -97,6 +100,14 @@ export default function App() {
   const [editorHeight, setEditorHeight] = useState(300);
   const [page, setPage] = useState<WorkspacePage>("editor");
   const [catalogBusy, setCatalogBusy] = useState(false);
+  const [catalogNavigationBusy, setCatalogNavigationBusy] = useState(false);
+  const [catalogNamespace, setCatalogNamespace] = useState<string | null>(null);
+  const [catalogSelection, setCatalogSelection] = useState<{
+    id: string;
+    request: number;
+    version: string | null;
+  } | null>(null);
+  const catalogSelectionRequest = useRef(0);
   const [managementBusy, setManagementBusy] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
   const editorRef = useRef<SqlEditorHandle>(null);
@@ -105,10 +116,11 @@ export default function App() {
   const activeDraft =
     drafts.find((draft) => draft.id === activeDraftId) ?? drafts[0];
   const renamingDraft = drafts.find((draft) => draft.id === renamingDraftId);
+  const executionBusy = ["preparing", "running", "cancelling"].includes(
+    execution.phase,
+  );
   const busy =
-    catalogBusy ||
-    managementBusy ||
-    ["preparing", "running", "cancelling"].includes(execution.phase);
+    catalogBusy || catalogNavigationBusy || managementBusy || executionBusy;
   const connected = execution.phase !== "disconnected";
 
   const requestManagementSql = useCallback(
@@ -231,6 +243,7 @@ export default function App() {
     try {
       const start = await startExecution(sql, allowUnbounded);
       if (start.kind === "update") {
+        catalogNavigation.refresh();
         const elapsedMs = start.elapsedMs ?? Date.now() - startedAt;
         dispatch({
           type: "update_completed",
@@ -499,6 +512,37 @@ export default function App() {
     }
   };
 
+  const catalogNavigation = useCatalogNavigation({
+    connected,
+    sessionVersion,
+    busy,
+    execute: executeCatalogSql,
+    onBusyChange: setCatalogNavigationBusy,
+    canExecute: () => !executionInFlight.current,
+  });
+
+  useEffect(() => {
+    setCatalogSelection(null);
+    setCatalogNamespace(null);
+  }, [connected, sessionVersion]);
+
+  const navigateCatalog = (
+    section: CatalogSection,
+    namespace: string,
+    object?: CatalogObject,
+    version: string | null = null,
+  ) => {
+    if (busy || executionInFlight.current) return;
+    setCatalogNamespace(namespace);
+    setCatalogSelection(
+      object
+        ? { id: object.id, request: ++catalogSelectionRequest.current, version }
+        : null,
+    );
+    setPage(section);
+    setSidebarOpen(false);
+  };
+
   const beginResize = (event: React.PointerEvent) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     const originY = event.clientY;
@@ -541,6 +585,29 @@ export default function App() {
           onMobileClose={() => setSidebarOpen(false)}
           onHistory={() => setHistoryOpen(true)}
           onSettings={() => setSettingsOpen(true)}
+          catalogTree={
+            <CatalogTree
+              objects={catalogNavigation.objects}
+              connected={connected}
+              loading={catalogNavigation.loading}
+              busy={busy}
+              problem={catalogNavigation.problem}
+              activeSection={
+                page === "editor" || page === "queries" ? null : page
+              }
+              activeNamespace={catalogNamespace}
+              selectedId={
+                page === "editor" || page === "queries"
+                  ? null
+                  : (catalogSelection?.id ?? null)
+              }
+              onRefresh={catalogNavigation.refresh}
+              onNavigate={navigateCatalog}
+              onSelect={(section, object) =>
+                navigateCatalog(section, object.namespace, object)
+              }
+            />
+          }
         />
         <div className="flex min-w-0 flex-1 flex-col md:pl-[236px]">
           <header className="flex h-12 shrink-0 items-center justify-between border-b border-hairline bg-canvas/95 px-3 backdrop-blur-md md:px-4">
@@ -574,7 +641,8 @@ export default function App() {
             <QueriesPage
               key={sessionVersion}
               connected={connected}
-              active={!settingsOpen && !historyOpen}
+              active={!settingsOpen && !historyOpen && !catalogNavigationBusy}
+              busy={catalogNavigationBusy}
               connectionProblem={execution.problem}
               request={requestManagementSql}
               onConnect={() => setSettingsOpen(true)}
@@ -592,6 +660,25 @@ export default function App() {
               busy={busy}
               execute={executeCatalogSql}
               onBusyChange={setCatalogBusy}
+              namespace={catalogNamespace}
+              object={
+                catalogSelection
+                  ? (catalogNavigation.objects[page].find(
+                      (object) => object.id === catalogSelection.id,
+                    ) ?? null)
+                  : null
+              }
+              selectionRequest={catalogSelection?.request ?? 0}
+              version={catalogSelection?.version ?? null}
+              onSelectVersion={(version) => {
+                if (!busy && catalogSelection)
+                  setCatalogSelection({
+                    ...catalogSelection,
+                    version,
+                    request: ++catalogSelectionRequest.current,
+                  });
+              }}
+              canExecute={() => !executionInFlight.current}
               onConnect={() => setSettingsOpen(true)}
               onOpenSql={(sql, name) => {
                 if (!busy) {
@@ -639,7 +726,7 @@ export default function App() {
                   onChange={updateDraft}
                   onRun={() => void executeSql(activeDraft.sql, false)}
                   onRunCurrent={() => runCurrent(false)}
-                  disabled={busy}
+                  disabled={catalogBusy || managementBusy || executionBusy}
                 />
               </section>
               <button
@@ -709,6 +796,7 @@ function Sidebar({
   onMobileClose,
   onHistory,
   onSettings,
+  catalogTree,
 }: {
   connected: boolean;
   endpoint: string;
@@ -720,6 +808,7 @@ function Sidebar({
   onMobileClose: () => void;
   onHistory: () => void;
   onSettings: () => void;
+  catalogTree: React.ReactNode;
 }) {
   return (
     <>
@@ -791,29 +880,7 @@ function Sidebar({
               onClick={() => onNavigate("queries")}
             />
           </NavGroup>
-          <NavGroup title="Catalog" bordered>
-            <NavItem
-              icon={<Table2 size={17} />}
-              label="Tables"
-              active={page === "tables"}
-              disabled={busy}
-              onClick={() => onNavigate("tables")}
-            />
-            <NavItem
-              icon={<Box size={17} />}
-              label="Models"
-              active={page === "models"}
-              disabled={busy}
-              onClick={() => onNavigate("models")}
-            />
-            <NavItem
-              icon={<FunctionSquare size={17} />}
-              label="Functions"
-              active={page === "functions"}
-              disabled={busy}
-              onClick={() => onNavigate("functions")}
-            />
-          </NavGroup>
+          {catalogTree}
         </nav>
         <div className="border-t border-hairline p-2">
           <NavItem

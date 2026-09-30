@@ -36,6 +36,48 @@ export async function formatSql(sql: string): Promise<string> {
   });
 }
 
+export async function formatCatalogDdl(sql: string): Promise<string> {
+  const { formatDialect, postgresql } = await import("sql-formatter");
+  const clauses = [
+    "CREATE MODEL",
+    "TYPE",
+    "VERSION",
+    "FROM",
+    "USING",
+    "LOCATION",
+    "OPTIONS",
+    "RETURNS",
+    "RETURN",
+    "LANGUAGE PYTHON AS",
+    "COMMENT",
+    "TBLPROPERTIES",
+  ];
+  return formatDialect(sql, {
+    dialect: {
+      ...postgresql,
+      name: "visionql-ddl",
+      tokenizerOptions: {
+        ...postgresql.tokenizerOptions,
+        reservedClauses: [
+          ...postgresql.tokenizerOptions.reservedClauses,
+          ...clauses,
+        ],
+      },
+      formatOptions: {
+        ...postgresql.formatOptions,
+        onelineClauses: [
+          ...(postgresql.formatOptions.onelineClauses ?? []),
+          ...clauses,
+        ],
+      },
+    },
+    keywordCase: "upper",
+    dataTypeCase: "upper",
+    tabWidth: 2,
+    expressionWidth: 40,
+  });
+}
+
 function statementBoundaries(sql: string): Array<[number, number]> {
   const result: Array<[number, number]> = [];
   let start = 0;

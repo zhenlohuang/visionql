@@ -7,6 +7,7 @@ use crate::{ErrorCode, Result, VqlError};
 pub fn split_statements(script: &str) -> Result<Vec<String>> {
     let dialect = GenericDialect {};
     let tokens = Tokenizer::new(&dialect, script)
+        .with_unescape(false)
         .tokenize()
         .map_err(|error| VqlError::new(ErrorCode::InvalidSql, error.to_string()))?;
     let mut result = Vec::new();
@@ -69,5 +70,20 @@ mod tests {
         );
         assert!(ends_with_statement_terminator("SELECT 1; -- done").unwrap());
         assert!(!ends_with_statement_terminator("SELECT ';'").unwrap());
+    }
+
+    #[test]
+    fn preserves_escaped_literals_and_identifiers_when_splitting() {
+        let statements = split_statements(
+            "SHOW CREATE MODEL \"odd\"\"name\" VERSION 'One''s;蓝色'; SELECT 'Vision''s model';",
+        )
+        .unwrap();
+        assert_eq!(
+            statements,
+            [
+                "SHOW CREATE MODEL \"odd\"\"name\" VERSION 'One''s;蓝色'",
+                "SELECT 'Vision''s model'",
+            ]
+        );
     }
 }

@@ -28,6 +28,9 @@ importers:
       "@codemirror/view":
         specifier: ^6.43.11
         version: 6.43.11
+      "@lezer/highlight":
+        specifier: 1.2.3
+        version: 1.2.3
       "@radix-ui/react-dialog":
         specifier: ^1.1.23
         version: 1.1.23(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

@@ -968,14 +968,26 @@ fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
         return Ok(VqlStatement::ShowQueries);
     }
     if token_is(tokens.get(1), "CREATE") {
+        let kind = singular_kind(tokens.get(2))?;
         let mut index = 3;
         let name = qualified_identifier(tokens, &mut index, "object name")?;
+        let version = if kind == ShowKind::Models && token_is(tokens.get(index), "VERSION") {
+            index += 1;
+            let version = string_literal(tokens.get(index))?;
+            index += 1;
+            Some(version)
+        } else {
+            None
+        };
         if index != tokens.len() {
-            return invalid("expected SHOW CREATE <object kind> <name>");
+            return invalid(
+                "expected SHOW CREATE <object kind> <name> or SHOW CREATE MODEL <name> VERSION '<version>'",
+            );
         }
         return Ok(VqlStatement::ShowCreate {
-            kind: singular_kind(tokens.get(2))?,
+            kind,
             name,
+            version,
         });
     }
     if token_is(tokens.get(1), "MODEL") && token_is(tokens.get(2), "VERSIONS") {
@@ -1405,9 +1417,28 @@ mod tests {
             VqlStatement::ShowCreate {
                 kind: ShowKind::Models,
                 name: "detector".to_owned(),
+                version: None,
+            }
+        );
+        assert_eq!(
+            parse_statement("SHOW CREATE MODEL team.media.detector VERSION 'One''s;release'")
+                .unwrap(),
+            VqlStatement::ShowCreate {
+                kind: ShowKind::Models,
+                name: "team.media.detector".to_owned(),
+                version: Some("One's;release".to_owned()),
             }
         );
         assert!(parse_statement("SHOW CREATE MODEL").is_err());
+        for sql in [
+            "SHOW CREATE MODEL detector VERSION",
+            "SHOW CREATE MODEL detector VERSION v2",
+            "SHOW CREATE MODEL detector VERSION 'v2' trailing",
+            "SHOW CREATE TABLE photos VERSION 'v2'",
+            "SHOW CREATE FUNCTION score VERSION 'v2'",
+        ] {
+            assert!(parse_statement(sql).is_err(), "accepted invalid SQL: {sql}");
+        }
         assert!(parse_statement("SHOW CREATE VIEW example").is_err());
     }
 

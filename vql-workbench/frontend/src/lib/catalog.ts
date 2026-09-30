@@ -19,14 +19,39 @@ export interface CatalogObject {
   id: string;
   name: string;
   kind: CatalogKind;
-  category: string;
   namespace: string;
-  summary: string;
-  signature: string;
   ddl: string;
-  description: QueryResult | null;
-  versions: QueryResult | null;
+  ddlVersion?: string;
   problem: WorkbenchProblem | null;
+  lookupNames: string[];
+  versionCount?: number;
+  versions?: CatalogVersion[];
+  versionsProblem?: WorkbenchProblem;
+}
+
+export interface CatalogVersion {
+  name: string;
+  isDefault: boolean;
+}
+
+export type CatalogSnapshot = Record<CatalogSection, CatalogObject[]>;
+
+export function emptyCatalog(): CatalogSnapshot {
+  return { tables: [], models: [], functions: [] };
+}
+
+// Match the public SQL callable display-address convention.
+export function catalogAddress(name: string): {
+  catalog: string;
+  schema: string;
+  name: string;
+} {
+  const parts = name.split(".");
+  if (parts.length === 3)
+    return { catalog: parts[0], schema: parts[1], name: parts[2] };
+  if (parts.length === 2)
+    return { catalog: "vql", schema: parts[0], name: parts[1] };
+  return { catalog: "vql", schema: "default", name };
 }
 
 export const CATALOG_KINDS: Record<CatalogSection, CatalogKind> = {
@@ -48,7 +73,7 @@ export function quoteName(name: string): string {
   return name.split(".").map(quoteIdentifier).join(".");
 }
 
-export function quoteLiteral(value: string): string {
+function quoteString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
@@ -92,7 +117,7 @@ export async function executeCatalogStatement(
   }
 }
 
-export async function loadCatalog(
+export async function listCatalog(
   section: CatalogSection,
   execute: CatalogExecutor,
   signal?: AbortSignal,
@@ -108,8 +133,6 @@ export async function loadCatalog(
     addressCount.set(key, (addressCount.get(key) ?? 0) + 1);
   }
   const objects: CatalogObject[] = [];
-  // A Session supports one active execution. Enrich rows sequentially, never
-  // issue concurrent Flight requests for descriptions or model versions.
   for (const row of listed?.rows ?? []) {
     const kind =
       section === "functions" && textValue(row, "kind") === "MODEL"
@@ -123,91 +146,109 @@ export async function loadCatalog(
       section === "tables"
         ? "vql.default"
         : `${textValue(row, "catalog")}.${textValue(row, "schema")}`;
+    const ambiguous =
+      section !== "tables" && (addressCount.get(addressKey(row)) ?? 0) > 1;
     const object: CatalogObject = {
-      id: `${kind}:${namespace}:${name}:${row.id}`,
+      id: JSON.stringify([
+        kind,
+        namespace,
+        name,
+        ...(ambiguous ? [row.id] : []),
+      ]),
       name,
       kind,
       namespace,
-      category:
-        section === "tables"
-          ? textValue(row, "provider")
-          : kind === "MODEL"
-            ? "Model callable"
-            : "Function",
-      summary:
-        section === "tables"
-          ? textValue(row, "location")
-          : textValue(row, "comment"),
-      signature:
-        section === "models"
-          ? textValue(row, "interface")
-          : section === "functions"
-            ? `${name}(${textValue(row, "arguments")}) → ${textValue(row, "return_type")}`
-            : "",
       ddl: "",
-      description: null,
-      versions: null,
       problem: null,
+      lookupNames: section === "tables" ? [name] : objectNames(row),
+      ...(section === "models"
+        ? { versionCount: Number(textValue(row, "versions")) }
+        : {}),
     };
-    try {
-      if (
-        section !== "tables" &&
-        (addressCount.get(addressKey(row)) ?? 0) > 1
-      ) {
-        throw {
-          source: "policy",
-          title: "Ambiguous catalog address",
-          message:
-            "Multiple stored names have this display address. Use an explicit object name in the SQL editor to inspect or modify it.",
-        } satisfies WorkbenchProblem;
-      }
-      // SHOW MODELS/FUNCTIONS returns display addresses rather than the stored
-      // SQL name. SHOW CREATE supplies that name. Try only equivalent address
-      // spellings, and only fall back on the public NOT_FOUND symbol.
-      const candidates = section === "tables" ? [name] : objectNames(row);
-      let definition: QueryResult | null = null;
-      for (let index = 0; index < candidates.length; index += 1) {
-        try {
-          definition = await request(
-            `SHOW CREATE ${kind} ${quoteName(candidates[index])};`,
-          );
-          break;
-        } catch (error) {
-          if (
-            asProblem(error).symbol !== "NOT_FOUND" ||
-            index === candidates.length - 1
-          )
-            throw error;
-        }
-      }
-      const definitionRow = definition?.rows[0];
-      if (!definitionRow) throw new Error("SHOW CREATE returned no definition");
-      object.name = textValue(definitionRow, "object_name");
-      object.ddl = textValue(definitionRow, "create_sql");
-      object.description = await request(
-        `DESCRIBE ${kind} ${quoteName(object.name)};`,
-      );
-      if (kind === "MODEL")
-        object.versions = await request(
-          `SHOW MODEL VERSIONS ${quoteName(object.name)};`,
-        );
-      if (kind === "FUNCTION") {
-        const keywords = object.ddl.replace(
-          /'(?:[^']|'')*'|"(?:[^"]|"")*"/g,
-          "",
-        );
-        object.category = /\bLANGUAGE\s+PYTHON\s+AS\b/i.test(keywords)
-          ? "Python UDF"
-          : "SQL Expression";
-      }
-    } catch (error) {
-      signal?.throwIfAborted();
-      object.problem = asProblem(error);
-      if (object.problem.httpStatus === 401) throw error;
+    if (ambiguous) {
+      object.problem = {
+        source: "policy",
+        title: "Ambiguous catalog address",
+        message:
+          "Multiple stored names have this display address. Use an explicit object name in the SQL editor to inspect or modify it.",
+      };
     }
     objects.push(object);
   }
+  signal?.throwIfAborted();
   return objects.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export async function loadCatalogObject(
+  object: CatalogObject,
+  execute: CatalogExecutor,
+  signal?: AbortSignal,
+  version: string | null = null,
+): Promise<CatalogObject> {
+  signal?.throwIfAborted();
+  if (object.problem) return object;
+  const definition = await queryCatalogObject(
+    object,
+    (name) =>
+      `SHOW CREATE ${object.kind} ${quoteName(name)}${object.kind === "MODEL" && version !== null ? ` VERSION ${quoteString(version)}` : ""};`,
+    execute,
+    signal,
+  );
+  const definitionRow = definition?.rows[0];
+  if (!definitionRow) throw new Error("SHOW CREATE returned no definition");
+  signal?.throwIfAborted();
+  return {
+    ...object,
+    name: textValue(definitionRow, "object_name"),
+    ddl: textValue(definitionRow, "create_sql"),
+    ddlVersion:
+      object.kind === "MODEL" ? textValue(definitionRow, "version") : undefined,
+  };
+}
+
+export async function listCatalogVersions(
+  object: CatalogObject,
+  execute: CatalogExecutor,
+  signal?: AbortSignal,
+): Promise<CatalogVersion[]> {
+  signal?.throwIfAborted();
+  if (object.problem) throw object.problem;
+  const result = await queryCatalogObject(
+    object,
+    (name) => `SHOW MODEL VERSIONS ${quoteName(name)};`,
+    execute,
+    signal,
+  );
+  signal?.throwIfAborted();
+  return (result?.rows ?? []).map((row) => ({
+    name: textValue(row, "version"),
+    isDefault: row.values.is_default === true,
+  }));
+}
+
+async function queryCatalogObject(
+  object: CatalogObject,
+  statement: (name: string) => string,
+  execute: CatalogExecutor,
+  signal?: AbortSignal,
+): Promise<QueryResult | null> {
+  // SHOW MODELS/FUNCTIONS returns display addresses rather than the stored
+  // SQL name. SHOW CREATE supplies that name. Try only equivalent address
+  // spellings, and only fall back on the public NOT_FOUND symbol.
+  const candidates = object.lookupNames;
+  for (let index = 0; index < candidates.length; index += 1) {
+    try {
+      signal?.throwIfAborted();
+      return await execute(statement(candidates[index]), signal);
+    } catch (error) {
+      if (
+        asProblem(error).symbol !== "NOT_FOUND" ||
+        index === candidates.length - 1
+      )
+        throw error;
+    }
+  }
+  throw new Error("Catalog object has no lookup name");
 }
 
 function addressKey(row: ResultRow): string {
@@ -227,23 +268,25 @@ function objectNames(row: ResultRow): string[] {
   ];
 }
 
-export function modelAction(
-  object: CatalogObject,
-  action: "resolve" | "default" | "dropVersion",
-  version: string,
+export function createTemplate(
+  section: CatalogSection,
+  namespace = "vql.default",
 ): string {
-  const name = quoteName(object.name);
-  const literal = quoteLiteral(version);
-  if (action === "resolve") return `RESOLVE MODEL ${name} VERSION ${literal};`;
-  if (action === "default")
-    return `ALTER MODEL ${name} SET DEFAULT_VERSION = ${literal};`;
-  return `ALTER MODEL ${name} DROP VERSION ${literal};`;
-}
-
-export function createTemplate(section: CatalogSection): string {
+  const prefix =
+    namespace === "vql.default"
+      ? ""
+      : namespace.startsWith("vql.")
+        ? `${namespace.slice(4)}.`
+        : `${namespace}.`;
   if (section === "tables")
     return "CREATE TABLE photos\nUSING IMAGES\nLOCATION '/path/to/images';";
+  const name = (value: string) =>
+    prefix
+      ? section === "functions"
+        ? quoteIdentifier(`${prefix}${value}`)
+        : quoteName(`${prefix}${value}`)
+      : value;
   if (section === "models")
-    return "CREATE MODEL detector TYPE OBJECT_DETECTION\nVERSION 'v1'\nFROM '/path/to/model.onnx'\nUSING ONNX_RUNTIME;";
-  return "CREATE FUNCTION plus_one(BIGINT)\nRETURNS BIGINT\nRETURN $1 + 1;";
+    return `CREATE MODEL ${name("detector")} TYPE OBJECT_DETECTION\nVERSION 'v1'\nFROM '/path/to/model.onnx'\nUSING ONNX_RUNTIME;`;
+  return `CREATE FUNCTION ${name("plus_one")}(BIGINT)\nRETURNS BIGINT\nRETURN $1 + 1;`;
 }

@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-
 import {
   executeCatalogStatement,
-  loadCatalog,
-  modelAction,
+  loadCatalogObject,
+  listCatalog,
+  listCatalogVersions,
+  catalogAddress,
+  createTemplate,
   quoteName,
-  type CatalogObject,
 } from "./catalog";
 import type { QueryResult, ResultValue } from "./types";
 import * as api from "./api";
@@ -14,14 +15,66 @@ import * as arrow from "./arrow";
 function result(...rows: Record<string, ResultValue>[]): QueryResult {
   return {
     fields: [],
-    rows: rows.map((values, index) => ({ id: index, values })),
+    rows: rows.map((values, id) => ({ id, values })),
     receivedBatches: 1,
     rolling: false,
   };
 }
 
 describe("catalog public SQL mapping", () => {
-  it("uses MODEL metadata for model callables in SHOW FUNCTIONS", async () => {
+  it("lists same-named callables across namespaces without loading definitions", async () => {
+    const execute = vi.fn(async () =>
+      result(
+        { catalog: "vql", schema: "default", name: "score", kind: "FUNCTION" },
+        { catalog: "vql", schema: "quality", name: "score", kind: "FUNCTION" },
+        { catalog: "team", schema: "media", name: "score", kind: "FUNCTION" },
+      ),
+    );
+    const objects = await listCatalog("functions", execute);
+    expect(objects.map((object) => object.namespace).sort()).toEqual([
+      "team.media",
+      "vql.default",
+      "vql.quality",
+    ]);
+    expect(new Set(objects.map((object) => object.id)).size).toBe(3);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(catalogAddress("team.media.photos")).toEqual({
+      catalog: "team",
+      schema: "media",
+      name: "photos",
+    });
+    expect(createTemplate("functions", "vql.quality")).toContain(
+      'CREATE FUNCTION "quality.plus_one"',
+    );
+    expect(createTemplate("models", "team.media")).toContain(
+      'CREATE MODEL "team"."media"."detector"',
+    );
+    expect(quoteName('quality.odd"name')).toBe('"quality"."odd""name"');
+  });
+
+  it("keeps Tables in the supported default namespace", async () => {
+    const execute = vi.fn(async () =>
+      result({ table_name: "photos", provider: "IMAGES" }),
+    );
+    const [object] = await listCatalog("tables", execute);
+    expect(object.namespace).toBe("vql.default");
+    expect(object.lookupNames).toEqual(["photos"]);
+    expect(execute).toHaveBeenCalledWith("SHOW TABLES;", undefined);
+  });
+
+  it("preserves selection identity when refreshed rows change order", async () => {
+    const first = await listCatalog("tables", async () =>
+      result({ table_name: "photos" }),
+    );
+    const refreshed = await listCatalog("tables", async () =>
+      result({ table_name: "camera" }, { table_name: "photos" }),
+    );
+    expect(refreshed.find((object) => object.name === "photos")?.id).toBe(
+      first[0].id,
+    );
+  });
+
+  it("loads only selected defining SQL and uses MODEL for model callables", async () => {
     const execute = vi.fn(async (sql: string) => {
       if (sql === "SHOW FUNCTIONS;")
         return result({
@@ -29,34 +82,25 @@ describe("catalog public SQL mapping", () => {
           schema: "default",
           name: "detector",
           kind: "MODEL",
-          arguments: "frame IMAGE",
-          return_type: "ARRAY<STRUCT>",
         });
-      if (sql.startsWith("SHOW CREATE MODEL"))
+      if (sql === 'SHOW CREATE MODEL "detector";')
         return result({
           object_name: "detector",
-          create_sql:
-            "CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'",
-        });
-      if (sql.startsWith("DESCRIBE MODEL"))
-        return result({ status: "UNRESOLVED" });
-      if (sql.startsWith("SHOW MODEL VERSIONS"))
-        return result({
           version: "v1",
-          status: "UNRESOLVED",
-          is_default: true,
+          create_sql:
+            "CREATE MODEL detector TYPE OBJECT_DETECTION VERSION 'v1' FROM 'mock://person'",
         });
       throw new Error(`Unexpected SQL: ${sql}`);
     });
-    const [object] = await loadCatalog("functions", execute);
+    const [listed] = await listCatalog("functions", execute);
+    const object = await loadCatalogObject(listed, execute);
     expect(object.kind).toBe("MODEL");
-    expect(object.category).toBe("Model callable");
-    expect(object.versions?.rows).toHaveLength(1);
+    expect(object.ddl).toContain("CREATE MODEL");
+    expect(object.ddlVersion).toBe("v1");
+    expect(listed.ddl).toBe("");
     expect(execute.mock.calls.map(([sql]) => sql)).toEqual([
       "SHOW FUNCTIONS;",
       'SHOW CREATE MODEL "detector";',
-      'DESCRIBE MODEL "detector";',
-      'SHOW MODEL VERSIONS "detector";',
     ]);
   });
 
@@ -68,8 +112,6 @@ describe("catalog public SQL mapping", () => {
           schema: "quality",
           name: "blur",
           kind: "FUNCTION",
-          arguments: "img IMAGE",
-          return_type: "FLOAT",
         });
       if (sql === 'SHOW CREATE FUNCTION "quality"."blur";')
         throw {
@@ -81,20 +123,18 @@ describe("catalog public SQL mapping", () => {
       if (sql === 'SHOW CREATE FUNCTION "vql"."quality"."blur";')
         return result({
           object_name: "vql.quality.blur",
-          create_sql:
-            "CREATE FUNCTION blur(img IMAGE) RETURNS FLOAT LANGUAGE PYTHON AS 'quality:blur'",
+          create_sql: "CREATE FUNCTION blur(BIGINT) RETURNS BIGINT RETURN $1",
         });
-      if (sql === 'DESCRIBE FUNCTION "vql"."quality"."blur";')
-        return result({ status: "AVAILABLE" });
       throw new Error(`Unexpected SQL: ${sql}`);
     });
-    const [object] = await loadCatalog("functions", execute);
-    expect(object.name).toBe("vql.quality.blur");
-    expect(object.category).toBe("Python UDF");
-    expect(object.problem).toBeNull();
+    const [listed] = await listCatalog("functions", execute);
+    expect((await loadCatalogObject(listed, execute)).name).toBe(
+      "vql.quality.blur",
+    );
+    expect(execute).toHaveBeenCalledTimes(3);
   });
 
-  it("retains row metadata and exact structured errors when enrichment fails", async () => {
+  it("preserves structured errors and does not fall back on permission failure", async () => {
     const problem = {
       source: "vql",
       title: "Denied",
@@ -102,101 +142,118 @@ describe("catalog public SQL mapping", () => {
       symbol: "PERMISSION_DENIED",
       code: "VQL-test",
     };
-    const execute = vi.fn(async (sql: string) => {
-      if (sql === "SHOW MODELS;")
-        return result({
-          catalog: "vql",
-          schema: "default",
-          name: "model",
-          interface: "IMAGE → FLOAT",
-        });
+    const [object] = await listCatalog("models", async () =>
+      result({ catalog: "vql", schema: "quality", name: "model" }),
+    );
+    const execute = vi.fn(async () => {
       throw problem;
     });
-    const [object] = await loadCatalog("models", execute);
-    expect(object.problem).toEqual(problem);
-    expect(object.signature).toBe("IMAGE → FLOAT");
-    expect(execute).toHaveBeenCalledTimes(2);
+    await expect(loadCatalogObject(object, execute)).rejects.toEqual(problem);
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
-  it("does not classify SQL expression string contents as a Python declaration", async () => {
-    const execute = vi.fn(async (sql: string) => {
-      if (sql === "SHOW FUNCTIONS;")
-        return result({
-          catalog: "vql",
-          schema: "default",
-          name: "words",
-          kind: "FUNCTION",
-          arguments: "BIGINT",
-          return_type: "TEXT",
-        });
-      if (sql.startsWith("SHOW CREATE"))
-        return result({
-          object_name: "words",
-          create_sql:
-            "CREATE FUNCTION words(BIGINT) RETURNS TEXT RETURN 'LANGUAGE PYTHON AS ''quality:score'''",
-        });
-      return result({ status: "AVAILABLE" });
-    });
-    expect((await loadCatalog("functions", execute))[0].category).toBe(
-      "SQL Expression",
-    );
-  });
-
-  it("quotes object names and versions so actions remain one statement", () => {
-    expect(quoteName('quality.odd"name')).toBe('"quality"."odd""name"');
-    const object = { name: 'odd"name' } as CatalogObject;
-    expect(
-      modelAction(object, "dropVersion", "v1'; DROP MODEL other; --"),
-    ).toBe(
-      "ALTER MODEL \"odd\"\"name\" DROP VERSION 'v1''; DROP MODEL other; --';",
-    );
-  });
-
-  it("stops enrichment after a cancelled request", async () => {
+  it("stops fallback after cancellation", async () => {
     const controller = new AbortController();
+    const [object] = await listCatalog("models", async () =>
+      result({ catalog: "vql", schema: "quality", name: "model" }),
+    );
     const execute = vi.fn(async () => {
       controller.abort();
-      return result({
-        table_name: "photos",
-        provider: "IMAGES",
-        location: "/images",
-      });
+      throw {
+        source: "vql",
+        title: "Not found",
+        message: "missing",
+        symbol: "NOT_FOUND",
+      };
     });
     await expect(
-      loadCatalog("tables", execute, controller.signal),
+      loadCatalogObject(object, execute, controller.signal),
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
-  it("does not guess a mutation target when display addresses collide", async () => {
+  it("loads versions via public SQL and retries only equivalent NOT_FOUND addresses", async () => {
+    const [object] = await listCatalog("models", async () =>
+      result({
+        catalog: "vql",
+        schema: "quality",
+        name: "detector",
+        versions: 2,
+      }),
+    );
+    const execute = vi.fn(async (sql: string) => {
+      if (sql === 'SHOW MODEL VERSIONS "quality"."detector";')
+        throw {
+          source: "vql",
+          title: "Not found",
+          message: "missing",
+          symbol: "NOT_FOUND",
+        };
+      if (sql === 'SHOW MODEL VERSIONS "vql"."quality"."detector";')
+        return result(
+          { version: "v1", is_default: false },
+          { version: "v2", is_default: true },
+        );
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    expect(object.versionCount).toBe(2);
+    expect(await listCatalogVersions(object, execute)).toEqual([
+      { name: "v1", isDefault: false },
+      { name: "v2", isDefault: true },
+    ]);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("fetches the selected version directly, escapes its name, and forwards NOT_FOUND", async () => {
+    const [object] = await listCatalog("models", async () =>
+      result({ catalog: "vql", schema: "default", name: "detector" }),
+    );
+    const versionSql = `CREATE MODEL "detector" TYPE OBJECT_DETECTION VERSION 'one''s;release' FROM 'mock://candidate'`;
+    const problem = {
+      source: "vql",
+      title: "Not found",
+      message: "model 'detector' has no version 'removed'",
+      symbol: "NOT_FOUND",
+    };
+    const execute = vi.fn(async (sql: string) => {
+      if (sql.endsWith(" VERSION 'removed';")) throw problem;
+      return result({
+        object_name: "detector",
+        version: "one's;release",
+        create_sql: versionSql,
+      });
+    });
+    const selected = await loadCatalogObject(
+      object,
+      execute,
+      undefined,
+      "one's;release",
+    );
+    expect(selected.ddl).toBe(versionSql);
+    expect(selected.ddlVersion).toBe("one's;release");
+    expect(execute).toHaveBeenCalledWith(
+      "SHOW CREATE MODEL \"detector\" VERSION 'one''s;release';",
+      undefined,
+    );
+    await expect(
+      loadCatalogObject(object, execute, undefined, "removed"),
+    ).rejects.toEqual(problem);
+  });
+
+  it("does not guess an object when display addresses collide", async () => {
     const execute = vi.fn(async () =>
       result(
-        {
-          catalog: "vql",
-          schema: "default",
-          name: "same",
-          kind: "FUNCTION",
-          arguments: "BIGINT",
-          return_type: "BIGINT",
-        },
-        {
-          catalog: "vql",
-          schema: "default",
-          name: "same",
-          kind: "FUNCTION",
-          arguments: "FLOAT",
-          return_type: "FLOAT",
-        },
+        { catalog: "vql", schema: "default", name: "same", kind: "FUNCTION" },
+        { catalog: "vql", schema: "default", name: "same", kind: "FUNCTION" },
       ),
     );
-    const objects = await loadCatalog("functions", execute);
-    expect(execute).toHaveBeenCalledTimes(1);
+    const objects = await listCatalog("functions", execute);
     expect(new Set(objects.map((object) => object.id)).size).toBe(2);
-    expect(
-      objects.every(
-        (object) => object.problem?.source === "policy" && !object.ddl,
-      ),
-    ).toBe(true);
+    for (const object of objects)
+      expect((await loadCatalogObject(object, execute)).problem?.source).toBe(
+        "policy",
+      );
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 });
 

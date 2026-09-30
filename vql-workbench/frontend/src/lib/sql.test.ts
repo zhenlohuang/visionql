@@ -1,6 +1,38 @@
 import { describe, expect, it } from "vitest";
 
-import { selectedOrCurrentStatement } from "./sql";
+import { formatCatalogDdl, selectedOrCurrentStatement } from "./sql";
+
+describe("Catalog DDL formatting", () => {
+  it("formats VisionQL Table and Model clauses without changing quoted contents", async () => {
+    expect(
+      await formatCatalogDdl(
+        "CREATE TABLE photos USING IMAGES LOCATION '/USING photos''s' OPTIONS (recursive=true);",
+      ),
+    ).toBe(
+      "CREATE TABLE photos\nUSING IMAGES\nLOCATION '/USING photos''s'\nOPTIONS (recursive = TRUE);",
+    );
+    expect(
+      await formatCatalogDdl(
+        "CREATE MODEL detector TYPE OBJECT_DETECTION VERSION 'v1' FROM 'mock://person' USING ONNX_RUNTIME;",
+      ),
+    ).toBe(
+      "CREATE MODEL detector\nTYPE OBJECT_DETECTION\nVERSION 'v1'\nFROM 'mock://person'\nUSING ONNX_RUNTIME;",
+    );
+  });
+
+  it("preserves Function parameters, quoted identifiers, and Python entry points", async () => {
+    expect(
+      await formatCatalogDdl(
+        'CREATE FUNCTION "quality"."score"(BIGINT) RETURNS BIGINT RETURN $1 + 1;',
+      ),
+    ).toContain('"quality"."score" (BIGINT)\nRETURNS BIGINT\nRETURN $1 + 1;');
+    expect(
+      await formatCatalogDdl(
+        "CREATE FUNCTION score(value BIGINT) RETURNS BIGINT LANGUAGE PYTHON AS 'quality:score';",
+      ),
+    ).toContain("\nLANGUAGE PYTHON AS 'quality:score';");
+  });
+});
 
 describe("selectedOrCurrentStatement", () => {
   it("keeps semicolons inside strings and comments out of statement boundaries", () => {
