@@ -69,6 +69,39 @@ describe("ImagePreview", () => {
       "blob:second",
     );
   });
+
+  it("renders a normalized overlay from returned image dimensions", () => {
+    const clientWidth = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockReturnValue(200);
+    const clientHeight = vi
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(100);
+
+    const { container } = render(
+      <ImagePreview
+        image={{
+          encoded: new Uint8Array([1, 2, 3]),
+          encoding: "jpeg",
+          width: 100,
+          height: 100,
+        }}
+        box={{ x: 0.25, y: 0.25, w: 0.5, h: 0.5 }}
+        label="person"
+        confidence={0.9}
+      />,
+    );
+
+    const rect = container.querySelector("rect");
+    expect(rect).toHaveAttribute("x", "75");
+    expect(rect).toHaveAttribute("y", "25");
+    expect(rect).toHaveAttribute("width", "50");
+    expect(rect).toHaveAttribute("height", "50");
+    expect(screen.getByText(/person/)).toHaveTextContent("person 0.90");
+
+    clientWidth.mockRestore();
+    clientHeight.mockRestore();
+  });
 });
 
 describe("imageMime", () => {

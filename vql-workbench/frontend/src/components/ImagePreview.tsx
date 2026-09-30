@@ -1,5 +1,5 @@
 import { ImageOff } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { cn } from "../lib/cn";
 import {
@@ -31,12 +31,11 @@ export function ImagePreview({
   const [decodeFailed, setDecodeFailed] = useState(false);
   const url = useImageUrl(image);
   const parsedBox = isBox2d(box) ? box : null;
-  const rect = useMemo(
-    () => (parsedBox ? overlayRect(parsedBox, natural, viewport) : null),
-    [natural, parsedBox, viewport],
-  );
+  const imageSize = validImageSize(natural) ?? validImageSize(image);
+  const rect =
+    parsedBox && imageSize ? overlayRect(parsedBox, imageSize, viewport) : null;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setDecodeFailed(false);
     setNatural({ width: 0, height: 0 });
   }, [url]);
@@ -50,7 +49,7 @@ export function ImagePreview({
     const observer = new ResizeObserver(update);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [decodeFailed, url]);
 
   if (!url || decodeFailed) {
     return (
@@ -193,4 +192,19 @@ export function imageMime(encoding?: string | null): string | null {
     "image/avif": "image/avif",
   };
   return aliases[normalized] ?? null;
+}
+
+function validImageSize(
+  value: Pick<ImageValue, "width" | "height"> | Size | null,
+): Size | null {
+  const width = value?.width;
+  const height = value?.height;
+  return typeof width === "number" &&
+    Number.isFinite(width) &&
+    width > 0 &&
+    typeof height === "number" &&
+    Number.isFinite(height) &&
+    height > 0
+    ? { width, height }
+    : null;
 }
