@@ -60,9 +60,11 @@ export async function startExecution(
 
 export async function getResultResponse(
   executionId: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const response = await fetch(
     `/api/executions/${encodeURIComponent(executionId)}/results`,
+    { signal },
   );
   if (!response.ok) throw await responseProblem(response);
   return response;

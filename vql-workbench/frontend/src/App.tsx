@@ -57,6 +57,10 @@ import { SqlEditor, type SqlEditorHandle } from "./components/SqlEditor";
 import { Button } from "./components/ui/button";
 import { Tooltip, TooltipProvider } from "./components/ui/tooltip";
 import { cn } from "./lib/cn";
+import { executeCatalogStatement, type CatalogSection } from "./lib/catalog";
+import { CatalogWorkspace } from "./components/CatalogWorkspace";
+
+type WorkspacePage = "editor" | CatalogSection;
 
 const EMPTY_OVERLAY: OverlayConfig = {
   imageColumn: null,
@@ -79,12 +83,17 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [editorHeight, setEditorHeight] = useState(300);
+  const [page, setPage] = useState<WorkspacePage>("editor");
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [sessionVersion, setSessionVersion] = useState(0);
   const editorRef = useRef<SqlEditorHandle>(null);
   const executionInFlight = useRef(false);
   const activeRunId = useRef<string | null>(null);
   const activeDraft =
     drafts.find((draft) => draft.id === activeDraftId) ?? drafts[0];
-  const busy = ["preparing", "running", "cancelling"].includes(execution.phase);
+  const busy =
+    catalogBusy ||
+    ["preparing", "running", "cancelling"].includes(execution.phase);
   const connected = execution.phase !== "disconnected";
 
   useEffect(() => {
@@ -108,10 +117,12 @@ export default function App() {
         void cancelActive();
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "t") {
+        if (page !== "editor" || busy) return;
         event.preventDefault();
         addDraft();
       }
       if (event.altKey && event.shiftKey && event.key.toLowerCase() === "f") {
+        if (page !== "editor") return;
         event.preventDefault();
         formatActiveSql();
       }
@@ -364,6 +375,7 @@ export default function App() {
     try {
       const session = await createSession(input);
       setEndpoint(session.endpoint);
+      setSessionVersion((current) => current + 1);
       setOverlay(EMPTY_OVERLAY);
       dispatch({ type: "connected" });
     } catch (error) {
@@ -379,15 +391,72 @@ export default function App() {
     } finally {
       setOverlay(EMPTY_OVERLAY);
       dispatch({ type: "disconnected" });
+      setSessionVersion((current) => current + 1);
       setSettingsOpen(false);
     }
   };
 
   const loadRecord = (record: HistoryRecord, rerun: boolean) => {
+    if (busy) return;
     const draft = addDraft(record.sql, record.draftName);
+    setPage("editor");
     setHistoryOpen(false);
     if (rerun)
       window.setTimeout(() => void executeSql(record.sql, false, draft), 0);
+  };
+
+  const executeCatalogSql = async (
+    sql: string,
+    signal?: AbortSignal,
+    recordHistory = false,
+  ): Promise<QueryResult | null> => {
+    if (!connected || executionInFlight.current) {
+      throw {
+        source: "policy",
+        title: "Catalog execution unavailable",
+        message: connected
+          ? "Wait for the active execution to finish."
+          : "Connect to vqld before executing catalog SQL.",
+      } satisfies WorkbenchProblem;
+    }
+    executionInFlight.current = true;
+    const startedAt = Date.now();
+    const id = crypto.randomUUID();
+    const record: HistoryRecord = {
+      id,
+      draftName: "Catalog",
+      sql,
+      startedAt,
+      state: "running",
+      elapsedMs: null,
+      rowCount: null,
+      resultMode: null,
+    };
+    if (recordHistory) setHistory((current) => upsertHistory(current, record));
+    try {
+      const result = await executeCatalogStatement(sql, signal);
+      if (recordHistory)
+        finishHistory(id, {
+          state: "completed",
+          elapsedMs: Date.now() - startedAt,
+          rowCount: result?.rows.length ?? null,
+          resultMode: result ? "bounded" : "none",
+        });
+      return result;
+    } catch (error) {
+      const problem = asProblem(error);
+      if (recordHistory)
+        finishHistory(id, {
+          state: "failed",
+          elapsedMs: Date.now() - startedAt,
+          problem: historyProblem(problem),
+        });
+      if (problem.httpStatus === 401)
+        dispatch({ type: "connection_failed", problem });
+      throw error;
+    } finally {
+      executionInFlight.current = false;
+    }
   };
 
   const beginResize = (event: React.PointerEvent) => {
@@ -421,6 +490,14 @@ export default function App() {
           endpoint={endpoint}
           historyCount={history.length}
           mobileOpen={sidebarOpen}
+          page={page}
+          busy={busy}
+          onNavigate={(next) => {
+            if (!busy && !executionInFlight.current) {
+              setPage(next);
+              setSidebarOpen(false);
+            }
+          }}
           onMobileClose={() => setSidebarOpen(false)}
           onHistory={() => setHistoryOpen(true)}
           onSettings={() => setSettingsOpen(true)}
@@ -453,54 +530,78 @@ export default function App() {
               <span className="sr-only">VisionQL documentation</span>
             </a>
           </header>
-          <DraftTabs
-            drafts={drafts}
-            activeDraftId={activeDraftId}
-            busy={busy}
-            onActivate={setActiveDraftId}
-            onClose={closeDraft}
-            onAdd={() => addDraft()}
-            onFormat={() => void formatActiveSql()}
-          />
-          <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
-            <section
-              className="flex min-h-[180px] shrink-0 overflow-hidden bg-surface"
-              style={{ height: editorHeight }}
-              aria-label="SQL workspace"
-            >
-              <EditorRail
-                connected={connected}
-                busy={busy}
-                cancelling={execution.phase === "cancelling"}
-                onRun={() => void executeSql(activeDraft.sql, false)}
-                onRunCurrent={() => runCurrent(false)}
-                onStream={() => runCurrent(true)}
-                onCancel={() => void cancelActive()}
-                onExplain={runExplain}
-              />
-              <SqlEditor
-                ref={editorRef}
-                value={activeDraft.sql}
-                onChange={updateDraft}
-                onRun={() => void executeSql(activeDraft.sql, false)}
-                onRunCurrent={() => runCurrent(false)}
-                disabled={busy}
-              />
-            </section>
-            <button
-              type="button"
-              aria-label="Resize SQL editor"
-              className="group relative z-10 h-1.5 shrink-0 cursor-row-resize border-y border-hairline bg-canvas transition-colors hover:bg-surface-raised"
-              onPointerDown={beginResize}
-            >
-              <span className="absolute left-1/2 top-1/2 h-0.5 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full bg-hairline-strong transition-colors group-hover:bg-muted" />
-            </button>
-            <ResultPane
-              execution={execution}
-              overlay={overlay}
-              onOverlayChange={setOverlay}
+          {page !== "editor" ? (
+            <CatalogWorkspace
+              key={`${sessionVersion}:${page}`}
+              section={page}
+              connected={connected}
+              busy={busy}
+              execute={executeCatalogSql}
+              onBusyChange={setCatalogBusy}
+              onConnect={() => setSettingsOpen(true)}
+              onOpenSql={(sql, name) => {
+                if (!busy) {
+                  setPage("editor");
+                  addDraft(sql, name);
+                }
+              }}
             />
-          </main>
+          ) : null}
+          <div
+            className={cn(
+              "min-h-0 flex-1 flex-col",
+              page === "editor" ? "flex" : "hidden",
+            )}
+          >
+            <DraftTabs
+              drafts={drafts}
+              activeDraftId={activeDraftId}
+              busy={busy}
+              onActivate={setActiveDraftId}
+              onClose={closeDraft}
+              onAdd={() => addDraft()}
+              onFormat={() => void formatActiveSql()}
+            />
+            <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface">
+              <section
+                className="flex min-h-[180px] shrink-0 overflow-hidden bg-surface"
+                style={{ height: editorHeight }}
+                aria-label="SQL workspace"
+              >
+                <EditorRail
+                  connected={connected}
+                  busy={busy}
+                  cancelling={execution.phase === "cancelling"}
+                  onRun={() => void executeSql(activeDraft.sql, false)}
+                  onRunCurrent={() => runCurrent(false)}
+                  onStream={() => runCurrent(true)}
+                  onCancel={() => void cancelActive()}
+                  onExplain={runExplain}
+                />
+                <SqlEditor
+                  ref={editorRef}
+                  value={activeDraft.sql}
+                  onChange={updateDraft}
+                  onRun={() => void executeSql(activeDraft.sql, false)}
+                  onRunCurrent={() => runCurrent(false)}
+                  disabled={busy}
+                />
+              </section>
+              <button
+                type="button"
+                aria-label="Resize SQL editor"
+                className="group relative z-10 h-1.5 shrink-0 cursor-row-resize border-y border-hairline bg-canvas transition-colors hover:bg-surface-raised"
+                onPointerDown={beginResize}
+              >
+                <span className="absolute left-1/2 top-1/2 h-0.5 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full bg-hairline-strong transition-colors group-hover:bg-muted" />
+              </button>
+              <ResultPane
+                execution={execution}
+                overlay={overlay}
+                onOverlayChange={setOverlay}
+              />
+            </main>
+          </div>
         </div>
         <HistoryDrawer
           open={historyOpen}
@@ -529,6 +630,9 @@ function Sidebar({
   endpoint,
   historyCount,
   mobileOpen,
+  page,
+  busy,
+  onNavigate,
   onMobileClose,
   onHistory,
   onSettings,
@@ -537,6 +641,9 @@ function Sidebar({
   endpoint: string;
   historyCount: number;
   mobileOpen: boolean;
+  page: WorkspacePage;
+  busy: boolean;
+  onNavigate: (page: WorkspacePage) => void;
   onMobileClose: () => void;
   onHistory: () => void;
   onSettings: () => void;
@@ -591,7 +698,9 @@ function Sidebar({
             <NavItem
               icon={<SquareTerminal size={17} />}
               label="SQL editor"
-              active
+              active={page === "editor"}
+              disabled={busy && page !== "editor"}
+              onClick={() => onNavigate("editor")}
             />
             <NavItem
               icon={<History size={17} />}
@@ -601,11 +710,26 @@ function Sidebar({
             />
           </NavGroup>
           <NavGroup title="Catalog" bordered>
-            <DeferredNav icon={<Table2 size={17} />} label="Tables" />
-            <DeferredNav icon={<Box size={17} />} label="Models" />
-            <DeferredNav
+            <NavItem
+              icon={<Table2 size={17} />}
+              label="Tables"
+              active={page === "tables"}
+              disabled={busy}
+              onClick={() => onNavigate("tables")}
+            />
+            <NavItem
+              icon={<Box size={17} />}
+              label="Models"
+              active={page === "models"}
+              disabled={busy}
+              onClick={() => onNavigate("models")}
+            />
+            <NavItem
               icon={<FunctionSquare size={17} />}
               label="Functions"
+              active={page === "functions"}
+              disabled={busy}
+              onClick={() => onNavigate("functions")}
             />
           </NavGroup>
           <NavGroup title="Runtime" bordered>
@@ -668,6 +792,7 @@ function NavItem({
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-current={active ? "page" : undefined}
       className={cn(
         "flex h-9 w-full items-center gap-2 rounded-md px-2 text-[12px] transition-colors",
         active

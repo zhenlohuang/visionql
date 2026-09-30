@@ -80,6 +80,26 @@ Workbench has one explicit execution state machine: `disconnected`, `idle`, `pre
 
 The browser consumes the response body as a stream and appends complete record batches to the bounded in-memory result. Browser abort, navigation, Session expiry, and the Cancel action all trigger backend-side Flight cancellation before local state is discarded. Blob URLs are revoked when their batch, result, or Session is released.
 
+## Catalog Management
+
+The Catalog pages follow the [Tables](../prototype/catalog_tables/code.html), [Models](../prototype/catalog_models/code.html), and [Functions](../prototype/catalog_functions/code.html) prototypes. Each page provides a searchable object directory, category filters, a registered-object count, refresh, and SQL creation. Selecting an object opens its defining SQL and schema or callable contract; users can copy the DDL or load it into a new local editor draft. Navigation preserves existing editor drafts and results.
+
+The frontend uses the existing execution transport for every Catalog operation. It consumes bounded Arrow results and checks terminal execution status before releasing the Session's execution slot. Listing and metadata enrichment run sequentially. Catalog loading and mutations disable competing editor and management operations; leaving a Catalog page cancels pending metadata reads. Changing or closing the Session clears Catalog state. Catalog objects and metadata remain in page memory rather than browser storage. Background metadata reads do not create local history entries; explicitly executed Catalog mutation SQL uses the existing execution history.
+
+| Surface | Public SQL |
+|---|---|
+| Tables | `SHOW TABLES`, `DESCRIBE TABLE`, `SHOW CREATE TABLE`, `CREATE TABLE`, `DROP TABLE` |
+| Models | `SHOW MODELS`, `DESCRIBE MODEL`, `SHOW CREATE MODEL`, `SHOW MODEL VERSIONS`, `CREATE MODEL`, `RESOLVE MODEL`, `ALTER MODEL`, `DROP MODEL` |
+| Functions | `SHOW FUNCTIONS`, `DESCRIBE FUNCTION`, `SHOW CREATE FUNCTION`, `CREATE FUNCTION`, `DROP FUNCTION` |
+
+Creation and alteration dialogs expose editable SQL templates. Resolve and default-version actions display the generated SQL before execution. Dropping an object or Model version requires explicit confirmation of its exact SQL; the frontend does not add `CASCADE` or bypass dependency errors. Successful mutations refresh the directory and selected metadata. Failures retain the statement and original structured VQL problem for correction or retry.
+
+Model version metadata distinguishes `UNRESOLVED`, `RESOLVED`, default publication, volatility, and semantic fingerprints. `RESOLVED` describes the resolved execution contract. `SHOW FUNCTIONS` includes Model callables, which use Model detail and mutation statements. SQL/Python function categories derive from the returned defining SQL. Python execution remains unavailable in `vqld`; no Python runtime, batching size, or health is inferred from a catalog declaration.
+
+Model and Function display addresses are resolved to the stored SQL name through `SHOW CREATE`. Fallback address spellings are tried only on structured `NOT_FOUND`. If multiple rows have the same display address, the UI reports ambiguity and disables generated mutations; users can inspect an explicitly named object in the SQL editor.
+
+Prototype-only facts without public metadata, including Table health, logical media-type annotations absent from `DESCRIBE TABLE`, runtime environment versions, and release-managed task DDL, are omitted. The column inspector shows the Arrow types and nullability actually returned by `DESCRIBE TABLE`. The frontend does not fabricate built-in task records or `CREATE TASK` statements.
+
 ## Media Contract
 
 Workbench consumes the bounded thumbnail representation defined by the [`vqld` Service Design](./vqld.md#image-flight-boundary). It does not request inline originals, dereference media locators, or persist query results.
