@@ -44,6 +44,27 @@ test("creates, inspects, filters, and drops Tables and Functions via catalog SQL
     "function",
     "CREATE FUNCTION catalog_plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1;",
   );
+  const duplicateSql =
+    "CREATE FUNCTION catalog_plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 2;";
+  await page
+    .getByRole("button", { name: "Create function", exact: true })
+    .click();
+  const duplicate = page.getByRole("dialog", { name: "Create function" });
+  await duplicate
+    .getByRole("textbox", { name: "Catalog SQL statement" })
+    .fill(duplicateSql);
+  await duplicate
+    .getByRole("button", { name: "Execute SQL", exact: true })
+    .click();
+  await expect(duplicate.getByText("VQL-23001", { exact: true })).toBeVisible();
+  await expect(
+    duplicate.getByText("ALREADY_EXISTS", { exact: true }),
+  ).toBeVisible();
+  await expect(duplicate.getByRole("textbox")).toHaveValue(duplicateSql);
+  await duplicate.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "catalog_plus_one", exact: true }),
+  ).toBeVisible();
   await create(
     page,
     "function",

@@ -17,10 +17,18 @@ pub(super) fn normalize_function_ddl(
     sql: &str,
     snapshot: &crate::catalog::DefinitionSnapshot,
 ) -> Result<String> {
-    let sql = expand_macros_inner(sql, snapshot, false)?;
-    let sql = normalize_function_parameter_references(&sql)?;
-    let sql = normalize_builtin_ai_function_body(&sql)?;
-    normalize_model_calls(&sql, snapshot)
+    let Some(return_start) = function_return_start(sql) else {
+        return Ok(sql.to_owned());
+    };
+    let body_start = return_start + "RETURN".len();
+    // The declaration's name and parameter types are not callable expressions.
+    // Rewriting them can hide Catalog conflicts behind unrelated SQL errors.
+    let body = expand_macros_inner(&sql[body_start..], snapshot, false)?;
+    let sql = normalize_function_parameter_references(&format!("{}{}", &sql[..body_start], body))?;
+    reject_internal_builtin_ai_calls(&sql[body_start..])?;
+    let body = normalize_builtin_ai_calls(&sql[body_start..])?;
+    let body = normalize_model_calls(&body, snapshot)?;
+    Ok(format!("{}{}", &sql[..body_start], body))
 }
 
 fn reject_internal_builtin_ai_calls(sql: &str) -> Result<()> {
@@ -41,19 +49,6 @@ fn reject_internal_builtin_ai_calls(sql: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn normalize_builtin_ai_function_body(sql: &str) -> Result<String> {
-    let Some(return_start) = function_return_start(sql) else {
-        return Ok(sql.to_owned());
-    };
-    let body_start = return_start + "RETURN".len();
-    reject_internal_builtin_ai_calls(&sql[body_start..])?;
-    Ok(format!(
-        "{}{}",
-        &sql[..body_start],
-        normalize_builtin_ai_calls(&sql[body_start..])?
-    ))
 }
 
 #[derive(Clone, Copy)]

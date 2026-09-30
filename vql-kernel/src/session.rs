@@ -4129,6 +4129,62 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_function_declarations_preserve_the_existing_definition() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql("CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1")
+            .unwrap();
+
+        for sql in [
+            "CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT RETURN $1 + 1",
+            "CREATE FUNCTION PLUS_ONE(value BIGINT) RETURNS BIGINT RETURN value + 2",
+            "CREATE FUNCTION plus_one(BIGINT, BIGINT) RETURNS BIGINT RETURN $1 + $2",
+            "CREATE FUNCTION \"plus_one\"(BIGINT) RETURNS BIGINT RETURN $1 + 2",
+            "CREATE FUNCTION plus_one(BIGINT) RETURNS BIGINT LANGUAGE PYTHON AS 'ops:increment'",
+        ] {
+            let error = session.sql(sql).unwrap_err();
+            assert_eq!(error.code, ErrorCode::AlreadyExists, "{sql}: {error}");
+            assert_eq!(
+                error.message,
+                "callable name 'plus_one' conflicts with existing function"
+            );
+        }
+
+        let batches = session
+            .sql("SELECT plus_one(41) AS answer")
+            .unwrap()
+            .collect()
+            .unwrap();
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 42);
+    }
+
+    #[test]
+    fn function_declarations_conflicting_with_models_report_name_conflict() {
+        let temp = tempdir().unwrap();
+        let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
+        let session = engine.session().build().unwrap();
+        session
+            .sql("CREATE MODEL detector TYPE OBJECT_DETECTION FROM 'mock://person'")
+            .unwrap();
+
+        let error = session
+            .sql("CREATE FUNCTION detector(IMAGE) RETURNS BIGINT RETURN 1")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NameConflict);
+        assert_eq!(
+            error.message,
+            "callable name 'detector' conflicts with existing model"
+        );
+    }
+
+    #[test]
     fn sql_macro_names_inside_literals_are_not_expanded() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
