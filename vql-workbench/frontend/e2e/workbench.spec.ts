@@ -261,7 +261,9 @@ test("manages persistent Queries through public SQL and preserves editor drafts"
     await dialog.getByRole("button", { name: "Load SQL as new draft" }).click();
     await expect(editor).toBeVisible();
     await expect(editor).toContainText("INSERT INTO");
-    await page.getByRole("button", { name: /^query_1\.sql/ }).click();
+    await page
+      .getByRole("button", { name: "Untitle.sql", exact: true })
+      .click();
     await expect(editor).toHaveText("SELECT 42 AS original_draft;");
     await page.getByRole("button", { name: "Queries", exact: true }).click();
     await expect(

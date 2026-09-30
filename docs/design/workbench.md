@@ -32,6 +32,8 @@ The Workbench screen follows the reference prototype's three-region structure:
 
 The result table exposes a transient Overlay Config that maps one `IMAGE` column to one `BOX2D` column and optional label and confidence columns. This configuration changes presentation only, remains in page memory, and is cleared with the Session.
 
+SQL query files are local browser drafts. A new file uses the first available name in `Untitle.sql`, `Untitle1.sql`, `Untitle2.sql`, and so on. A tab's rename button or a double-click opens the file-name dialog. Renaming requires a non-empty name unique among open drafts and adds `.sql` when omitted; it preserves the draft identity, SQL, active selection, results, and execution history. Draft names and SQL persist in browser storage. Existing saved names are retained on load.
+
 Runtime → Queries follows the [jobs management prototype](../prototype/jobs_management/code.html): a searchable list with status, Show SQL, and Stop actions. It uses the existing browser Session and public SQL execution transport.
 
 ## Persistent Query Management

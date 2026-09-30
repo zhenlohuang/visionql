@@ -2,6 +2,8 @@
 
 VisionQL Workbench is the independent browser client for one `vqld` endpoint. It provides local SQL drafts and history, bounded and attached-continuous execution, Arrow table and JSON views, and visual `IMAGE`/`BOX2D` inspection through public Flight SQL.
 
+New query files are named `Untitle.sql`, then `Untitle1.sql`, `Untitle2.sql`, and so on when a name is already in use. Double-click a file tab or click its pencil button to rename it. Names must be non-empty and unique among open drafts; `.sql` is added automatically when omitted. Draft names and SQL are saved in browser storage and survive reloads.
+
 Runtime → Queries implements the [jobs management prototype](../docs/prototype/jobs_management/code.html) using `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY` through the same public SQL execution transport.
 
 ## Catalog

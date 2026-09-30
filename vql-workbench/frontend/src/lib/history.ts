@@ -16,10 +16,17 @@ WHERE det.label = 'person'
 ORDER BY f.ts DESC
 LIMIT 5;`;
 
-export function createDraft(index = 1, sql = DEFAULT_SQL): Draft {
+export function createDraft(drafts: Draft[] = [], sql = DEFAULT_SQL): Draft {
+  const names = new Set(drafts.map((draft) => draft.name));
+  let name = "Untitle.sql";
+  let suffix = 1;
+  while (names.has(name)) {
+    name = `Untitle${suffix}.sql`;
+    suffix += 1;
+  }
   return {
     id: crypto.randomUUID(),
-    name: `query_${index}.sql`,
+    name,
     sql,
     updatedAt: Date.now(),
   };

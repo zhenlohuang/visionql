@@ -9,6 +9,7 @@ import {
   History,
   Menu,
   PanelLeftClose,
+  Pencil,
   Play,
   Plus,
   RotateCw,
@@ -61,6 +62,7 @@ import { HistoryDrawer } from "./components/HistoryDrawer";
 import { Logo } from "./components/Logo";
 import { QueriesPage } from "./components/QueriesPage";
 import { ResultPane } from "./components/ResultPane";
+import { RenameDraftDialog } from "./components/RenameDraftDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SqlEditor, type SqlEditorHandle } from "./components/SqlEditor";
 import { Button } from "./components/ui/button";
@@ -90,6 +92,7 @@ export default function App() {
   const [endpoint, setEndpoint] = useState("http://127.0.0.1:6031");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [renamingDraftId, setRenamingDraftId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [editorHeight, setEditorHeight] = useState(300);
   const [page, setPage] = useState<WorkspacePage>("editor");
@@ -101,6 +104,7 @@ export default function App() {
   const activeRunId = useRef<string | null>(null);
   const activeDraft =
     drafts.find((draft) => draft.id === activeDraftId) ?? drafts[0];
+  const renamingDraft = drafts.find((draft) => draft.id === renamingDraftId);
   const busy =
     catalogBusy ||
     managementBusy ||
@@ -147,6 +151,7 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (renamingDraftId) return;
       if (event.key === "Escape" && execution.phase === "running") {
         event.preventDefault();
         void cancelActive();
@@ -177,7 +182,7 @@ export default function App() {
   };
 
   const addDraft = (sql?: string, suggestedName?: string) => {
-    const draft = createDraft(drafts.length + 1, sql ?? "");
+    const draft = createDraft(drafts, sql ?? "");
     if (suggestedName) draft.name = uniqueDraftName(suggestedName, drafts);
     setDrafts((current) => [...current, draft]);
     setActiveDraftId(draft.id);
@@ -608,6 +613,7 @@ export default function App() {
               busy={busy}
               onActivate={setActiveDraftId}
               onClose={closeDraft}
+              onRename={setRenamingDraftId}
               onAdd={() => addDraft()}
               onFormat={() => void formatActiveSql()}
             />
@@ -669,6 +675,24 @@ export default function App() {
           onConnect={connect}
           onDisconnect={disconnect}
         />
+        {renamingDraft ? (
+          <RenameDraftDialog
+            key={renamingDraft.id}
+            draft={renamingDraft}
+            drafts={drafts}
+            onClose={() => setRenamingDraftId(null)}
+            onRename={(name) => {
+              setDrafts((current) =>
+                current.map((draft) =>
+                  draft.id === renamingDraft.id
+                    ? { ...draft, name, updatedAt: Date.now() }
+                    : draft,
+                ),
+              );
+              setRenamingDraftId(null);
+            }}
+          />
+        ) : null}
       </div>
     </TooltipProvider>
   );
@@ -758,6 +782,15 @@ function Sidebar({
               onClick={onHistory}
             />
           </NavGroup>
+          <NavGroup title="Runtime" bordered>
+            <NavItem
+              icon={<FileClock size={17} />}
+              label="Queries"
+              active={page === "queries"}
+              disabled={busy && page !== "queries"}
+              onClick={() => onNavigate("queries")}
+            />
+          </NavGroup>
           <NavGroup title="Catalog" bordered>
             <NavItem
               icon={<Table2 size={17} />}
@@ -779,15 +812,6 @@ function Sidebar({
               active={page === "functions"}
               disabled={busy}
               onClick={() => onNavigate("functions")}
-            />
-          </NavGroup>
-          <NavGroup title="Runtime" bordered>
-            <NavItem
-              icon={<FileClock size={17} />}
-              label="Queries"
-              active={page === "queries"}
-              disabled={busy && page !== "queries"}
-              onClick={() => onNavigate("queries")}
             />
           </NavGroup>
         </nav>
@@ -873,6 +897,7 @@ function DraftTabs({
   busy,
   onActivate,
   onClose,
+  onRename,
   onAdd,
   onFormat,
 }: {
@@ -881,6 +906,7 @@ function DraftTabs({
   busy: boolean;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
+  onRename: (id: string) => void;
   onAdd: () => void;
   onFormat: () => void;
 }) {
@@ -892,33 +918,49 @@ function DraftTabs({
           return (
             <div
               key={draft.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => !busy && onActivate(draft.id)}
-              onKeyDown={(event) =>
-                event.key === "Enter" && !busy && onActivate(draft.id)
-              }
               className={cn(
-                "group flex h-9 shrink-0 items-center gap-2 rounded-md border px-3 transition-all",
+                "group flex h-9 shrink-0 items-center gap-1 rounded-md border pl-3 pr-2 transition-all",
                 active
                   ? "border-hairline border-b-2 border-b-accent bg-surface text-ink shadow-sm"
                   : "border-transparent text-muted hover:border-hairline hover:bg-surface/65 hover:text-ink",
                 busy && !active && "opacity-50",
               )}
             >
-              <SquareTerminal
-                size={14}
-                className={active ? "text-accent" : "text-muted"}
-              />
-              <span className="max-w-[180px] truncate font-mono text-[11px] font-medium">
-                {draft.name}
-              </span>
-              <span
-                className={cn(
-                  "size-1.5 rounded-full",
-                  active ? "bg-success" : "bg-hairline-strong",
-                )}
-              />
+              <button
+                type="button"
+                disabled={busy}
+                aria-label={draft.name}
+                aria-pressed={active}
+                title="Double-click to rename"
+                onClick={() => onActivate(draft.id)}
+                onDoubleClick={() => onRename(draft.id)}
+                className="flex h-full min-w-0 items-center gap-2 pr-1"
+              >
+                <SquareTerminal
+                  size={14}
+                  className={active ? "text-accent" : "text-muted"}
+                />
+                <span className="max-w-[180px] truncate font-mono text-[11px] font-medium">
+                  {draft.name}
+                </span>
+                <span
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    active ? "bg-success" : "bg-hairline-strong",
+                  )}
+                />
+              </button>
+              <Tooltip label="Rename query file">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onRename(draft.id)}
+                  className="flex size-5 items-center justify-center rounded text-muted opacity-70 transition-all hover:bg-surface-raised hover:text-ink disabled:opacity-20 group-hover:opacity-100"
+                  aria-label={`Rename ${draft.name}`}
+                >
+                  <Pencil size={12} />
+                </button>
+              </Tooltip>
               <button
                 type="button"
                 disabled={drafts.length === 1 || busy}
@@ -940,6 +982,7 @@ function DraftTabs({
             variant="ghost"
             className="size-8 shrink-0"
             disabled={busy}
+            aria-label="New draft"
             onClick={onAdd}
           >
             <Plus size={16} />
