@@ -1,0 +1,521 @@
+<!DOCTYPE html><html lang="en" style=""><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<meta content="web_dashboard" name="shell-type">
+<title>VisionQL - Catalog / Tables</title>
+<!-- Google Fonts: Inter & JetBrains Mono -->
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<!-- Material Symbols Outlined -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<!-- Tailwind CSS CDN -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              orange: '#f54e00',
+              'orange-hover': '#d04200',
+              'orange-light': '#ffdbd0',
+            },
+            warm: {
+              bg: '#f7f7f4',
+              sidebar: '#fafaf8',
+              card: '#ffffff',
+              border: '#e6e5e0',
+              'border-subtle': '#f0ede6',
+              dark: '#1c1b18',
+              text: '#22211e',
+              muted: '#787670',
+              'muted-light': '#a5a39c',
+              tag: '#eeeeeb',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+<style>
+    body {
+      background-color: #f7f7f4;
+      color: #22211e;
+      font-family: 'Inter', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    .material-symbols-outlined {
+      font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #dfded9;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+  </style>
+</head>
+<body class="bg-warm-bg text-warm-text min-h-screen selection:bg-brand-orange selection:text-white">
+<!-- Fixed Left Sidebar (240px) -->
+<aside class="fixed left-0 top-0 h-full w-[240px] bg-warm-sidebar border-r border-warm-border z-50 flex flex-col justify-between select-none"><div class="flex flex-col p-3">
+<!-- Logo & App Header -->
+<div class="flex items-center justify-between px-2 pt-1 pb-2">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded flex items-center justify-center border border-warm-border bg-white shadow-sm">
+<svg class="w-4 h-4 text-brand-orange" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" viewBox="0 0 24 24">
+<path d="M4 7V4h3" stroke="#a5a39c"></path>
+<path d="M20 7V4h-3" stroke="#a5a39c"></path>
+<path d="M4 17v3h3" stroke="#a5a39c"></path>
+<path d="M20 17v3h-3" stroke="#a5a39c"></path>
+<path d="m7 7 5 10 5-10" stroke="#f54e00" stroke-width="2.5"></path>
+<circle cx="12" cy="7" fill="#f54e00" r="1"></circle>
+<line stroke="#1f8a65" stroke-width="2.5" x1="18" x2="19.5" y1="19" y2="19"></line>
+</svg>
+</div>
+<span class="font-bold text-sm tracking-tight text-warm-dark">VisionQL</span>
+</div>
+<span class="font-mono text-[11px] px-1.5 py-0.5 rounded bg-warm-tag text-warm-muted border border-warm-border">v0.3</span>
+</div>
+<!-- Connection Status -->
+<div class="flex items-center gap-2 px-2 pb-3 mb-1">
+<span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+<span class="font-mono text-xs text-warm-muted">vqld: connected</span>
+</div>
+<div class="border-t border-warm-border mb-3"></div>
+<!-- Nav Sections -->
+<div class="flex flex-col gap-4">
+<!-- WORKSPACE -->
+<div>
+<div class="px-2 pb-1.5">
+<span class="text-[11px] uppercase font-bold text-warm-muted tracking-wider">Workspace</span>
+</div>
+<nav class="flex flex-col gap-1">
+<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-sm text-warm-dark hover:bg-black/5 transition-colors" href="#">
+<span class="material-symbols-outlined text-[18px] text-warm-muted">terminal</span>
+<span class="font-medium">SQL editor</span>
+</a>
+<a class="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm text-warm-dark hover:bg-black/5 transition-colors" href="#">
+<div class="flex items-center gap-2.5">
+<span class="material-symbols-outlined text-[18px] text-warm-muted">history</span>
+<span class="font-medium">History</span>
+</div>
+<span class="font-mono text-[11px] px-1.5 py-0.2 rounded bg-warm-tag text-warm-muted border border-warm-border">0</span>
+</a>
+</nav>
+</div>
+<div class="border-t border-warm-border"></div>
+<!-- CATALOG -->
+<div>
+<div class="px-2 pb-1.5">
+<span class="text-[11px] uppercase font-bold text-warm-muted tracking-wider">Catalog</span>
+</div>
+<nav class="flex flex-col gap-1">
+<!-- Active Tables item with clean highlight -->
+<a class="flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm font-semibold text-warm-dark bg-white shadow-sm border border-warm-border transition-colors" href="#">
+<div class="flex items-center gap-2.5">
+<span class="material-symbols-outlined text-[18px] text-brand-orange">table_chart</span>
+<span class="">Tables</span>
+</div>
+<span class="w-1.5 h-1.5 rounded-full bg-brand-orange"></span>
+</a>
+<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-sm text-warm-muted hover:text-warm-dark hover:bg-black/5 transition-colors" href="#">
+<span class="material-symbols-outlined text-[18px]">view_in_ar</span>
+<span class="font-medium">Models</span>
+</a>
+<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-sm text-warm-muted hover:text-warm-dark hover:bg-black/5 transition-colors" href="#">
+<span class="material-symbols-outlined text-[18px]">functions</span>
+<span class="font-medium">Functions</span>
+</a>
+</nav>
+</div>
+<div class="border-t border-warm-border"></div>
+<!-- RUNTIME -->
+<div>
+<div class="px-2 pb-1.5">
+<span class="text-[11px] uppercase font-bold text-warm-muted tracking-wider">Runtime</span>
+</div>
+<nav class="flex flex-col gap-1">
+<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-sm text-warm-muted hover:text-warm-dark hover:bg-black/5 transition-colors" href="#">
+<span class="material-symbols-outlined text-[18px]">query_stats</span>
+<span class="font-medium">Queries</span>
+</a>
+</nav>
+</div>
+</div>
+</div>
+<!-- Footer Settings -->
+<div class="p-3 border-t border-warm-border">
+<a class="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-warm-dark hover:bg-black/5 transition-colors font-medium" href="#">
+<span class="material-symbols-outlined text-[19px] text-warm-muted">settings</span>
+<span class="">Settings</span>
+</a>
+</div></aside>
+<!-- Main Content Wrapper (Shifted 240px) -->
+<div class="pl-[240px] flex flex-col min-h-screen">
+<!-- Top Header Bar -->
+<header class="sticky top-0 right-0 h-14 bg-warm-card border-b border-warm-border z-40 flex items-center justify-between px-6"><!-- Search Input -->
+<div class="flex items-center gap-3 flex-1 max-w-md">
+<div class="relative w-full">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-warm-muted-light text-[17px] pointer-events-none">search</span>
+<input class="w-full h-8 pl-9 pr-8 bg-warm-bg border border-warm-border rounded-md text-xs font-mono text-warm-dark placeholder:text-warm-muted-light focus:outline-none focus:border-warm-dark focus:bg-white transition-all shadow-inner" placeholder="Search catalog, schemas, or DDL... (⌘K)" type="text">
+<span class="absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-[10px] text-warm-muted-light px-1 py-0.5 rounded bg-warm-tag border border-warm-border pointer-events-none">⌘K</span>
+</div>
+</div>
+<!-- Right Header Actions -->
+<div class="flex items-center gap-3">
+
+<button class="h-8 px-2.5 bg-white border border-warm-border hover:bg-warm-bg text-warm-dark font-mono text-xs rounded-md flex items-center gap-2 transition-colors shadow-sm" type="button">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+<span class="">vqld-local-dev</span>
+<span class="material-symbols-outlined text-warm-muted text-[15px] leading-none">expand_more</span>
+</button>
+<div class="flex items-center">
+<img alt="Profile" class="w-7 h-7 rounded-full object-cover border border-warm-border ring-1 ring-black/5" src="https://lh3.googleusercontent.com/aida/AEtjO1U5Pbv0YGs-mTQC4enDfcFFjIDsXWO9EOFXkafnsWr6ZqAD-cr6O0KJAToDLm2NZtk3INAEhLyo__WwPVKyp38T_Aw-sZ0JqOlWJH-GqqCXDyXo66di1d5bV3BmqtDI6q41iZes10sUHMh9Qbd8rMsYjizoMVBpcaIGHOL93ZvRf8CSRYKAxXsDPZKxJOFDf2CDL8GtvffaW3QArJTj9iV7x6IeGxbuGndGrQyzlPBTshz2SXy_-HA3zXYkvWIPtGyKBelnmsyfHqY">
+</div>
+</div></header>
+<!-- Main Workspace Content Area -->
+<main class="w-full flex-1 p-6 md:p-8 max-w-7xl mx-auto">
+<div class="flex flex-col gap-6">
+<!-- Header Title & Subtitle Breadcrumb -->
+<div class="flex flex-col gap-2"><div class="flex items-center justify-between flex-wrap gap-3 pb-1 border-b border-warm-border">
+<div class="flex items-center gap-2 font-mono text-xs text-warm-muted tracking-wide">
+<span class="font-semibold hover:text-warm-dark cursor-pointer transition-colors">CATALOG</span>
+<span class="text-warm-border">/</span>
+<span class="text-warm-dark font-bold">TABLES</span>
+<span class="text-warm-border">•</span>
+<span class="px-2 py-0.5 rounded bg-warm-tag border border-warm-border text-warm-dark lowercase font-mono text-[11px]">schema: default (vql.default)</span>
+<span class="text-warm-muted lowercase text-[11px]">· 4 registered</span>
+</div>
+
+</div>
+<div class="flex items-center justify-between gap-4 mt-2">
+<div>
+<h1 class="text-2xl font-bold text-warm-dark tracking-tight">Tables</h1>
+<p class="text-xs text-warm-muted mt-1">Declarative multimodal storage abstractions &amp; real-time video streaming relations.</p>
+</div>
+
+</div></div>
+<!-- Filter & Toolbar Bar -->
+<div class="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white p-2 rounded-lg border border-warm-border shadow-sm"><div class="relative w-full"><span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-warm-muted-light text-[17px] pointer-events-none">search</span><input class="w-full h-9 pl-9 pr-4 bg-warm-bg/60 border border-warm-border rounded-md font-mono text-xs text-warm-dark placeholder:text-warm-muted-light focus:outline-none focus:border-warm-dark focus:bg-white transition-all shadow-inner" id="table-filter-input" placeholder="Search tables by name, provider type, or location..." type="text"></div></div>
+<!-- Table Cards Directory -->
+<div class="flex flex-col gap-3" id="tables-list"><!-- Card 1: cam_entrance (Active Selection) -->
+<div class="table-card p-4 md:p-5 bg-white rounded-lg border-2 border-brand-orange shadow-sm transition-all cursor-pointer group" data-table="cam_entrance" data-type="rtsp" onclick="selectTable('cam_entrance')">
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between gap-4">
+<div class="flex items-center gap-2.5">
+<div class="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-500/20"></div>
+<h2 class="font-mono text-sm text-warm-dark font-bold tracking-tight">cam_entrance</h2>
+<span class="px-2 py-0.5 rounded text-[11px] font-mono bg-sky-100 text-sky-800 border border-sky-200 font-medium">RTSP Stream</span>
+<span class="font-mono text-xs text-warm-muted hidden sm:inline">• 5 fps real-time feed · h264 raw packetizer</span>
+</div>
+<button class="h-7 px-2.5 rounded-md bg-warm-bg hover:bg-warm-tag border border-warm-border font-mono text-xs text-warm-dark flex items-center gap-1.5 transition-colors shadow-sm" onclick="event.stopPropagation(); selectTable('cam_entrance')" type="button">
+<span class="material-symbols-outlined text-[14px] text-warm-muted">code</span>
+<span class="">Show DDL</span>
+</button>
+</div>
+<div class="flex items-center gap-1.5 flex-wrap">
+<span class="text-[10px] font-mono uppercase font-semibold text-warm-muted-light tracking-wider mr-1">Schema</span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">ts: <span class="text-warm-muted text-[11px]">TIMESTAMP</span></span>
+<span class="px-2 py-0.5 rounded bg-orange-50 border border-orange-200 font-mono text-xs text-brand-orange font-semibold">frame: <span class="text-brand-orange text-[11px]">IMAGE</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">frame_id: <span class="text-warm-muted text-[11px]">BIGINT</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">source: <span class="text-warm-muted text-[11px]">STRING</span></span>
+</div>
+</div>
+</div>
+<!-- Card 2: traffic_videos -->
+<div class="table-card p-4 md:p-5 bg-white rounded-lg border border-warm-border hover:border-warm-muted-light shadow-sm transition-all cursor-pointer group" data-table="traffic_videos" data-type="videos" onclick="selectTable('traffic_videos')">
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between gap-4">
+<div class="flex items-center gap-2.5">
+<div class="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-500/20"></div>
+<h2 class="font-mono text-sm text-warm-dark font-bold tracking-tight">traffic_videos</h2>
+<span class="px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-100 text-emerald-800 border border-emerald-200 font-medium">Video Files</span>
+<span class="font-mono text-xs text-warm-muted hidden sm:inline">• Segmented local recordings with pushdown</span>
+</div>
+<button class="h-7 px-2.5 rounded-md bg-warm-bg hover:bg-warm-tag border border-warm-border font-mono text-xs text-warm-dark flex items-center gap-1.5 transition-colors shadow-sm" onclick="event.stopPropagation(); selectTable('traffic_videos')" type="button">
+<span class="material-symbols-outlined text-[14px] text-warm-muted">code</span>
+<span class="">Show DDL</span>
+</button>
+</div>
+<div class="flex items-center gap-1.5 flex-wrap">
+<span class="text-[10px] font-mono uppercase font-semibold text-warm-muted-light tracking-wider mr-1">Schema</span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">uri: <span class="text-warm-muted text-[11px]">STRING</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">ts: <span class="text-warm-muted text-[11px]">TIMESTAMP</span></span>
+<span class="px-2 py-0.5 rounded bg-orange-50 border border-orange-200 font-mono text-xs text-brand-orange font-semibold">frame: <span class="text-brand-orange text-[11px]">IMAGE</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">frame_id: <span class="text-warm-muted text-[11px]">BIGINT</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">duration: <span class="text-warm-muted text-[11px]">DOUBLE</span></span>
+</div>
+</div>
+</div>
+<!-- Card 3: product_photos -->
+<div class="table-card p-4 md:p-5 bg-white rounded-lg border border-warm-border hover:border-warm-muted-light shadow-sm transition-all cursor-pointer group" data-table="product_photos" data-type="images" onclick="selectTable('product_photos')">
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between gap-4">
+<div class="flex items-center gap-2.5">
+<div class="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-500/20"></div>
+<h2 class="font-mono text-sm text-warm-dark font-bold tracking-tight">product_photos</h2>
+<span class="px-2 py-0.5 rounded text-[11px] font-mono bg-purple-100 text-purple-800 border border-purple-200 font-medium">Image Files</span>
+<span class="font-mono text-xs text-warm-muted hidden sm:inline">• S3 object storage bucket</span>
+</div>
+<button class="h-7 px-2.5 rounded-md bg-warm-bg hover:bg-warm-tag border border-warm-border font-mono text-xs text-warm-dark flex items-center gap-1.5 transition-colors shadow-sm" onclick="event.stopPropagation(); selectTable('product_photos')" type="button">
+<span class="material-symbols-outlined text-[14px] text-warm-muted">code</span>
+<span class="">Show DDL</span>
+</button>
+</div>
+<div class="flex items-center gap-1.5 flex-wrap">
+<span class="text-[10px] font-mono uppercase font-semibold text-warm-muted-light tracking-wider mr-1">Schema</span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">uri: <span class="text-warm-muted text-[11px]">STRING</span></span>
+<span class="px-2 py-0.5 rounded bg-orange-50 border border-orange-200 font-mono text-xs text-brand-orange font-semibold">image: <span class="text-brand-orange text-[11px]">IMAGE</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">width: <span class="text-warm-muted text-[11px]">INT</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">height: <span class="text-warm-muted text-[11px]">INT</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">captured_at: <span class="text-warm-muted text-[11px]">TIMESTAMP</span></span>
+</div>
+</div>
+</div>
+<!-- Card 4: people_per_minute -->
+<div class="table-card p-4 md:p-5 bg-white rounded-lg border border-warm-border hover:border-warm-muted-light shadow-sm transition-all cursor-pointer group" data-table="people_per_minute" data-type="sinks" onclick="selectTable('people_per_minute')">
+<div class="flex flex-col gap-3">
+<div class="flex items-center justify-between gap-4">
+<div class="flex items-center gap-2.5">
+<div class="w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-amber-500/20"></div>
+<h2 class="font-mono text-sm text-warm-dark font-bold tracking-tight">people_per_minute</h2>
+<span class="px-2 py-0.5 rounded text-[11px] font-mono bg-amber-100 text-amber-900 border border-amber-200 font-medium">Kafka Sink</span>
+<span class="font-mono text-xs text-warm-muted hidden sm:inline">• Real-time windowed aggregate topic</span>
+</div>
+<button class="h-7 px-2.5 rounded-md bg-warm-bg hover:bg-warm-tag border border-warm-border font-mono text-xs text-warm-dark flex items-center gap-1.5 transition-colors shadow-sm" onclick="event.stopPropagation(); selectTable('people_per_minute')" type="button">
+<span class="material-symbols-outlined text-[14px] text-warm-muted">code</span>
+<span class="">Show DDL</span>
+</button>
+</div>
+<div class="flex items-center gap-1.5 flex-wrap">
+<span class="text-[10px] font-mono uppercase font-semibold text-warm-muted-light tracking-wider mr-1">Schema</span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">window_start: <span class="text-warm-muted text-[11px]">TIMESTAMP</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">avg_people: <span class="text-warm-muted text-[11px]">DOUBLE</span></span>
+<span class="px-2 py-0.5 rounded bg-warm-bg border border-warm-border font-mono text-xs text-warm-dark">peak_people: <span class="text-warm-muted text-[11px]">BIGINT</span></span>
+</div>
+</div>
+</div></div>
+<!-- Selected Table Detail Panel -->
+<!-- Modal Backdrop & Dialog Container (Default open state for immediate visual inspection) -->
+<div id="ddl-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-warm-dark/40 backdrop-blur-sm transition-opacity duration-200" onclick="closeDDLModal()" style="opacity: 0;">
+  <!-- Modal Dialog Window -->
+  <div class="bg-white rounded-xl border border-warm-border shadow-2xl max-w-5xl w-full flex flex-col overflow-hidden max-h-[90vh] animate-in fade-in zoom-in-95 duration-150" onclick="event.stopPropagation()">
+    <!-- Modal Header -->
+    <div class="flex items-center justify-between px-6 py-4 border-b border-warm-border bg-warm-sidebar/80">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-warm-bg border border-warm-border flex items-center justify-center text-warm-dark">
+          <span class="material-symbols-outlined text-[18px]">data_object</span>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h3 class="text-sm font-semibold text-warm-dark font-mono" id="modal-table-title">DDL &amp; Schema Inspection: <span class="text-brand-orange font-bold">cam_entrance</span></h3>
+            <span class="px-2 py-0.5 rounded text-[10px] font-mono bg-sky-100 text-sky-800 border border-sky-200 font-medium">RTSP Stream</span>
+          </div>
+          <p class="text-xs text-warm-muted mt-0.5">Standardized VisionQL Apache Arrow Type System binding (§3.3.1)</p>
+        </div>
+      </div>
+      <!-- Header Actions -->
+      
+    </div>
+
+    <!-- Modal Body: Split 2-Column Grid -->
+    <div class="p-6 overflow-y-auto bg-warm-bg/30">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+        <!-- Left: Declaration DDL Code (Col 5) -->
+        <div class="lg:col-span-5 flex flex-col rounded-lg border border-warm-border bg-warm-bg overflow-hidden shadow-sm">
+          <div class="flex items-center justify-between px-3.5 py-2 bg-warm-sidebar border-b border-warm-border">
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-xs font-semibold text-warm-dark">Declaration DDL</span>
+              <span class="px-1.5 py-0.5 rounded bg-white text-warm-muted border border-warm-border font-mono text-[10px]">SQL-92 + VQL</span>
+            </div>
+            <span class="font-mono text-[10px] text-warm-muted">UTF-8</span>
+          </div>
+          <pre class="p-4 font-mono text-xs text-warm-dark leading-relaxed overflow-x-auto selection:bg-brand-orange-light bg-white"><code><span class="text-brand-orange font-bold">CREATE TABLE</span> cam_entrance
+<span class="text-brand-orange font-bold">USING</span> RTSP
+<span class="text-brand-orange font-bold">OPTIONS</span> (
+  url        = <span class="text-blue-600">'rtsp://10.0.0.15:554/main'</span>,
+  fps        = <span class="text-amber-700 font-semibold">5</span>,
+  event_time = <span class="text-blue-600">'capture_time'</span>,
+  watermark  = <span class="text-blue-600">'2 seconds'</span>
+);</code></pre>
+          <div class="px-3.5 py-2.5 bg-warm-sidebar/90 border-t border-warm-border text-warm-muted text-xs flex items-center gap-2">
+            <span class="material-symbols-outlined text-[14px] text-warm-muted">info</span>
+            <span class="">Watermark delay: streaming windows emit late arrivals up to 2.00s.</span>
+          </div>
+        </div>
+
+        <!-- Right: Arrow Contract Table (Col 7) -->
+        <div class="lg:col-span-7 flex flex-col rounded-lg border border-warm-border bg-white overflow-hidden shadow-sm">
+          <div class="flex items-center justify-between px-3.5 py-2 bg-warm-sidebar border-b border-warm-border">
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-xs font-semibold text-warm-dark">Arrow Schema Contract</span>
+              <span class="px-1.5 py-0.5 rounded bg-white text-warm-muted border border-warm-border font-mono text-[10px]">Zero-Copy Format</span>
+            </div>
+            <span class="font-mono text-[10px] text-warm-muted font-medium">4 Fields</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left font-mono text-xs">
+              <thead>
+                <tr class="bg-warm-bg/70 text-warm-muted text-[11px] uppercase border-b border-warm-border">
+                  <th class="py-2.5 px-3.5 font-semibold">Field</th>
+                  <th class="py-2.5 px-3.5 font-semibold">Logical Type</th>
+                  <th class="py-2.5 px-3.5 font-semibold">Physical Arrow Type</th>
+                  <th class="py-2.5 px-3.5 font-semibold">Constraints / Annotations</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-warm-border text-warm-dark">
+                <tr class="hover:bg-warm-bg/40 transition-colors">
+                  <td class="py-2.5 px-3.5 font-semibold">ts</td>
+                  <td class="py-2.5 px-3.5">
+                    <span class="px-1.5 py-0.5 rounded bg-warm-tag border border-warm-border text-[11px] text-warm-muted">TIMESTAMP</span>
+                  </td>
+                  <td class="py-2.5 px-3.5 text-warm-muted">TIMESTAMP(MS, "UTC")</td>
+                  <td class="py-2.5 px-3.5">
+                    <span class="px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 border border-sky-200 text-[10px] font-semibold">
+                      EVENT TIME (WATERMARKED)
+                    </span>
+                  </td>
+                </tr>
+                <tr class="hover:bg-warm-bg/40 transition-colors bg-orange-50/20">
+                  <td class="py-2.5 px-3.5 font-bold text-brand-orange">frame</td>
+                  <td class="py-2.5 px-3.5">
+                    <span class="px-1.5 py-0.5 rounded bg-orange-100 text-brand-orange border border-orange-200 text-[11px] font-semibold">IMAGE</span>
+                  </td>
+                  <td class="py-2.5 px-3.5 text-warm-dark">Struct&lt;data: Binary, meta: Struct&gt;</td>
+                  <td class="py-2.5 px-3.5">
+                    <span class="px-1.5 py-0.5 rounded bg-warm-tag text-warm-muted border border-warm-border text-[10px]">
+                      DEFERRED DECODE (RGB24)
+                    </span>
+                  </td>
+                </tr>
+                <tr class="hover:bg-warm-bg/40 transition-colors">
+                  <td class="py-2.5 px-3.5 font-semibold">frame_id</td>
+                  <td class="py-2.5 px-3.5">
+                    <span class="px-1.5 py-0.5 rounded bg-warm-tag border border-warm-border text-[11px] text-warm-muted">BIGINT</span>
+                  </td>
+                  <td class="py-2.5 px-3.5 text-warm-muted">INT64</td>
+                  <td class="py-2.5 px-3.5 text-warm-muted">Sequence Monotonic</td>
+                </tr>
+                <tr class="hover:bg-warm-bg/40 transition-colors">
+                  <td class="py-2.5 px-3.5 font-semibold">source</td>
+                  <td class="py-2.5 px-3.5">
+                    <span class="px-1.5 py-0.5 rounded bg-warm-tag border border-warm-border text-[11px] text-warm-muted">STRING</span>
+                  </td>
+                  <td class="py-2.5 px-3.5 text-warm-muted">UTF8</td>
+                  <td class="py-2.5 px-3.5 text-warm-muted">Stream URI hash identifier</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="px-3.5 py-2.5 bg-warm-bg/60 border-t border-warm-border flex items-center justify-between text-warm-muted text-xs">
+            <span class="">Arrow RecordBatch chunking: 64 frames per vector</span>
+            <span class="font-mono text-[11px] text-warm-dark font-medium">Zero memcpy overhead</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal Footer with close trigger -->
+    <div class="px-6 py-3 bg-warm-sidebar border-t border-warm-border flex items-center justify-between text-xs">
+      <span class="font-mono text-warm-muted text-[11px]">Press <kbd class="px-1.5 py-0.5 bg-white border border-warm-border rounded font-mono text-[10px] text-warm-dark shadow-sm">Esc</kbd> or click outside to dismiss</span>
+      <button type="button" onclick="closeDDLModal()" class="h-8 px-4 rounded-md bg-warm-dark text-white hover:bg-black font-mono text-xs font-medium transition-colors shadow-sm">
+        Close
+      </button>
+    </div>
+  </div>
+</div>
+</div>
+</main>
+</div>
+<script>
+    function selectTable(tableName) {
+      const cards = document.querySelectorAll('.table-card');
+      cards.forEach(card => {
+        if (card.getAttribute('data-table') === tableName) {
+          card.classList.add('border-2', 'border-brand-orange/60');
+          card.classList.remove('border', 'border-warm-border');
+        } else {
+          card.classList.remove('border-2', 'border-brand-orange/60');
+          card.classList.add('border', 'border-warm-border');
+        }
+      });
+
+      const titleEl = document.getElementById('detail-title');
+      if (titleEl) {
+        titleEl.innerHTML = 'Active Table DDL & Schema Contract: <span class="font-mono text-brand-orange">' + tableName + '</span>';
+      }
+    }
+
+    function copyActiveDDL() {
+      const text = `CREATE TABLE cam_entrance\nUSING RTSP\nOPTIONS (\n  url        = 'rtsp://10.0.0.15:554/main',\n  fps        = 5,\n  event_time = 'capture_time',\n  watermark  = '2 seconds'\n);`;
+      navigator.clipboard.writeText(text).then(() => {
+        alert('DDL copied to clipboard');
+      });
+    }
+
+    function copyDdl(name) {
+      alert('SHOW CREATE TABLE for ' + name + ' generated.');
+    }
+
+    function showDdlModal(name) {
+      selectTable(name);
+    }
+
+    // Filter bar tab interaction
+    document.querySelectorAll('#filter-pill-container button').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('#filter-pill-container button').forEach(b => {
+          b.className = 'filter-tab px-3 py-1.5 rounded-md bg-transparent hover:bg-warm-bg text-warm-muted hover:text-warm-dark font-mono text-xs font-medium transition-colors';
+        });
+        button.className = 'filter-tab px-3 py-1.5 rounded-md bg-warm-dark text-white font-mono text-xs font-medium transition-colors';
+
+        const filterType = button.getAttribute('data-filter');
+        const rows = document.querySelectorAll('#tables-list .table-card');
+
+        rows.forEach(row => {
+          if (filterType === 'all' || row.getAttribute('data-type') === filterType) {
+            row.style.display = 'block';
+          } else {
+            row.style.display = 'none';
+          }
+        });
+      });
+    });
+
+    // Real-time table search
+    const searchInput = document.getElementById('table-filter-input');
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        const q = e.target.value.toLowerCase();
+        document.querySelectorAll('#tables-list .table-card').forEach(card => {
+          const text = card.textContent.toLowerCase();
+          if (text.includes(q)) {
+            card.style.display = 'block';
+          } else {
+            card.style.display = 'none';
+          }
+        });
+      });
+    }
+  </script>
+
+
+
+
+
+
+
+
+</body></html>
