@@ -32,6 +32,20 @@ The Workbench screen follows the reference prototype's three-region structure:
 
 The result table exposes a transient Overlay Config that maps one `IMAGE` column to one `BOX2D` column and optional label and confidence columns. This configuration changes presentation only, remains in page memory, and is cleared with the Session.
 
+Runtime → Queries follows the [jobs management prototype](../prototype/jobs_management/code.html): a searchable list with status, Show SQL, and Stop actions. It uses the existing browser Session and public SQL execution transport.
+
+## Persistent Query Management
+
+The SQL editor submits persistent continuous Table writes with `SUBMIT QUERY`. The Queries page reads `SHOW QUERIES` and selects returned Arrow fields by name. It filters names, Query IDs, state strings, and source health locally, preserves unknown state/health strings, and shows the actual `started_at`, `last_event_time`, `restart_gap_count`, `error_code`, and `error_message` values. Missing inspection values appear as unavailable. Prototype sequence numbers, watermark lag, committed-row counts, and checkpoint claims are not supported by the public Query schema.
+
+The visible page refreshes every five seconds and offers manual refresh. It pauses automatic refresh while Settings, History, or a Query definition is open. Every management statement consumes its bounded Arrow result and checks terminal execution status before releasing the Session's shared execution slot. Navigation, reconnect, and editor execution are disabled during a management operation; page cleanup cancels only that transient inspection execution by its exact `execution_id`.
+
+Show SQL sends `DESCRIBE QUERY '<query_id>'` and opens a drawer with the server's immutable `sql_redacted` definition, lifecycle timestamps, restart-gap boundaries, window-state reset flag, and structured error fields. Copy SQL and Load SQL as new draft preserve the redaction, and the drawer tells the user to replace redacted literals before resubmission. Loading never executes SQL or edits the registered definition.
+
+Stop sends `STOP QUERY '<query_id>'` only for the currently supported non-terminal `STARTING` and `RUNNING` states, then reloads `SHOW QUERIES`. Terminal and unknown states disable the action. Query IDs are SQL string literals with escaped quotes; display names are never mutation identities. A failed operation preserves its structured problem and the last successfully loaded list. Session expiry clears the management data and prompts reconnection; reconnecting establishes a fresh view.
+
+Management reads are not local SQL-editor history entries. Persistent Query state is kept only in page memory and owned durably by `vqld` and the Catalog. Closing the browser or cancelling an inspection request does not issue `STOP QUERY`. No private lifecycle API, SQLite read, `PAUSE`, `RESUME`, or manual terminal-history deletion is introduced.
+
 ## Reference Implementation
 
 `vql-workbench/` is a separate project with two implementation parts:
@@ -54,7 +68,7 @@ The internal browser transport is intentionally small:
 - expose the public server execution ID and propagate cancellation for exactly that execution;
 - translate gRPC status and the versioned VQL error payload into JSON containing the original `code`, `symbol`, `message`, and optional `target_version` fields.
 
-These HTTP routes are private implementation details of Workbench, not a second VisionQL API. Preparing and classifying SQL remains a `vqld` operation. If `vql.statement_info.result_mode` is not `bounded`, the backend refuses execution without opening a result stream and returns a Workbench-local problem response that is visually distinct from a forwarded VQL error. It must not invent a VQL identifier for a client-side policy decision.
+These HTTP routes are private implementation details of Workbench, not a second VisionQL API. Preparing and classifying SQL remains a `vqld` operation. Default execution rejects an `unbounded` result from `vql.statement_info.result_mode` before opening a stream; the editor's explicit attached-stream action opts into that result mode. A client-side policy rejection uses a Workbench-local problem response that is visually distinct from a forwarded VQL error and never invents a VQL identifier.
 
 ## Technology Selection
 
@@ -110,7 +124,7 @@ An `IMAGE` cell renders only when the field carries `ARROW:extension:name=vql.im
 
 ## Query and Error Contract
 
-Workbench executes only bounded statements. It uses prepared schema metadata from `vqld` to reject an unbounded result before opening a browser stream. Cancellation targets the server execution ID returned by the public Flight boundary.
+Workbench uses prepared schema metadata from `vqld` to classify statements without SQL parsing. Ordinary Run and management actions require bounded results; the attached-stream action explicitly permits an unbounded rolling preview. `SUBMIT QUERY` returns a bounded registration result while the persistent Query runs independently in `vqld`. Cancelling a browser execution targets its public `execution_id`; stopping a persistent Query uses `STOP QUERY '<query_id>'`.
 
 Errors use the versioned VQL representation and standard gRPC status. The UI may add local editor context, but it does not parse messages to infer codes or retryability.
 
@@ -129,6 +143,8 @@ The acceptance path demonstrates all of the following with a real visual query:
 - the same query and result semantics as the Python/notebook path.
 
 Unit fixtures include scalar, null, nested, `vql.image`, and `BOX2D` Arrow columns. Browser tests cover image decode failure, multiple aspect ratios, overlay clipping, keyboard execution, cancellation during streaming, Session expiry, and Blob URL cleanup. The end-to-end acceptance test uses the built frontend, Workbench backend, and shipped `vqld`; mocks alone cannot satisfy the acceptance path.
+
+Persistent Query tests cover named-field decoding, timestamp and Int64 handling, unknown states, escaped Query IDs, searching, disabled terminal actions, serialized Stop/refresh, redacted SQL loading, structured failures, polling, and request cleanup. The browser acceptance path submits a real persistent Query through shipped `vqld`, inspects it, loads a separate draft, stops it, and rediscovers its terminal state after reload, including a narrow-screen layout check.
 
 ## References
 

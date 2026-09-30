@@ -359,7 +359,7 @@ designs below for normative contracts.
 | [Kernel design](docs/design/kernel.md) | Planning, streaming, media, inference, resources, and security |
 | [Catalog design](docs/design/catalog.md) | Namespaces, definition and persistent Query objects, snapshots, providers, backends, and UC API |
 | [`vqld` service design](docs/design/vqld.md) | v0.2 Flight SQL host, Catalog-backed persistent Queries, and honest restart-from-live behavior |
-| [Workbench design](docs/design/workbench.md) | v0.3 browser SQL client, visual results, and Catalog management |
+| [Workbench design](docs/design/workbench.md) | v0.3 browser SQL client, visual results, Catalog management, and persistent Query management |
 | [Error code design](docs/design/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI design](docs/design/cli.md) | Shell, script execution, rendering, and signal behavior |
 | [Python binding design](docs/design/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |

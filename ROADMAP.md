@@ -40,7 +40,7 @@ Status: ✅ Complete · 🚧 In progress · 📋 Planned
 - [ ] Run bounded statements to completion, preview one attached continuous statement in a memory-bounded rolling result, and cancel exactly the active execution.
 - [x] Manage Tables through public `CREATE TABLE`, `SHOW TABLES`, `DESCRIBE TABLE`, `SHOW CREATE TABLE`, and `DROP TABLE` actions.
 - [x] Manage Models through public `CREATE MODEL`, `SHOW`/`DESCRIBE`, `RESOLVE MODEL`, `ALTER MODEL`, and `DROP MODEL` actions; manage Functions through public `CREATE FUNCTION`, `SHOW`/`DESCRIBE`, `SHOW CREATE FUNCTION`, and `DROP FUNCTION` actions.
-- [ ] Submit, list, filter, inspect, load as a new draft, and stop persistent Queries through the v0.2 SQL lifecycle; keep attached and persistent execution visibly distinct and keep Query definitions immutable.
+- [x] Submit, list, filter, inspect, load as a new draft, and stop persistent Queries through the v0.2 SQL lifecycle; keep attached and persistent execution visibly distinct and keep Query definitions immutable.
 - [ ] Render Arrow results as a typed table or JSON presentation with elapsed time, row or stream status, local pagination, and no SQL rewriting.
 - [ ] Render returned `IMAGE` thumbnails with configurable `BOX2D`, label, and confidence overlays; inspect nested row values and export a client-side thumbnail crop without fetching original media.
 - [ ] Keep up to 500 local execution-history records with load, rerun, copy, edit, and clear actions while excluding results, media, credentials, and persistent Query state.

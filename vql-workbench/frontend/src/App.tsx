@@ -19,13 +19,21 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 
 import {
   asProblem,
   cancelExecution,
   closeSession,
   createSession,
+  executeBoundedSql,
   getResultResponse,
   getSession,
   startExecution,
@@ -51,6 +59,7 @@ import type {
 } from "./lib/types";
 import { HistoryDrawer } from "./components/HistoryDrawer";
 import { Logo } from "./components/Logo";
+import { QueriesPage } from "./components/QueriesPage";
 import { ResultPane } from "./components/ResultPane";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SqlEditor, type SqlEditorHandle } from "./components/SqlEditor";
@@ -60,7 +69,7 @@ import { cn } from "./lib/cn";
 import { executeCatalogStatement, type CatalogSection } from "./lib/catalog";
 import { CatalogWorkspace } from "./components/CatalogWorkspace";
 
-type WorkspacePage = "editor" | CatalogSection;
+type WorkspacePage = "editor" | "queries" | CatalogSection;
 
 const EMPTY_OVERLAY: OverlayConfig = {
   imageColumn: null,
@@ -85,6 +94,7 @@ export default function App() {
   const [editorHeight, setEditorHeight] = useState(300);
   const [page, setPage] = useState<WorkspacePage>("editor");
   const [catalogBusy, setCatalogBusy] = useState(false);
+  const [managementBusy, setManagementBusy] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
   const editorRef = useRef<SqlEditorHandle>(null);
   const executionInFlight = useRef(false);
@@ -93,8 +103,33 @@ export default function App() {
     drafts.find((draft) => draft.id === activeDraftId) ?? drafts[0];
   const busy =
     catalogBusy ||
+    managementBusy ||
     ["preparing", "running", "cancelling"].includes(execution.phase);
   const connected = execution.phase !== "disconnected";
+
+  const requestManagementSql = useCallback(
+    async (sql: string, signal: AbortSignal) => {
+      if (!connected || executionInFlight.current) {
+        throw new Error(
+          "Wait for the active execution before starting another statement.",
+        );
+      }
+      executionInFlight.current = true;
+      setManagementBusy(true);
+      try {
+        return await executeBoundedSql(sql, signal);
+      } catch (error) {
+        const problem = asProblem(error);
+        if (problem.httpStatus === 401)
+          dispatch({ type: "connection_failed", problem });
+        throw error;
+      } finally {
+        executionInFlight.current = false;
+        setManagementBusy(false);
+      }
+    },
+    [connected],
+  );
 
   useEffect(() => {
     void getSession()
@@ -530,7 +565,21 @@ export default function App() {
               <span className="sr-only">VisionQL documentation</span>
             </a>
           </header>
-          {page !== "editor" ? (
+          {page === "queries" ? (
+            <QueriesPage
+              key={sessionVersion}
+              connected={connected}
+              active={!settingsOpen && !historyOpen}
+              connectionProblem={execution.problem}
+              request={requestManagementSql}
+              onConnect={() => setSettingsOpen(true)}
+              onLoadSql={(sql, name) => {
+                addDraft(sql, name);
+                setPage("editor");
+              }}
+            />
+          ) : null}
+          {page !== "editor" && page !== "queries" ? (
             <CatalogWorkspace
               key={`${sessionVersion}:${page}`}
               section={page}
@@ -733,7 +782,13 @@ function Sidebar({
             />
           </NavGroup>
           <NavGroup title="Runtime" bordered>
-            <DeferredNav icon={<FileClock size={17} />} label="Queries" />
+            <NavItem
+              icon={<FileClock size={17} />}
+              label="Queries"
+              active={page === "queries"}
+              disabled={busy && page !== "queries"}
+              onClick={() => onNavigate("queries")}
+            />
           </NavGroup>
         </nav>
         <div className="border-t border-hairline p-2">
@@ -809,22 +864,6 @@ function NavItem({
         </span>
       ) : null}
     </button>
-  );
-}
-
-function DeferredNav({
-  icon,
-  label,
-}: {
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <Tooltip label="Awaiting product prototype">
-      <span className="block">
-        <NavItem icon={icon} label={label} disabled />
-      </span>
-    </Tooltip>
   );
 }
 

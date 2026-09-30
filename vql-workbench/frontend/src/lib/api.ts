@@ -1,4 +1,4 @@
-import type { WorkbenchProblem } from "./types";
+import type { QueryResult, WorkbenchProblem } from "./types";
 
 export interface SessionResponse {
   connected: boolean;
@@ -68,6 +68,48 @@ export async function getResultResponse(
   );
   if (!response.ok) throw await responseProblem(response);
   return response;
+}
+
+// Management statements share the Session's single execution slot with the editor.
+// Always consume their Arrow result and check terminal status before releasing it.
+export async function executeBoundedSql(
+  sql: string,
+  signal?: AbortSignal,
+): Promise<QueryResult> {
+  signal?.throwIfAborted();
+  const start = await startExecution(sql, false);
+  const executionId = start.executionId;
+  if (!executionId) throw new Error("Expected a bounded Arrow query result");
+  let completed = false;
+  try {
+    signal?.throwIfAborted();
+    if (start.kind !== "query" || start.resultMode !== "bounded") {
+      throw new Error("Expected a bounded Arrow query result");
+    }
+    const response = await getResultResponse(executionId, signal);
+    const { consumeArrowResponse } = await import("./arrow");
+    let result: QueryResult;
+    try {
+      result = await consumeArrowResponse(response, false, () => undefined);
+    } catch (error) {
+      if (!signal?.aborted) {
+        const status = await waitForTerminalStatus(executionId).catch(
+          () => null,
+        );
+        if (status?.problem) throw status.problem;
+      }
+      throw error;
+    }
+    const status = await waitForTerminalStatus(executionId);
+    if (status.status !== "completed") {
+      throw status.problem ?? new Error(`Execution ${status.status}`);
+    }
+    completed = true;
+    signal?.throwIfAborted();
+    return result;
+  } finally {
+    if (!completed) await cancelExecution(executionId).catch(() => undefined);
+  }
 }
 
 export async function getExecutionStatus(
