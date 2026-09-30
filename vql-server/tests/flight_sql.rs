@@ -104,6 +104,36 @@ async fn arrow_flight_sql_client_runs_direct_and_prepared_queries() {
 }
 
 #[tokio::test]
+async fn show_jobs_lists_persistent_jobs_through_direct_and_prepared_flight_sql() {
+    let (mut client, task) = start_server().await;
+    let mut prepared = client.prepare("SHOW JOBS".to_owned(), None).await.unwrap();
+    assert_eq!(
+        prepared.dataset_schema().unwrap().field(0).name(),
+        "query_id"
+    );
+    assert_eq!(
+        prepared
+            .dataset_schema()
+            .unwrap()
+            .metadata()
+            .get("vql.statement_info.kind")
+            .map(String::as_str),
+        Some("query")
+    );
+    for info in [
+        client.execute("SHOW JOBS;".to_owned(), None).await.unwrap(),
+        prepared.execute().await.unwrap(),
+    ] {
+        let ticket = info.endpoint[0].ticket.clone().unwrap();
+        let mut stream = client.do_get(ticket).await.unwrap();
+        let batches = (&mut stream).try_collect::<Vec<_>>().await.unwrap();
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+        assert_eq!(stream.schema().unwrap().field(0).name(), "query_id");
+    }
+    task.abort();
+}
+
+#[tokio::test]
 async fn query_and_update_paths_are_not_interchangeable() {
     let (mut client, task) = start_server().await;
 

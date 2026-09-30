@@ -180,7 +180,7 @@ test("expires an idle browser Session and asks for reconnection", async ({
   await expect(page.getByText("vqld: disconnected")).toBeVisible();
 });
 
-test("manages persistent Queries through public SQL and preserves editor drafts", async ({
+test("manages Jobs through public SQL and preserves editor drafts", async ({
   page,
 }, testInfo) => {
   const sockets = new Set<Socket>();
@@ -237,24 +237,24 @@ test("manages persistent Queries through public SQL and preserves editor drafts"
         requests.push((request.postDataJSON() as { sql: string }).sql);
       }
     });
-    await page.getByRole("button", { name: "Queries", exact: true }).click();
-    const queries = page.getByRole("main", { name: "Persistent queries" });
+    await page.getByRole("button", { name: "Jobs", exact: true }).click();
+    const queries = page.getByRole("main", { name: "Persistent jobs" });
     const query = queries.getByRole("article", {
       name: "entrance_people_stream",
     });
     await expect(query.getByText("RUNNING", { exact: true })).toBeVisible();
     await expect(queries.getByText("1 running · 1 total")).toBeVisible();
     await page.screenshot({
-      path: testInfo.outputPath("queries-desktop.png"),
+      path: testInfo.outputPath("jobs-desktop.png"),
       animations: "disabled",
     });
 
     await queries.getByRole("searchbox").fill("missing");
-    await expect(queries.getByText("No matching queries")).toBeVisible();
+    await expect(queries.getByText("No matching jobs")).toBeVisible();
     await queries.getByRole("button", { name: "Clear search" }).click();
     await query.getByRole("button", { name: "Show SQL" }).click();
-    const dialog = page.getByRole("dialog", { name: "Query SQL and details" });
-    await expect(dialog.getByLabel("Query SQL")).toContainText("INSERT INTO");
+    const dialog = page.getByRole("dialog", { name: "Job SQL and details" });
+    await expect(dialog.getByLabel("Job SQL")).toContainText("INSERT INTO");
     await expect(
       dialog.getByText(/String literals are redacted/),
     ).toBeVisible();
@@ -265,7 +265,7 @@ test("manages persistent Queries through public SQL and preserves editor drafts"
       .getByRole("button", { name: "Untitle.sql", exact: true })
       .click();
     await expect(editor).toHaveText("SELECT 42 AS original_draft;");
-    await page.getByRole("button", { name: "Queries", exact: true }).click();
+    await page.getByRole("button", { name: "Jobs", exact: true }).click();
     await expect(
       query.getByRole("button", { name: "Stop", exact: true }),
     ).toBeEnabled();
@@ -277,7 +277,7 @@ test("manages persistent Queries through public SQL and preserves editor drafts"
     expect(requests.some((sql) => /^STOP QUERY '/.test(sql))).toBe(true);
     expect(
       requests.every((sql) =>
-        /^(SHOW QUERIES|DESCRIBE QUERY|STOP QUERY)/.test(sql),
+        /^(SHOW JOBS|DESCRIBE QUERY|STOP QUERY)/.test(sql),
       ),
     ).toBe(true);
 
@@ -289,13 +289,13 @@ test("manages persistent Queries through public SQL and preserves editor drafts"
       ),
     ).toBe(true);
     await page.screenshot({
-      path: testInfo.outputPath("queries-mobile.png"),
+      path: testInfo.outputPath("jobs-mobile.png"),
       animations: "disabled",
     });
     await page.reload();
     await expect(editor).toBeVisible();
     await page.getByRole("button", { name: "Open navigation" }).click();
-    await page.getByRole("button", { name: "Queries", exact: true }).click();
+    await page.getByRole("button", { name: "Jobs", exact: true }).click();
     await expect(query.getByText("STOPPED", { exact: true })).toBeVisible();
   } finally {
     for (const socket of sockets) socket.destroy();
@@ -309,15 +309,15 @@ test("reconnects after an expired Query inspection Session", async ({
   test.setTimeout(40_000);
   await connect(page);
   await page.waitForTimeout(11_000);
-  await page.getByRole("button", { name: "Queries", exact: true }).click();
-  const queries = page.getByRole("main", { name: "Persistent queries" });
+  await page.getByRole("button", { name: "Jobs", exact: true }).click();
+  const queries = page.getByRole("main", { name: "Persistent jobs" });
   await expect(queries.getByText("Workbench is disconnected")).toBeVisible();
   await expect(
-    queries.getByText("Connect to view persistent queries"),
+    queries.getByText("Connect to view persistent jobs"),
   ).toBeVisible();
   await connect(page);
   await expect(
-    queries.getByRole("button", { name: "Refresh queries" }),
+    queries.getByRole("button", { name: "Refresh jobs" }),
   ).toBeEnabled();
   await expect(queries.getByText("Connected: vqld (Flight SQL)")).toBeVisible();
   await expect(

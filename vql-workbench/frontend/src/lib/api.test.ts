@@ -39,7 +39,7 @@ describe("bounded management execution", () => {
       .mockResolvedValueOnce(arrowResponse())
       .mockResolvedValueOnce(Response.json(status));
     vi.stubGlobal("fetch", fetch);
-    const result = await executeBoundedSql("SHOW QUERIES;");
+    const result = await executeBoundedSql("SHOW JOBS;");
     expect(result.rows[0].values).toEqual({
       query_id: "query-1",
       state: "RUNNING",
@@ -50,7 +50,7 @@ describe("bounded management execution", () => {
       "/api/executions/execution-1",
     ]);
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
-      sql: "SHOW QUERIES;",
+      sql: "SHOW JOBS;",
       allowUnbounded: false,
     });
   });
@@ -92,7 +92,7 @@ describe("bounded management execution", () => {
       .mockResolvedValueOnce(Response.json(status));
     vi.stubGlobal("fetch", fetch);
     const controller = new AbortController();
-    const request = executeBoundedSql("SHOW QUERIES;", controller.signal);
+    const request = executeBoundedSql("SHOW JOBS;", controller.signal);
     controller.abort();
     finishStart(Response.json(start));
     await expect(request).rejects.toMatchObject({ name: "AbortError" });
@@ -116,7 +116,7 @@ describe("bounded management execution", () => {
         ),
       ),
     );
-    await expect(executeBoundedSql("SHOW QUERIES;")).rejects.toMatchObject({
+    await expect(executeBoundedSql("SHOW JOBS;")).rejects.toMatchObject({
       httpStatus: 401,
       title: "Workbench is disconnected",
     });

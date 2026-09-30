@@ -456,33 +456,33 @@ async fn wait_for_running(
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline {
-        let batches = execute_query(client, "SHOW QUERIES").await?;
+        let batches = execute_query(client, "SHOW JOBS").await?;
         for batch in &batches {
             let ids = batch
                 .column(0)
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| "SHOW QUERIES query_id is not Utf8".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS query_id is not Utf8".to_owned())?;
             let states = batch
                 .column(2)
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| "SHOW QUERIES state is not Utf8".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS state is not Utf8".to_owned())?;
             let health = batch
                 .column(3)
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| "SHOW QUERIES source_health is not Utf8".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS source_health is not Utf8".to_owned())?;
             let event_time = batch
                 .column(4)
                 .as_any()
                 .downcast_ref::<TimestampMillisecondArray>()
-                .ok_or_else(|| "SHOW QUERIES last_event_time is not Timestamp".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS last_event_time is not Timestamp".to_owned())?;
             let gaps = batch
                 .column(7)
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| "SHOW QUERIES restart_gap_count is not Int64".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS restart_gap_count is not Int64".to_owned())?;
             for row in 0..batch.num_rows() {
                 if ids.value(row) == query_id
                     && states.value(row) == "RUNNING"

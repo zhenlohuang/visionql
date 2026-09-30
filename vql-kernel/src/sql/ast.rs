@@ -103,7 +103,7 @@ pub(crate) enum VqlStatement {
         name: String,
         sql: String,
     },
-    ShowQueries,
+    ShowJobs,
     DescribeQuery {
         query_id: String,
     },

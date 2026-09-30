@@ -1148,9 +1148,9 @@ impl Session {
                         execution_profile,
                     )
                 }
-                VqlStatement::ShowQueries => (
+                VqlStatement::ShowJobs => (
                     query_management_info(),
-                    show_queries_schema(),
+                    show_jobs_schema(),
                     Vec::new(),
                     PreparedOperation::Persistent(PersistentCommand::Show),
                     ExecutionProfile::default(),
@@ -1276,7 +1276,7 @@ impl Session {
                 .map(Statement::Ddl),
             VqlStatement::Describe { kind, name } => self.describe(kind, &name).map(Statement::Ddl),
             VqlStatement::SubmitQuery { .. }
-            | VqlStatement::ShowQueries
+            | VqlStatement::ShowJobs
             | VqlStatement::DescribeQuery { .. }
             | VqlStatement::StopQuery { .. } => Err(VqlError::new(
                 ErrorCode::InvalidArgument,
@@ -3187,7 +3187,7 @@ fn timestamp_field(name: &str, nullable: bool) -> Field {
     )
 }
 
-fn show_queries_schema() -> SchemaRef {
+fn show_jobs_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("query_id", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),

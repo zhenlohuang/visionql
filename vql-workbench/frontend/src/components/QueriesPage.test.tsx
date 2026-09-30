@@ -98,7 +98,7 @@ describe("QueriesPage", () => {
       ),
     ).toBeDisabled();
     await userEvent.type(
-      screen.getByRole("searchbox", { name: "Search queries" }),
+      screen.getByRole("searchbox", { name: "Search jobs" }),
       "STOPPED",
     );
     expect(screen.getAllByRole("article")).toHaveLength(1);
@@ -116,7 +116,7 @@ describe("QueriesPage", () => {
     await userEvent.click(
       within(article).getByRole("button", { name: "Show SQL" }),
     );
-    expect(await screen.findByLabelText("Query SQL")).toHaveTextContent(
+    expect(await screen.findByLabelText("Job SQL")).toHaveTextContent(
       "label = '?'",
     );
     expect(request.mock.calls[1][0]).toBe("DESCRIBE QUERY 'query''1';");
@@ -147,9 +147,7 @@ describe("QueriesPage", () => {
     });
     await userEvent.click(stop);
     expect(stop).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Refresh queries" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Refresh jobs" })).toBeDisabled();
     expect(request.mock.calls[1][0]).toBe("STOP QUERY 'query''1';");
     expect(request).toHaveBeenCalledTimes(2);
     await act(async () => resolveStop(result({ ...row, state: "STOPPED" })));
@@ -157,7 +155,7 @@ describe("QueriesPage", () => {
       expect(within(article).getByText("STOPPED")).toBeVisible(),
     );
     expect(stop).toBeDisabled();
-    expect(request.mock.calls[2][0]).toBe("SHOW QUERIES;");
+    expect(request.mock.calls[2][0]).toBe("SHOW JOBS;");
   });
 
   it("retains the last list and structured failure when Stop fails", async () => {
@@ -184,23 +182,19 @@ describe("QueriesPage", () => {
       vi.fn().mockResolvedValue(result()),
       false,
     );
-    expect(
-      screen.getByText("Connect to view persistent queries"),
-    ).toBeVisible();
+    expect(screen.getByText("Connect to view persistent jobs")).toBeVisible();
     expect(request).not.toHaveBeenCalled();
     await userEvent.click(
       screen.getByRole("button", { name: "Open Settings" }),
     );
     expect(onConnect).toHaveBeenCalledOnce();
     rerender(<QueriesPage {...props} connected />);
-    expect(await screen.findByText("No registered queries")).toBeVisible();
+    expect(await screen.findByText("No registered jobs")).toBeVisible();
     request.mockResolvedValueOnce(list);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Refresh queries" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Refresh jobs" }));
     await screen.findByRole("article", { name: row.name });
     await userEvent.type(screen.getByRole("searchbox"), "missing");
-    expect(screen.getByText("No matching queries")).toBeVisible();
+    expect(screen.getByText("No matching jobs")).toBeVisible();
   });
 
   it("polls only while visible, pauses for settings, and aborts pending work on unmount", async () => {

@@ -964,8 +964,8 @@ fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
 }
 
 fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() == 2 && token_is(tokens.get(1), "QUERIES") {
-        return Ok(VqlStatement::ShowQueries);
+    if tokens.len() == 2 && token_is(tokens.get(1), "JOBS") {
+        return Ok(VqlStatement::ShowJobs);
     }
     if token_is(tokens.get(1), "CREATE") {
         let kind = singular_kind(tokens.get(2))?;
@@ -999,13 +999,15 @@ fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
         return Ok(VqlStatement::ShowModelVersions { name });
     }
     if tokens.len() != 2 {
-        return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or SHOW CREATE <kind> <name>");
+        return invalid(
+            "expected SHOW TABLES, MODELS, FUNCTIONS, JOBS, or SHOW CREATE <kind> <name>",
+        );
     }
     let kind = match word(tokens.get(1)).as_deref() {
         Some("TABLES") => ShowKind::Tables,
         Some("MODELS") => ShowKind::Models,
         Some("FUNCTIONS") => ShowKind::Functions,
-        _ => return invalid("expected SHOW TABLES, MODELS, or FUNCTIONS"),
+        _ => return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or JOBS"),
     };
     Ok(VqlStatement::Show(kind))
 }
@@ -1486,8 +1488,8 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_statement("SHOW QUERIES").unwrap(),
-            VqlStatement::ShowQueries
+            parse_statement("SHOW JOBS").unwrap(),
+            VqlStatement::ShowJobs
         );
         assert_eq!(
             parse_statement("DESCRIBE QUERY 'query-id'").unwrap(),
@@ -1501,5 +1503,23 @@ mod tests {
                 query_id: "query-id".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn show_jobs_accepts_sql_keyword_variations_and_rejects_invalid_forms() {
+        for sql in ["SHOW JOBS", "show jobs", "ShOw /* list */ JoBs"] {
+            assert_eq!(
+                parse_statement(sql).unwrap(),
+                VqlStatement::ShowJobs,
+                "{sql}"
+            );
+        }
+        for sql in ["SHOW QUERIES", "SHOW JOB", "SHOW JOBS extra", "SHOW 'JOBS'"] {
+            assert_eq!(
+                parse_statement(sql).unwrap_err().code,
+                ErrorCode::InvalidSql,
+                "{sql}"
+            );
+        }
     }
 }

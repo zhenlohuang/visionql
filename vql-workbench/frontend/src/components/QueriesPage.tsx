@@ -98,7 +98,7 @@ export function QueriesPage({
 
   const refresh = useCallback(
     async (signal: AbortSignal) => {
-      const result = await request("SHOW QUERIES;", signal);
+      const result = await request("SHOW JOBS;", signal);
       signal.throwIfAborted();
       setQueries(readQueries(result));
       setUpdatedAt(Date.now());
@@ -183,26 +183,24 @@ export function QueriesPage({
   return (
     <main
       className="min-h-0 flex-1 overflow-y-auto bg-canvas"
-      aria-label="Persistent queries"
+      aria-label="Persistent jobs"
     >
       <div className="mx-auto flex max-w-7xl flex-col gap-6 p-5 md:p-8">
         <header className="border-b border-hairline pb-5">
           <p className="mb-3 flex items-center gap-2 font-mono text-[11px] text-muted">
             <span>VisionQL</span>
             <span>/</span>
-            <span>Runtime</span>
+            <span>Workspace</span>
             <span>/</span>
-            <span className="font-semibold text-ink">Queries</span>
+            <span className="font-semibold text-ink">Jobs</span>
           </p>
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <h1 className="text-[24px] font-semibold tracking-tight">
-                Queries
-              </h1>
+              <h1 className="text-[24px] font-semibold tracking-tight">Jobs</h1>
               <p className="mt-1 text-[13px] leading-6 text-body">
                 Persistent streaming writes via{" "}
                 <code className="rounded border border-hairline bg-surface-raised px-1.5 py-0.5 font-mono text-[12px] text-ink">
-                  SHOW QUERIES
+                  SHOW JOBS
                 </code>
                 .
               </p>
@@ -223,7 +221,7 @@ export function QueriesPage({
                 size="icon"
                 disabled={!connected || operating || busy}
                 onClick={() => void operate(refresh)}
-                aria-label="Refresh queries"
+                aria-label="Refresh jobs"
               >
                 <RefreshCw
                   size={15}
@@ -241,8 +239,8 @@ export function QueriesPage({
           <input
             ref={searchRef}
             type="search"
-            aria-label="Search queries"
-            placeholder="Search queries by name, ID, or status..."
+            aria-label="Search jobs"
+            placeholder="Search jobs by name, ID, or status..."
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             className="h-11 w-full rounded-lg border border-hairline bg-surface pl-10 pr-16 text-[13px] placeholder:text-muted focus:border-hairline-strong"
@@ -260,8 +258,8 @@ export function QueriesPage({
         ) : null}
         {!connected ? (
           <EmptyState
-            title="Connect to view persistent queries"
-            description="Choose a vqld endpoint in Settings to inspect and stop its registered Queries."
+            title="Connect to view persistent jobs"
+            description="Choose a vqld endpoint in Settings to inspect and stop its registered jobs."
           >
             <Button onClick={onConnect}>Open Settings</Button>
           </EmptyState>
@@ -271,17 +269,17 @@ export function QueriesPage({
             className="flex items-center justify-center gap-2 py-16 text-[13px] text-muted"
           >
             <LoaderCircle size={17} className="animate-spin" />
-            Loading queries…
+            Loading jobs…
           </div>
         ) : queries?.length === 0 ? (
           <EmptyState
-            title="No registered queries"
+            title="No registered jobs"
             description="Submit a persistent streaming write with SUBMIT QUERY in the SQL editor."
           />
         ) : queries && visibleQueries.length === 0 ? (
           <EmptyState
-            title="No matching queries"
-            description="Try another name, Query ID, or status."
+            title="No matching jobs"
+            description="Try another name, Job ID, or status."
           >
             <Button size="sm" onClick={() => setSearch("")}>
               Clear search
@@ -371,8 +369,8 @@ export function QueriesPage({
         <footer className="flex flex-wrap items-center justify-between gap-3 px-1 font-mono text-[11px] text-muted">
           <span role="status">
             {queries
-              ? `Showing ${visibleQueries.length} of ${queries.length} registered queries`
-              : "Registered queries"}
+              ? `Showing ${visibleQueries.length} of ${queries.length} registered jobs`
+              : "Registered jobs"}
           </span>
           <div className="flex flex-wrap items-center gap-4">
             {updatedAt ? (
@@ -401,13 +399,13 @@ export function QueriesPage({
       >
         <DialogContent
           side
-          title="Query SQL and details"
-          description="Inspect the server's redacted SQL definition and persistent Query state."
+          title="Job SQL and details"
+          description="Inspect the server's redacted SQL definition and persistent job state."
           className="flex max-w-[680px] flex-col"
         >
           <header className="border-b border-hairline bg-canvas-soft p-5 pr-14">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">
-              Query definition
+              Job definition
             </p>
             <h2 className="mt-1 break-all font-mono text-[15px] font-semibold">
               {selected?.name}
@@ -435,13 +433,13 @@ export function QueriesPage({
                   <h3 className="mb-2 text-[12px] font-semibold">SQL</h3>
                   <pre
                     className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-hairline bg-canvas-soft p-4 font-mono text-[12px] leading-6"
-                    aria-label="Query SQL"
+                    aria-label="Job SQL"
                   >
                     {details.sql}
                   </pre>
                   <p className="mt-2 text-[11px] leading-5 text-muted">
                     String literals are redacted by vqld. Replace the redacted
-                    values before submitting a new Query.
+                    values before submitting a new job.
                   </p>
                 </section>
                 <dl className="divide-y divide-hairline font-mono text-[11px]">
@@ -490,7 +488,7 @@ export function QueriesPage({
                 className="flex items-center justify-center gap-2 py-12 text-[12px] text-muted"
               >
                 <LoaderCircle size={16} className="animate-spin" />
-                Loading Query definition…
+                Loading job definition…
               </div>
             ) : null}
           </div>

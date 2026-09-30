@@ -8,6 +8,7 @@ All notable changes to VisionQL are documented in this file.
 
 - Make `SHOW CREATE MODEL <name>` return the latest live version's complete declaration, and support `VERSION '<version>'` for an exact version. Model results append the actual `version`; Table and Function results retain their existing schema. Workbench reads these definitions directly for object and version selections.
 - Preserve escaped strings and quoted identifiers when splitting SQL scripts, so returned Model DDL and quoted version names can be replayed.
+- Rename the persistent job listing command from `SHOW QUERIES` to `SHOW JOBS` across the SQL parser, Workbench, and current documentation. The returned Arrow fields and other Query lifecycle commands remain unchanged.
 
 ## [0.2.0] - 2026-09-06
 

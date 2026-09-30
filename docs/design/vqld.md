@@ -139,7 +139,7 @@ The service adds these statements to the kernel-owned VQL parser:
 SUBMIT QUERY people_per_minute AS
 INSERT INTO people_sink SELECT ...;
 
-SHOW QUERIES;
+SHOW JOBS;
 DESCRIBE QUERY '<query_id>';
 STOP QUERY '<query_id>';
 ```
@@ -157,7 +157,7 @@ state Utf8
 The minimum inspection columns are:
 
 ```text
-SHOW QUERIES:
+SHOW JOBS:
   query_id, name, state, source_health, last_event_time,
   started_at, updated_at, restart_gap_count,
   error_code, error_message
@@ -223,7 +223,7 @@ RTSP remains non-replayable. Restart loses unavailable source frames and open-wi
 
 ## Metrics and Health
 
-`SHOW QUERIES` and `DESCRIBE QUERY` are the product interfaces for query state, source health, last event time, restart gaps, and errors.
+`SHOW JOBS` and `DESCRIBE QUERY` are the product interfaces for query state, source health, last event time, restart gaps, and errors.
 
 The optional Prometheus endpoint contains process and aggregate Session, query, inference, source, and sink metrics. It does not use `query_id` or Query names as labels and is not a retained Query-history API.
 

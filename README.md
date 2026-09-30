@@ -132,7 +132,7 @@ The same shell front end now has two execution backends: without `--endpoint` it
 SUBMIT QUERY people_per_minute AS
 INSERT INTO people_sink SELECT ... FROM cam_entrance;
 
-SHOW QUERIES;
+SHOW JOBS;
 DESCRIBE QUERY '<query_id>';
 STOP QUERY '<query_id>';
 ```

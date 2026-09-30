@@ -870,11 +870,9 @@ function Sidebar({
               count={historyCount}
               onClick={onHistory}
             />
-          </NavGroup>
-          <NavGroup title="Runtime" bordered>
             <NavItem
               icon={<FileClock size={17} />}
-              label="Queries"
+              label="Jobs"
               active={page === "queries"}
               disabled={busy && page !== "queries"}
               onClick={() => onNavigate("queries")}
@@ -896,20 +894,13 @@ function Sidebar({
 
 function NavGroup({
   title,
-  bordered,
   children,
 }: {
   title: string;
-  bordered?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <div
-      className={cn(
-        "space-y-0.5",
-        bordered && "mt-2 border-t border-hairline pt-2",
-      )}
-    >
+    <div className="space-y-0.5">
       <p className="px-2 py-1.5 text-[9px] font-semibold uppercase tracking-[0.13em] text-muted">
         {title}
       </p>

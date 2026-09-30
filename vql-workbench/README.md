@@ -4,7 +4,7 @@ VisionQL Workbench is the independent browser client for one `vqld` endpoint. It
 
 New query files are named `Untitle.sql`, then `Untitle1.sql`, `Untitle2.sql`, and so on when a name is already in use. Double-click a file tab or click its pencil button to rename it. Names must be non-empty and unique among open drafts; `.sql` is added automatically when omitted. Draft names and SQL are saved in browser storage and survive reloads.
 
-Runtime → Queries implements the [jobs management prototype](../docs/prototype/jobs_management/code.html) using `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY` through the same public SQL execution transport.
+Workspace → Jobs implements the [jobs management prototype](../docs/prototype/jobs_management/code.html) using `SHOW JOBS`, `DESCRIBE QUERY`, and `STOP QUERY` through the same public SQL execution transport. Workspace groups SQL editor, History, and Jobs.
 
 ## Catalog
 
@@ -12,9 +12,9 @@ The Catalog sidebar groups objects in an expandable Catalog → Schema → Table
 
 Metadata comes from public `SHOW`, `DESCRIBE`, and `SHOW CREATE` statements. Model `RESOLVED` means its execution contract is resolved. Functions include registered Model callables and route their details and mutations to Model SQL. Python declarations can be inspected and managed, while Python Function execution in `vqld` remains unavailable.
 
-## Persistent Queries
+## Jobs
 
-Submit a persistent continuous write with `SUBMIT QUERY <name> AS INSERT INTO ...` in the SQL editor, then open **Queries** to search by name, Query ID, state, or source health. The list refreshes every five seconds while visible, and provides a manual refresh action. Inspection, refresh, Stop, and editor execution share the browser Session's single execution slot.
+Submit a persistent continuous write with `SUBMIT QUERY <name> AS INSERT INTO ...` in the SQL editor, then open **Jobs** in **Workspace** to search by name, ID, state, or source health. Jobs represent the service's persistent Queries. The list refreshes every five seconds while visible, and provides a manual refresh action. Inspection, refresh, Stop, and editor execution share the browser Session's single execution slot.
 
 **Show SQL** displays the server's redacted immutable definition, timestamps, restart gaps, window-state reset flag, and errors. Copying or loading that SQL into a new draft preserves the redaction; replace redacted literals before resubmitting. Loading creates a separate local draft and does not execute or modify the existing Query.
 

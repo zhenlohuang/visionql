@@ -1,8 +1,67 @@
 use std::collections::BTreeMap;
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use tempfile::tempdir;
-use vql_kernel::{Engine, EngineConfig, Session, Statement};
+use vql_kernel::{
+    Engine, EngineConfig, ErrorCode, PersistentCommand, QueryMode, ResultMode, Session, Statement,
+    StatementKind,
+};
+
+#[test]
+fn show_jobs_keeps_the_persistent_listing_schema_and_service_host_boundary() {
+    let temp = tempdir().expect("create test directory");
+    let engine =
+        Engine::new(EngineConfig::from_home(temp.path().join("vql-home"))).expect("create engine");
+    let session = engine.session().build().expect("create session");
+    let prepared = session
+        .prepare("SHOW JOBS", "service", BTreeMap::new())
+        .expect("prepare job listing");
+    let info = prepared.statement_info();
+    assert_eq!(info.kind, StatementKind::Query);
+    assert_eq!(info.query_mode, QueryMode::Bounded);
+    assert_eq!(info.result_mode, ResultMode::Bounded);
+    assert_eq!(
+        prepared.persistent_command(),
+        Some(&PersistentCommand::Show)
+    );
+    assert!(prepared.definition_generations().is_empty());
+    let schema = prepared.result_schema();
+    let fields = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().as_str(),
+                field.data_type().clone(),
+                field.is_nullable(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let timestamp = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
+    assert_eq!(
+        fields,
+        [
+            ("query_id", DataType::Utf8, false),
+            ("name", DataType::Utf8, false),
+            ("state", DataType::Utf8, false),
+            ("source_health", DataType::Utf8, true),
+            ("last_event_time", timestamp.clone(), true),
+            ("started_at", timestamp.clone(), true),
+            ("updated_at", timestamp, false),
+            ("restart_gap_count", DataType::Int64, false),
+            ("error_code", DataType::Utf8, true),
+            ("error_message", DataType::Utf8, true),
+        ]
+    );
+    let error = session
+        .sql("SHOW JOBS")
+        .expect_err("embedded SQL requires a service host");
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
+    assert_eq!(
+        error.message,
+        "persistent Query statements require the vqld service host"
+    );
+}
 
 #[test]
 fn show_create_model_returns_its_actual_version_in_direct_and_prepared_results() {
