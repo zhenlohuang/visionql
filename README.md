@@ -4,7 +4,9 @@
     <a href="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml">
       <img alt="CI" src="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml/badge.svg?branch=main">
     </a>
-    <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-6f42c1">
+    <a href="CHANGELOG.md">
+      <img alt="Released v0.2.0" src="https://img.shields.io/badge/release-v0.2.0-6f42c1">
+    </a>
     <img alt="Rust 1.88 or newer" src="https://img.shields.io/badge/Rust-1.88%2B-black?logo=rust">
     <img alt="Python 3.10 or newer" src="https://img.shields.io/badge/Python-3.10%2B-3776AB">
     <a href="LICENSE">
@@ -13,18 +15,15 @@
   </p>
   <p>
     <a href="#quick-start">Quick start</a> ·
-    <a href="#workbench">Workbench</a> ·
+    <a href="#interfaces">Interfaces</a> ·
     <a href="#examples">Examples</a> ·
-    <a href="#python-api">Python</a> ·
     <a href="#architecture">Architecture</a> ·
-    <a href="ROADMAP.md">Roadmap</a> ·
-    <a href="CHANGELOG.md">Changelog</a>
+    <a href="#documentation">Documentation</a> ·
+    <a href="ROADMAP.md">Roadmap</a>
   </p>
 </div>
 
-## What is VisionQL
-
-VisionQL is a unified batch and streaming engine for querying images, video files, and live camera streams with SQL. Register data sources and typed Models, compose inference with filters and aggregations, and return Arrow results or write continuously to Kafka. Use the embedded CLI or Python API, connect remotely through `vqld` and Arrow Flight SQL, or inspect visual results in the browser with Workbench.
+VisionQL lets you query images, recorded video, and live camera streams with SQL. It combines media decoding, model inference, and relational processing in one engine, returning Arrow results or writing continuously to Kafka.
 
 <p align="center">
   <a href="docs/assets/workbench-rtsp-detection.mp4">
@@ -36,19 +35,20 @@ VisionQL is a unified batch and streaming engine for querying images, video file
 
 ## Why VisionQL
 
-Physical AI systems continuously produce camera, vehicle, and robot data. VisionQL turns decoding, sampling, inference, and aggregation into a declarative query plan:
+Use SQL to answer questions about visual data without assembling a separate decoding, inference, and aggregation pipeline for each task.
 
 - **Replace one-off pipelines with queries.** Images become rows and sampled video frames become time-aware relations. Compose visual inference with familiar filters, joins, `UNNEST`, and aggregations instead of rebuilding orchestration for every question.
 - **Optimize inference, not just SQL.** Model calls stay visible in the plan rather than hiding inside black-box UDFs. VisionQL can push down frame sampling and time predicates, batch inference, and avoid decoding columns the query never reads.
 - **Develop on history, move to live data.** One query model covers bounded image/video data and unbounded RTSP camera streams, with attached execution or explicit persistent Table writes.
-- **Inspect the result where you query.** Workbench combines SQL drafts, thumbnail and bounding-box inspection, a namespace Catalog tree, and persistent Jobs management in one browser workspace.
 - **Keep execution close to the data.** Run the engine in-process or host it through the single-node `vqld` service without requiring media uploads, a scheduler, or a control plane.
-
-The [PRD](docs/prd.md) covers target users, representative Physical AI workflows, product boundaries, and the longer-term batch/stream value proposition.
 
 ## Quick start
 
-Install the [prerequisites](docs/user_guide/installation.md#prerequisites), then build the current source and fetch the sample images:
+These steps use the current source checkout. The release badge refers to v0.2.0; Workbench and the current `SUBMIT JOB` / `SHOW JOBS` command family are unreleased changes. See the [Roadmap](ROADMAP.md) and [Changelog](CHANGELOG.md) for release scope.
+
+### 1. Build and open the shell
+
+Install the [prerequisites](docs/user_guide/installation.md#prerequisites), including Rust, Python, FFmpeg 8 development libraries, and the native build toolchain. Then build the engine and fetch the sample images:
 
 ```bash
 git clone https://github.com/zhenlohuang/visionql.git
@@ -58,11 +58,13 @@ export VQL_HOME="$PWD/data/.vql"
 python3 -m venv .venv
 source .venv/bin/activate
 cargo build --workspace --locked
-python scripts/fetch_datasets.py
+python scripts/fetch_datasets.py --dataset coco128
 cargo run -q -p vql-cli -- shell
 ```
 
-In the shell, register the sample images and run your first query:
+### 2. Query your images
+
+In the shell, register the downloaded images as a Table and run a bounded query:
 
 ```sql
 CREATE TABLE sample_images
@@ -76,26 +78,19 @@ ORDER BY uri
 LIMIT 5;
 ```
 
-The Catalog persists the table definition across Sessions. See [Installation and configuration](docs/user_guide/installation.md) for Docker, `vqld`, Python, Workbench, and runtime settings.
+The Catalog persists the Table definition. Later CLI and Python Sessions using the same `VQL_HOME` can query `sample_images` without registering it again.
 
-## Workbench
+### 3. Detect people with SQL
 
-Workbench provides SQL drafts, bounded and attached-stream execution, thumbnail and bounding-box inspection, a namespace Catalog tree, and persistent Jobs management. It connects to one `vqld` endpoint through public Flight SQL.
-
-Follow the [startup instructions](docs/user_guide/installation.md#workbench), then open [http://127.0.0.1:6040](http://127.0.0.1:6040). The [Workbench user guide](docs/user_guide/workbench.md) covers connections, SQL drafts, visual inspection, Catalog, and Jobs. Closing the browser or cancelling an attached preview leaves persistent Jobs running in `vqld`.
-
-## Examples
-
-### Typed visual inference
-
-Register a Model and call it by name. Its persisted interface fixes the typed arguments and result, while inference remains visible to the optimizer. Export the repository's YOLO26n detector first:
+From another terminal at the repository root, activate the same environment and export the YOLO26n detector:
 
 ```bash
+source .venv/bin/activate
 python -m pip install ultralytics huggingface_hub onnx
 python scripts/export_yolo26.py --task detect --size n
 ```
 
-The following SQL reuses `sample_images` from [Quick start](#quick-start). Run it through the shell or Workbench from the same repository checkout:
+Back in the SQL shell, register and resolve the Model, then call it in a query over `sample_images`:
 
 ```sql
 CREATE MODEL yolo TYPE OBJECT_DETECTION
@@ -122,11 +117,22 @@ FROM sample_images AS f,
 LIMIT 5;
 ```
 
-`CREATE MODEL` declares a typed callable; `RESOLVE MODEL` validates and pins its execution contract. In Workbench, the thumbnail, normalized box, label, and confidence can be inspected together.
+Each result contains the image, a detected person's label and confidence, and a normalized bounding box. `CREATE MODEL` declares the typed interface; `RESOLVE MODEL` validates and pins its execution contract.
 
-Continue with the [SQL reference](docs/user_guide/sql-reference.md) for Model versions, built-in AI, spatial functions, and streaming semantics, or the [examples](examples/README.md) for recorded video, RTSP, Kafka, and persistent Jobs.
+See [Installation and configuration](docs/user_guide/installation.md) for Docker and runtime settings, or continue with another interface below.
 
-## Python API
+## Interfaces
+
+Choose the interface that fits your workflow. All use the same SQL engine; `vqld` owns the Catalog and persistent Jobs for remote clients.
+
+| Interface | Use it for | Get started |
+| --- | --- | --- |
+| **CLI** | Explore SQL locally, run scripts, or connect to a daemon | [CLI guide](docs/user_guide/installation.md#cli) |
+| **Python** | Query from applications and notebooks, collect PyArrow results, and register in-process Python UDFs | [Python setup](docs/user_guide/installation.md#python-api) |
+| **`vqld`** | Host the engine over Arrow Flight SQL and keep persistent Jobs running after clients disconnect | [Daemon setup](docs/user_guide/installation.md#run-vqld) |
+| **Workbench** | Author SQL in the browser, inspect images and boxes, and manage Catalog objects and Jobs | [Workbench setup](docs/user_guide/installation.md#workbench) |
+
+### Python API
 
 After [building the Python extension](docs/user_guide/installation.md#python-api), reuse the same Catalog and collect a PyArrow table:
 
@@ -138,7 +144,21 @@ table = session.sql("SELECT uri, width, height FROM sample_images LIMIT 5").coll
 print(table)
 ```
 
-See the [Python and notebook examples](examples/README.md) for visual inference and batched Python UDFs.
+### Workbench
+
+Start `vqld` and Workbench with the [startup instructions](docs/user_guide/installation.md#workbench), then open [http://127.0.0.1:6040](http://127.0.0.1:6040). Run the detection query above to inspect thumbnails, bounding boxes, labels, and confidence together.
+
+The [Workbench user guide](docs/user_guide/workbench.md) covers connections, SQL drafts, visual inspection, Catalog, and Jobs. Closing the browser or cancelling an attached preview leaves persistent Jobs running in `vqld`.
+
+## Examples
+
+Continue with complete workflows in the [examples guide](examples/README.md):
+
+| Workflow | Example |
+| --- | --- |
+| Count people in recorded video with sampled frames and windowed aggregation | [SQL script](examples/sql/video_people_count.sql) |
+| Filter images with typed inference and batched Python UDFs | [Python script](examples/python/image_filtering.py) · [Notebook](examples/notebook/image_filtering.ipynb) |
+| Inspect a live camera and submit a persistent windowed write to Kafka | [RTSP and Jobs tutorial](examples/README.md#rtsp-streaming-and-persistent-jobs) |
 
 ## Architecture
 
@@ -155,15 +175,15 @@ Open the [interactive architecture diagram](docs/architecture.html) or the [High
 | [Installation and configuration](docs/user_guide/installation.md) | Source builds, Docker, CLI, Python, `vqld`, Workbench, and runtime state |
 | [SQL reference](docs/user_guide/sql-reference.md) | VQL types, provider Tables, Models, Functions, windows, and Jobs |
 | [Built-in function reference](docs/user_guide/sql-functions.md) | Generated syntax, arguments, and examples for AI, spatial, and window functions |
-| [Examples](examples/README.md) | Complete SQL, Python, notebook, and streaming workflows |
 | [Workbench user guide](docs/user_guide/workbench.md) | Connections, SQL drafts, visual inspection, Catalog, Jobs, and history |
-| [Product requirements](docs/prd.md) | Product value and public semantics |
-| [Roadmap](ROADMAP.md) / [Changelog](CHANGELOG.md) | Release scope and delivered changes |
-| [Contributing](CONTRIBUTING.md) | Development setup, tests, coverage, Git hooks, and review expectations |
+| [Product requirements](docs/prd.md) | Target users, workflows, product value, and public semantics |
+| [High-Level Design](docs/high_level_design.md) | System boundaries and component designs |
+
+See the [Roadmap](ROADMAP.md) for release scope and future directions, and the [Changelog](CHANGELOG.md) for delivered and unreleased changes.
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+Issues and pull requests are welcome. The [contributor guide](CONTRIBUTING.md) covers development setup, tests, coverage, Git hooks, and review expectations. Follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
 
 ## License
 
