@@ -97,7 +97,7 @@ fn main() {
     }
 
     let trial = Trial::ignorable_test(
-        "vqld/persistent_query_survives_client_and_container_restart",
+        "vqld/persistent_job_survives_client_and_container_restart",
         move || {
             if let Some(result) = system_support::prerequisite_result("vqld", &missing) {
                 return result;
@@ -189,7 +189,7 @@ fn run_case(config: &SystemConfig, video: &Path) -> Result<(), String> {
 
         let submitted = execute_query(
             &mut client,
-            "SUBMIT QUERY disconnect_case AS \
+            "SUBMIT JOB disconnect_case AS \
              INSERT INTO events SELECT ts, frame_id FROM camera",
         )
         .await?;
@@ -204,16 +204,16 @@ fn run_case(config: &SystemConfig, video: &Path) -> Result<(), String> {
         )
         .await?;
         wait_for_running(&mut client, &disconnect_id, 0).await?;
-        eprintln!("vqld scenario: Query survived client disconnect");
+        eprintln!("vqld scenario: Job survived client disconnect");
         wait_for_kafka_message(&config.client_kafka, &topic, &group).await?;
-        let stopped = execute_query(&mut client, &format!("STOP QUERY '{disconnect_id}'")).await?;
+        let stopped = execute_query(&mut client, &format!("STOP JOB '{disconnect_id}'")).await?;
         if string_value(&stopped, 2, 0)? != "STOPPED" {
-            return Err("STOP QUERY did not return STOPPED".to_owned());
+            return Err("STOP JOB did not return STOPPED".to_owned());
         }
 
         let submitted = execute_query(
             &mut client,
-            "SUBMIT QUERY restart_case AS INSERT INTO counts \
+            "SUBMIT JOB restart_case AS INSERT INTO counts \
              SELECT TUMBLE(ts, INTERVAL '2' SECOND) AS window_start, COUNT(*) AS frames \
              FROM camera GROUP BY 1",
         )
@@ -239,13 +239,13 @@ fn run_case(config: &SystemConfig, video: &Path) -> Result<(), String> {
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| "restart reset flag is not Boolean".to_owned())?;
         if !reset.value(0) {
-            return Err("restarted TUMBLE Query did not report discarded window state".to_owned());
+            return Err("restarted TUMBLE Job did not report discarded window state".to_owned());
         }
-        let stopped = execute_query(&mut client, &format!("STOP QUERY '{restart_id}'")).await?;
+        let stopped = execute_query(&mut client, &format!("STOP JOB '{restart_id}'")).await?;
         if string_value(&stopped, 2, 0)? != "STOPPED" {
-            return Err("restarted Query did not stop".to_owned());
+            return Err("restarted Job did not stop".to_owned());
         }
-        eprintln!("vqld scenario: stable Query identity and restart gap verified");
+        eprintln!("vqld scenario: stable Job identity and restart gap verified");
         Ok(())
     })
 }
@@ -451,40 +451,40 @@ async fn execute_query(
 
 async fn wait_for_running(
     client: &mut FlightSqlServiceClient<Channel>,
-    query_id: &str,
+    job_id: &str,
     restart_gap_count: i64,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline {
-        let batches = execute_query(client, "SHOW QUERIES").await?;
+        let batches = execute_query(client, "SHOW JOBS").await?;
         for batch in &batches {
             let ids = batch
                 .column(0)
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| "SHOW QUERIES query_id is not Utf8".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS job_id is not Utf8".to_owned())?;
             let states = batch
                 .column(2)
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| "SHOW QUERIES state is not Utf8".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS state is not Utf8".to_owned())?;
             let health = batch
                 .column(3)
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .ok_or_else(|| "SHOW QUERIES source_health is not Utf8".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS source_health is not Utf8".to_owned())?;
             let event_time = batch
                 .column(4)
                 .as_any()
                 .downcast_ref::<TimestampMillisecondArray>()
-                .ok_or_else(|| "SHOW QUERIES last_event_time is not Timestamp".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS last_event_time is not Timestamp".to_owned())?;
             let gaps = batch
                 .column(7)
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| "SHOW QUERIES restart_gap_count is not Int64".to_owned())?;
+                .ok_or_else(|| "SHOW JOBS restart_gap_count is not Int64".to_owned())?;
             for row in 0..batch.num_rows() {
-                if ids.value(row) == query_id
+                if ids.value(row) == job_id
                     && states.value(row) == "RUNNING"
                     && !health.is_null(row)
                     && health.value(row) == "connected"
@@ -498,17 +498,17 @@ async fn wait_for_running(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(format!(
-        "Query {query_id} did not become RUNNING with restart_gap_count={restart_gap_count}"
+        "Job {job_id} did not become RUNNING with restart_gap_count={restart_gap_count}"
     ))
 }
 
 async fn wait_for_closed_restart_gap(
     client: &mut FlightSqlServiceClient<Channel>,
-    query_id: &str,
+    job_id: &str,
 ) -> Result<Vec<RecordBatch>, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline {
-        let described = execute_query(client, &format!("DESCRIBE QUERY '{query_id}'")).await?;
+        let described = execute_query(client, &format!("DESCRIBE JOB '{job_id}'")).await?;
         if timestamp_value(&described, 8, 0)?.is_some()
             && timestamp_value(&described, 9, 0)?.is_some()
         {
@@ -516,7 +516,7 @@ async fn wait_for_closed_restart_gap(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Err("restarted Query did not report a closed restart gap".to_owned())
+    Err("restarted Job did not report a closed restart gap".to_owned())
 }
 
 async fn create_topic(bootstrap_servers: &str, topic: &str) -> Result<(), String> {
@@ -568,7 +568,7 @@ async fn wait_for_kafka_message(
             return Ok(());
         }
     }
-    Err("persistent Query produced no Kafka record after client disconnect".to_owned())
+    Err("persistent Job produced no Kafka record after client disconnect".to_owned())
 }
 
 fn string_value(batches: &[RecordBatch], column: usize, row: usize) -> Result<String, String> {

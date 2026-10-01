@@ -9,7 +9,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use vql_kernel::{Engine, EngineConfig};
 use vql_server::config::ServiceConfig;
-use vql_server::controller::QueryController;
+use vql_server::controller::JobController;
 use vql_server::flight::VqlFlightSqlService;
 
 #[test]
@@ -81,7 +81,7 @@ fn start_server() -> (
                 principal: "catalog-owner".to_owned(),
                 ..ServiceConfig::default()
             });
-            let controller = Arc::new(QueryController::new(engine.clone(), 100, 30));
+            let controller = Arc::new(JobController::new(engine.clone(), 100, 30));
             let service = VqlFlightSqlService::new(
                 engine,
                 controller,

@@ -13,6 +13,7 @@ VisionQL tests prove a contract at the narrowest boundary that owns it. The defa
 | Kernel SQL contract | `vql-kernel/tests/slt/` | Stable embedded Engine SQL behavior | Generated images, empty directories, `mock://` | Yes |
 | Python API | `vql-python/tests/` | PyO3/PyArrow conversion, Python UDF hosting, and Python errors | Built extension and generated fixtures | Separate CI job |
 | System | `vql-testing/tests/` | Real ONNX/media execution and external-service boundaries | Downloaded artifacts, FFmpeg, Docker Compose | No |
+| Workbench client | `vql-workbench/frontend/` and `vql-workbench/backend/` | Browser rendering, public SQL management, Arrow IPC, and transport lifecycle | Vitest, backend owner tests, Playwright, shipped `vqld`; optional real-model/Python parity fixtures | Separate client gate |
 
 A broader layer does not replace a cheaper owner test. Exact error identifiers, Arrow field names, types, nullability, parser rules, retry/cancellation semantics, and resource accounting stay with the component that defines them. System tests provide compatibility evidence; they are not the only proof of local behavior.
 
@@ -38,7 +39,7 @@ Python tests own connection arguments, query collection, PyArrow conversion, Pyt
 
 ### `vql-server`
 
-Server tests own Flight SQL authentication and Session isolation, direct and prepared statement execution, query/update separation, execution tickets, attach and cancellation semantics, process-boundary IMAGE conversion, persistent Query lifecycle and recovery, daemon locking, health, and aggregate metrics. Protocol tests use the public Arrow Flight SQL Rust client instead of calling service internals.
+Server tests own Flight SQL authentication and Session isolation, direct and prepared statement execution, query/update separation, execution tickets, attach and cancellation semantics, process-boundary IMAGE conversion, persistent Job lifecycle and recovery, daemon locking, health, and aggregate metrics. Protocol tests use the public Arrow Flight SQL Rust client instead of calling service internals.
 
 ### `vql-testing`
 
@@ -61,10 +62,18 @@ vql-testing/
     ├── rtsp/                  # RTSP setup and query scripts
     ├── kafka.rs               # Kafka system-test runner
     ├── kafka/                 # Kafka setup and publish scripts
-    └── vqld.rs                # containerized Flight SQL and persistent Query recovery runner
+    ├── vqld.rs                # containerized Flight SQL and persistent Job recovery runner
+    ├── workbench.rs           # shipped Workbench/Python visual compatibility runner
+    └── workbench/             # shared real-model SQL and Python reference generator
 ```
 
-All dependencies are dev-dependencies, and the explicit `image`, `video`, `model`, `rtsp`, `kafka`, and `vqld` system-test targets require the `system-tests` feature. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
+All dependencies are dev-dependencies, and the explicit `image`, `video`, `model`, `rtsp`, `kafka`, and `vqld` system-test targets require the `system-tests` feature. The `workbench` target requires `workbench-tests`, which enables `system-tests` and adds the Python/browser prerequisites only to that explicit run. Cargo therefore selects no `vql-testing` target for the default workspace test and coverage graph.
+
+## Workbench client acceptance
+
+Workbench is an independent project outside the Rust engine workspace. Its frontend and backend owner tests validate editor state, local drafts and history, Catalog and Jobs mappings, Arrow interpretation, media rendering, and transport cleanup. Its Playwright suite builds and starts the shipped `vqld`, Workbench backend, and production frontend and uses only public protocols. It covers Catalog namespaces and Model versions, persistent Job submission/inspection/Stop, structured errors, exact attached cancellation, Session expiry, Host/Origin checks, and narrow layouts.
+
+The explicit Cargo `workbench` target (`--features workbench-tests`) also exercises a real COCO image and YOLO26n model. Its runner, shared SQL, and Python reference generator live in `vql-testing/tests/`; it delegates to the client's `--visual-parity` browser check through shipped processes and public protocols. It compares Workbench detection values and normalized box interpretation to the embedded Python/notebook path. The ordinary E2E and system suites remain independent of these additional Python/browser prerequisites. See the [Workbench checks](../../vql-workbench/README.md#checks) for Python setup, the strict command, and screenshot/reference output.
 
 ## Default gate
 
@@ -127,7 +136,8 @@ The targets prove these journeys:
 | `model` | `CREATE MODEL` → `RESOLVE MODEL` → direct call | A real Catalog Model resolves and produces a person detection |
 | `rtsp` | RTSP frames → `VQL_DETECT` → `TUMBLE` | Eight frames, positive detections, and two internally consistent closed windows |
 | `kafka` | `IMAGES` → `VQL_DETECT` → Kafka Sink | Broker acknowledgement and exact consumed JSON for the inferred semantic result |
-| `vqld` | Packaged `vql shell --endpoint` and Flight SQL → attached RTSP / persistent RTSP-to-Kafka Query → container restart | Image contents, TLS and credential wiring, query/update routing, structured errors, exact execution cancellation, client-independent delivery, Catalog-backed stable Query identity, live-source reconnect gap, window-state reset, and terminal stop |
+| `vqld` | Packaged `vql shell --endpoint` and Flight SQL → attached RTSP / persistent RTSP-to-Kafka Job → container restart | Image contents, TLS and credential wiring, query/update routing, structured errors, exact execution cancellation, client-independent delivery, Catalog-backed stable Job identity, live-source reconnect gap, window-state reset, and terminal stop |
+| `workbench` (additional `workbench-tests` feature) | Python/notebook and built Workbench → identical SQL over real IMAGE / ONNX fixtures → shipped `vqld` | Ordered detection parity, IMAGE/BOX2D interpretation, JSON and row values, decoded thumbnails, and actual normalized-box overlay geometry |
 
 Embedded targets create an isolated temporary `VQL_HOME`. The `vqld` target uses an isolated Compose project and named volume so `$VQL_HOME/catalog/vql.db` survives the tested container restart and is removed during teardown. Task-shaped inference targets install only their required release-managed artifacts under their home. Real-model execution is serial within each target to bound CPU and model memory. Exact Arrow field names, types, and nullability remain kernel owner contracts rather than system assertions.
 

@@ -39,11 +39,11 @@ pub struct ServiceConfig {
     #[arg(long, default_value_t = 900)]
     pub session_idle_timeout_seconds: u64,
 
-    /// Maximum retained terminal Query records.
+    /// Maximum retained terminal Job records.
     #[arg(long, default_value_t = 1000)]
     pub terminal_history_count: usize,
 
-    /// Retain terminal Query records for at most this many days.
+    /// Retain terminal Job records for at most this many days.
     #[arg(long, default_value_t = 30)]
     pub terminal_history_days: u64,
 
@@ -124,7 +124,7 @@ impl ServiceConfig {
             return Err("vqld Session idle timeout must be greater than zero".to_owned());
         }
         if self.terminal_history_count == 0 || self.terminal_history_days == 0 {
-            return Err("vqld Query-history retention limits must be greater than zero".to_owned());
+            return Err("vqld Job-history retention limits must be greater than zero".to_owned());
         }
         if self.thumbnail_max_width == 0
             || self.thumbnail_max_height == 0
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn query_history_retention_limits_must_be_positive() {
+    fn job_history_retention_limits_must_be_positive() {
         let mut config = ServiceConfig {
             terminal_history_count: 0,
             ..ServiceConfig::default()

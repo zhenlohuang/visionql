@@ -63,9 +63,9 @@ Planning reads only the Catalog and lightweight metadata. Object listing, model 
 
 Planning opens one Catalog transaction and constructs a `DefinitionSnapshot` containing the current Tables, Models, and Functions in `vql.default`. RTSP and Kafka definitions are Tables with provider capabilities. A query-specific DataFusion session is populated from that snapshot. Resolved Model specifications are copied into `InferenceNode` extension nodes, while selected provider configurations are copied into the attached result handle or internal write target.
 
-The planned `DataFrame` and those copied specifications are the execution source of truth. Replacing or dropping a Catalog definition affects newly planned queries but does not replan a running query. Opaque Catalog generations support exact historical snapshot lookup, but the Kernel owns no user-facing revision lifecycle, persistent Query identity, Manifest store, lease manager, or Manifest garbage collector.
+The planned `DataFrame` and those copied specifications are the execution source of truth. Replacing or dropping a Catalog definition affects newly planned queries but does not replan a running query. Opaque Catalog generations support exact historical snapshot lookup, but the Kernel owns no user-facing revision lifecycle, persistent Job identity, Manifest store, lease manager, or Manifest garbage collector.
 
-A persistent Query object stored by `vql-catalog` contains normalized SQL, semantic settings, and opaque Catalog generations. On restart, `vqld` asks the Kernel to prepare against a snapshot loaded from those generations. The Query does not enter `DefinitionSnapshot` and is not a serialized kernel plan or a prerequisite for foreground embedded execution.
+A persistent Job object stored by `vql-catalog` contains normalized SQL, semantic settings, and opaque Catalog generations. On restart, `vqld` asks the Kernel to prepare against a snapshot loaded from those generations. The Job does not enter `DefinitionSnapshot` and is not a serialized kernel plan or a prerequisite for foreground embedded execution.
 
 ### Allowlist for Unbounded Plans
 
@@ -189,7 +189,7 @@ value = aggregate_states
 
 Window state is charged to the Session memory pool through its own `MemoryConsumer` and additionally capped at 64 MiB, or at the Session limit when that is smaller. Exceeding the cap fails the query rather than spilling.
 
-State lives only for the process lifetime and is not serialized or restored after restart. A persistent v0.2 Query restarts with empty `TumbleState` at the current live-source position and reports the discarded open windows as part of its restart gap.
+State lives only for the process lifetime and is not serialized or restored after restart. A persistent v0.2 Job restarts with empty `TumbleState` at the current live-source position and reports the discarded open windows as part of its restart gap.
 
 The streaming aggregate allowlist is:
 
@@ -349,7 +349,9 @@ Resolved versions are immutable. Version names are case-sensitive string identit
 
 `ALTER MODEL ... ADD VERSION` inherits the persisted interface and requires a new explicit version name. `SET DEFAULT_VERSION` accepts only a live resolved version. Dropping the default or last live version fails with guidance to move the default or use `DROP MODEL`; dropping another version removes it from new snapshots and permits a later explicit reuse of its name. Bare `RESOLVE MODEL` is accepted only when exactly one live version exists, so concurrent additions cannot redirect an operator's request.
 
-`SHOW MODELS` exposes aggregate identity, interface, live version count, default, and comment. `SHOW MODEL VERSIONS` exposes per-version state, volatility, fingerprint, creation time, and default marker. `DESCRIBE MODEL` renders the callable interface; `SHOW CREATE MODEL` emits sanitized aggregate DDL.
+`SHOW MODELS` exposes aggregate identity, interface, live version count, default, and comment. `SHOW MODEL VERSIONS` exposes per-version state, volatility, fingerprint, creation time, and default marker. `DESCRIBE MODEL` renders the callable interface.
+
+`SHOW CREATE MODEL <name> [VERSION '<version>']` returns one sanitized, independently parseable `CREATE MODEL` definition with the persisted interface, explicit version name (including `v1`), source, Runtime, options, and current aggregate comment. The bare form selects the most recently added live version in Catalog insertion order, independently of version-name ordering, resolution status, and the default publication pointer. Dropping that version exposes the preceding live version; reusing a dropped name adds a new latest version. The explicit form matches a case-sensitive version identity and returns `NOT_FOUND` if the Model or version does not exist. Both forms use the statement's Catalog snapshot, including prepared statements. The result fields are `object_name`, `object_type`, `create_sql`, and `version`, all non-null UTF-8 strings. Table and Function `SHOW CREATE` retain their existing three-field results. Model DDL describes the selected declaration; resolved runtime state and default publication remain visible through `SHOW MODEL VERSIONS` and are not replayed by the returned `CREATE MODEL`.
 
 The declaration fingerprint includes the persisted interface, version name, source, Runtime, and user options. The resolved semantic fingerprint additionally includes the resolved source/hash and derived execution contract. Scheduler configuration does not enter semantic identity.
 

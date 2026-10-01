@@ -93,21 +93,22 @@ pub(crate) enum VqlStatement {
     ShowCreate {
         kind: ShowKind,
         name: String,
+        version: Option<String>,
     },
     Describe {
         kind: ShowKind,
         name: String,
     },
-    SubmitQuery {
+    SubmitJob {
         name: String,
         sql: String,
     },
-    ShowQueries,
-    DescribeQuery {
-        query_id: String,
+    ShowJobs,
+    DescribeJob {
+        job_id: String,
     },
-    StopQuery {
-        query_id: String,
+    StopJob {
+        job_id: String,
     },
     Query {
         sql: String,

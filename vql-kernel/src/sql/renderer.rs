@@ -107,56 +107,17 @@ impl RenderCreate for TableDef {
     }
 }
 
-impl RenderCreate for ModelDef {
-    fn render_create(&self) -> Result<String> {
-        let first = self.versions.first().ok_or_else(|| {
-            VqlError::new(
-                ErrorCode::Catalog,
-                format!("model '{}' has no live versions", self.name),
-            )
-        })?;
-        let mut statements = vec![render_initial_model(self, first)];
-        statements.extend(
-            self.versions
-                .iter()
-                .skip(1)
-                .map(|version| render_added_model_version(&self.name, version)),
-        );
-        if let Some(default_version) = self.default_version.as_deref() {
-            statements.push(format!(
-                "ALTER MODEL {} SET DEFAULT_VERSION = {}",
-                quote_identifier(&self.name),
-                quote_string(default_version)
-            ));
-        }
-        Ok(statements.join(";\n"))
-    }
-}
-
-fn render_initial_model(model: &ModelDef, version: &ModelVersion) -> String {
+pub(crate) fn render_create_model(model: &ModelDef, version: &ModelVersion) -> String {
     let mut sql = format!(
-        "CREATE MODEL {} {}",
+        "CREATE MODEL {} {} VERSION {}",
         quote_identifier(&model.name),
-        render_model_interface(&model.interface)
+        render_model_interface(&model.interface),
+        quote_string(&version.name),
     );
-    if version.name != "v1" {
-        write!(sql, " VERSION {}", quote_string(&version.name))
-            .expect("writing to String cannot fail");
-    }
     render_model_version_tail(&mut sql, version);
     if let Some(comment) = model.comment.as_deref() {
         write!(sql, " COMMENT {}", quote_string(comment)).expect("writing to String cannot fail");
     }
-    sql
-}
-
-fn render_added_model_version(name: &str, version: &ModelVersion) -> String {
-    let mut sql = format!(
-        "ALTER MODEL {} ADD VERSION {}",
-        quote_identifier(name),
-        quote_string(&version.name)
-    );
-    render_model_version_tail(&mut sql, version);
     sql
 }
 

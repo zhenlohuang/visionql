@@ -9,6 +9,7 @@ publish = false
 [features]
 default = []
 system-tests = []
+workbench-tests = ["system-tests"]
 
 [dev-dependencies]
 arrow.workspace = true
@@ -57,3 +58,9 @@ name = "vqld"
 path = "tests/vqld.rs"
 harness = false
 required-features = ["system-tests"]
+
+[[test]]
+name = "workbench"
+path = "tests/workbench.rs"
+harness = false
+required-features = ["workbench-tests"]

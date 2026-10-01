@@ -1,0 +1,36 @@
+statement ok
+CREATE MODEL detector TYPE OBJECT_DETECTION VERSION 'v10' FROM 'mock://person';
+
+statement ok
+RESOLVE MODEL detector VERSION 'v10';
+
+statement ok
+ALTER MODEL detector ADD VERSION 'v2' FROM 'mock://candidate';
+
+# Latest means the last added live version, regardless of name or default.
+query TTTT
+SHOW CREATE MODEL detector;
+----
+detector MODEL CREATE MODEL "detector" TYPE OBJECT_DETECTION VERSION 'v2' FROM 'mock://candidate' USING ONNX_RUNTIME v2
+
+query TTTT
+SHOW CREATE MODEL detector VERSION 'v10';
+----
+detector MODEL CREATE MODEL "detector" TYPE OBJECT_DETECTION VERSION 'v10' FROM 'mock://person' USING ONNX_RUNTIME v10
+
+statement error model 'detector' has no version 'V10'
+SHOW CREATE MODEL detector VERSION 'V10';
+
+statement ok
+ALTER MODEL detector DROP VERSION 'v2';
+
+query TTTT
+SHOW CREATE MODEL detector;
+----
+detector MODEL CREATE MODEL "detector" TYPE OBJECT_DETECTION VERSION 'v10' FROM 'mock://person' USING ONNX_RUNTIME v10
+
+statement error model 'detector' has no version 'v2'
+SHOW CREATE MODEL detector VERSION 'v2';
+
+statement error model 'missing' does not exist
+SHOW CREATE MODEL missing VERSION 'v2';

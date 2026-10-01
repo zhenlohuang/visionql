@@ -33,12 +33,19 @@ pub(crate) fn parse_statement(sql: &str) -> Result<VqlStatement> {
         "SELECT" | "WITH" | "VALUES" | "INSERT" => Ok(VqlStatement::Query {
             sql: sql.to_owned(),
         }),
-        "SUBMIT" => parse_submit_query(&tokens),
-        "STOP" => parse_stop_query(&tokens),
-        "PAUSE" | "RESUME" => Err(VqlError::feature(
-            format!("{first} QUERY is not available"),
-            "未排期",
-        )),
+        "SUBMIT" => parse_submit_job(&tokens),
+        "STOP" => parse_stop_job(&tokens),
+        "PAUSE" | "RESUME" => {
+            expect_word(tokens.get(1), "JOB")?;
+            if tokens.len() != 3 {
+                return invalid("expected PAUSE JOB '<job_id>' or RESUME JOB '<job_id>'");
+            }
+            string_or_identifier(tokens.get(2), "job ID")?;
+            Err(VqlError::feature(
+                format!("{first} JOB is not available"),
+                "未排期",
+            ))
+        }
         _ => Err(VqlError::new(
             ErrorCode::InvalidSql,
             format!("unsupported or empty statement starting with '{first}'"),
@@ -964,18 +971,30 @@ fn parse_drop(tokens: &[Token]) -> Result<VqlStatement> {
 }
 
 fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
-    if tokens.len() == 2 && token_is(tokens.get(1), "QUERIES") {
-        return Ok(VqlStatement::ShowQueries);
+    if tokens.len() == 2 && token_is(tokens.get(1), "JOBS") {
+        return Ok(VqlStatement::ShowJobs);
     }
     if token_is(tokens.get(1), "CREATE") {
+        let kind = singular_kind(tokens.get(2))?;
         let mut index = 3;
         let name = qualified_identifier(tokens, &mut index, "object name")?;
+        let version = if kind == ShowKind::Models && token_is(tokens.get(index), "VERSION") {
+            index += 1;
+            let version = string_literal(tokens.get(index))?;
+            index += 1;
+            Some(version)
+        } else {
+            None
+        };
         if index != tokens.len() {
-            return invalid("expected SHOW CREATE <object kind> <name>");
+            return invalid(
+                "expected SHOW CREATE <object kind> <name> or SHOW CREATE MODEL <name> VERSION '<version>'",
+            );
         }
         return Ok(VqlStatement::ShowCreate {
-            kind: singular_kind(tokens.get(2))?,
+            kind,
             name,
+            version,
         });
     }
     if token_is(tokens.get(1), "MODEL") && token_is(tokens.get(2), "VERSIONS") {
@@ -987,13 +1006,15 @@ fn parse_show(tokens: &[Token]) -> Result<VqlStatement> {
         return Ok(VqlStatement::ShowModelVersions { name });
     }
     if tokens.len() != 2 {
-        return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or SHOW CREATE <kind> <name>");
+        return invalid(
+            "expected SHOW TABLES, MODELS, FUNCTIONS, JOBS, or SHOW CREATE <kind> <name>",
+        );
     }
     let kind = match word(tokens.get(1)).as_deref() {
         Some("TABLES") => ShowKind::Tables,
         Some("MODELS") => ShowKind::Models,
         Some("FUNCTIONS") => ShowKind::Functions,
-        _ => return invalid("expected SHOW TABLES, MODELS, or FUNCTIONS"),
+        _ => return invalid("expected SHOW TABLES, MODELS, FUNCTIONS, or JOBS"),
     };
     Ok(VqlStatement::Show(kind))
 }
@@ -1008,12 +1029,12 @@ fn singular_kind(token: Option<&Token>) -> Result<ShowKind> {
 }
 
 fn parse_describe(tokens: &[Token]) -> Result<VqlStatement> {
-    if token_is(tokens.get(1), "QUERY") {
+    if token_is(tokens.get(1), "JOB") {
         if tokens.len() != 3 {
-            return invalid("expected DESCRIBE QUERY '<query_id>'");
+            return invalid("expected DESCRIBE JOB '<job_id>'");
         }
-        return Ok(VqlStatement::DescribeQuery {
-            query_id: string_or_identifier(tokens.get(2), "query ID")?,
+        return Ok(VqlStatement::DescribeJob {
+            job_id: string_or_identifier(tokens.get(2), "job ID")?,
         });
     }
     let mut index = 1;
@@ -1033,12 +1054,12 @@ fn parse_describe(tokens: &[Token]) -> Result<VqlStatement> {
     }
 }
 
-fn parse_submit_query(tokens: &[Token]) -> Result<VqlStatement> {
-    expect_word(tokens.get(1), "QUERY")?;
-    let name = identifier(tokens.get(2), "query name")?;
+fn parse_submit_job(tokens: &[Token]) -> Result<VqlStatement> {
+    expect_word(tokens.get(1), "JOB")?;
+    let name = identifier(tokens.get(2), "job name")?;
     expect_word(tokens.get(3), "AS")?;
     if tokens.len() <= 4 {
-        return invalid("expected SUBMIT QUERY <name> AS INSERT INTO <table> SELECT ...");
+        return invalid("expected SUBMIT JOB <name> AS INSERT INTO <table> SELECT ...");
     }
     let sql = tokens[4..]
         .iter()
@@ -1046,18 +1067,18 @@ fn parse_submit_query(tokens: &[Token]) -> Result<VqlStatement> {
         .collect::<Vec<_>>()
         .join(" ");
     if word(tokens.get(4)).is_none_or(|word| word != "INSERT") {
-        return invalid("SUBMIT QUERY accepts only INSERT INTO <table> SELECT ...");
+        return invalid("SUBMIT JOB accepts only INSERT INTO <table> SELECT ...");
     }
-    Ok(VqlStatement::SubmitQuery { name, sql })
+    Ok(VqlStatement::SubmitJob { name, sql })
 }
 
-fn parse_stop_query(tokens: &[Token]) -> Result<VqlStatement> {
-    expect_word(tokens.get(1), "QUERY")?;
+fn parse_stop_job(tokens: &[Token]) -> Result<VqlStatement> {
+    expect_word(tokens.get(1), "JOB")?;
     if tokens.len() != 3 {
-        return invalid("expected STOP QUERY '<query_id>'");
+        return invalid("expected STOP JOB '<job_id>'");
     }
-    Ok(VqlStatement::StopQuery {
-        query_id: string_or_identifier(tokens.get(2), "query ID")?,
+    Ok(VqlStatement::StopJob {
+        job_id: string_or_identifier(tokens.get(2), "job ID")?,
     })
 }
 
@@ -1405,9 +1426,28 @@ mod tests {
             VqlStatement::ShowCreate {
                 kind: ShowKind::Models,
                 name: "detector".to_owned(),
+                version: None,
+            }
+        );
+        assert_eq!(
+            parse_statement("SHOW CREATE MODEL team.media.detector VERSION 'One''s;release'")
+                .unwrap(),
+            VqlStatement::ShowCreate {
+                kind: ShowKind::Models,
+                name: "team.media.detector".to_owned(),
+                version: Some("One's;release".to_owned()),
             }
         );
         assert!(parse_statement("SHOW CREATE MODEL").is_err());
+        for sql in [
+            "SHOW CREATE MODEL detector VERSION",
+            "SHOW CREATE MODEL detector VERSION v2",
+            "SHOW CREATE MODEL detector VERSION 'v2' trailing",
+            "SHOW CREATE TABLE photos VERSION 'v2'",
+            "SHOW CREATE FUNCTION score VERSION 'v2'",
+        ] {
+            assert!(parse_statement(sql).is_err(), "accepted invalid SQL: {sql}");
+        }
         assert!(parse_statement("SHOW CREATE VIEW example").is_err());
     }
 
@@ -1445,30 +1485,97 @@ mod tests {
     }
 
     #[test]
-    fn parses_persistent_query_control_statements() {
+    fn parses_persistent_job_control_statements() {
         assert_eq!(
-            parse_statement("SUBMIT QUERY people AS INSERT INTO sink SELECT * FROM camera")
-                .unwrap(),
-            VqlStatement::SubmitQuery {
+            parse_statement("SUBMIT JOB people AS INSERT INTO sink SELECT * FROM camera").unwrap(),
+            VqlStatement::SubmitJob {
                 name: "people".to_owned(),
                 sql: "INSERT INTO sink SELECT * FROM camera".to_owned(),
             }
         );
         assert_eq!(
-            parse_statement("SHOW QUERIES").unwrap(),
-            VqlStatement::ShowQueries
+            parse_statement("SHOW JOBS").unwrap(),
+            VqlStatement::ShowJobs
         );
         assert_eq!(
-            parse_statement("DESCRIBE QUERY 'query-id'").unwrap(),
-            VqlStatement::DescribeQuery {
-                query_id: "query-id".to_owned(),
+            parse_statement("DESCRIBE JOB 'job-id'").unwrap(),
+            VqlStatement::DescribeJob {
+                job_id: "job-id".to_owned(),
             }
         );
         assert_eq!(
-            parse_statement("STOP QUERY 'query-id'").unwrap(),
-            VqlStatement::StopQuery {
-                query_id: "query-id".to_owned(),
+            parse_statement("STOP JOB 'job-id'").unwrap(),
+            VqlStatement::StopJob {
+                job_id: "job-id".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn show_jobs_accepts_sql_keyword_variations_and_rejects_invalid_forms() {
+        for sql in ["SHOW JOBS", "show jobs", "ShOw /* list */ JoBs"] {
+            assert_eq!(
+                parse_statement(sql).unwrap(),
+                VqlStatement::ShowJobs,
+                "{sql}"
+            );
+        }
+        for sql in ["SHOW QUERIES", "SHOW JOB", "SHOW JOBS extra", "SHOW 'JOBS'"] {
+            assert_eq!(
+                parse_statement(sql).unwrap_err().code,
+                ErrorCode::InvalidSql,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn job_commands_preserve_identifiers_and_reject_query_aliases() {
+        assert_eq!(
+            parse_statement(
+                "sUbMiT /* explicit */ JoB people AS INSERT INTO sink SELECT * FROM camera"
+            )
+            .unwrap(),
+            VqlStatement::SubmitJob {
+                name: "people".to_owned(),
+                sql: "INSERT INTO sink SELECT * FROM camera".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse_statement("desc job 'job''id'").unwrap(),
+            VqlStatement::DescribeJob {
+                job_id: "job'id".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse_statement("StOp JoB 'job''id'").unwrap(),
+            VqlStatement::StopJob {
+                job_id: "job'id".to_owned(),
+            }
+        );
+        for sql in [
+            "SUBMIT QUERY people AS INSERT INTO sink SELECT * FROM camera",
+            "DESCRIBE QUERY 'job-id'",
+            "DESC QUERY 'job-id'",
+            "STOP QUERY 'job-id'",
+            "PAUSE QUERY 'job-id'",
+            "RESUME QUERY 'job-id'",
+            "SUBMIT JOB people AS SELECT 1",
+            "SUBMIT JOB people INSERT INTO sink SELECT 1",
+            "DESCRIBE JOB",
+            "STOP JOB",
+            "STOP JOB 'job-id' extra",
+        ] {
+            assert_eq!(
+                parse_statement(sql).unwrap_err().code,
+                ErrorCode::InvalidSql,
+                "{sql}"
+            );
+        }
+        for sql in ["PAUSE JOB 'job-id'", "RESUME JOB 'job-id'"] {
+            let error = parse_statement(sql).unwrap_err();
+            assert_eq!(error.code, ErrorCode::FeatureNotAvailable);
+            assert!(error.message.contains("JOB"));
+        }
     }
 }

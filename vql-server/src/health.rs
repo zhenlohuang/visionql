@@ -8,14 +8,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
 use crate::config::ServiceConfig;
-use crate::controller::QueryController;
+use crate::controller::JobController;
 use crate::flight::VqlFlightSqlService;
 
 #[derive(Debug, Clone)]
 pub struct HealthState {
     pub ready: Arc<AtomicBool>,
     pub flight: VqlFlightSqlService,
-    pub controller: Arc<QueryController>,
+    pub controller: Arc<JobController>,
     pub config: Arc<ServiceConfig>,
 }
 
@@ -62,8 +62,8 @@ async fn metrics(State(state): State<HealthState>, headers: HeaderMap) -> Respon
             "vqld_executions_pending {}\n",
             "# TYPE vqld_executions_attached gauge\n",
             "vqld_executions_attached {}\n",
-            "# TYPE vqld_persistent_queries_active gauge\n",
-            "vqld_persistent_queries_active {}\n",
+            "# TYPE vqld_persistent_jobs_active gauge\n",
+            "vqld_persistent_jobs_active {}\n",
             "# TYPE vqld_executions_total counter\n",
             "vqld_executions_total {}\n",
             "# TYPE vqld_executions_failed_total counter\n",
@@ -101,11 +101,11 @@ mod tests {
     #[test]
     fn metrics_do_not_define_per_query_labels() {
         let source = include_str!("health.rs");
-        assert!(!source.contains("query_id=\""));
-        assert!(!source.contains("query_name=\""));
+        assert!(!source.contains("job_id=\""));
+        assert!(!source.contains("job_name=\""));
         for family in [
             "vqld_sessions",
-            "vqld_persistent_queries_active",
+            "vqld_persistent_jobs_active",
             "vqld_inference_executions_total",
             "vqld_source_executions_total",
             "vqld_sink_executions_total",

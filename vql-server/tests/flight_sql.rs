@@ -11,7 +11,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
 use vql_kernel::{Engine, EngineConfig};
 use vql_server::config::ServiceConfig;
-use vql_server::controller::QueryController;
+use vql_server::controller::JobController;
 use vql_server::flight::VqlFlightSqlService;
 
 async fn start_server() -> (
@@ -22,7 +22,7 @@ async fn start_server() -> (
     let home = temp.keep();
     let engine = Engine::new(EngineConfig::from_home(home)).unwrap();
     let config = Arc::new(ServiceConfig::default());
-    let controller = Arc::new(QueryController::new(engine.clone(), 100, 30));
+    let controller = Arc::new(JobController::new(engine.clone(), 100, 30));
     let service =
         VqlFlightSqlService::new(engine, controller, config, Arc::new(AtomicBool::new(true)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -100,6 +100,33 @@ async fn arrow_flight_sql_client_runs_direct_and_prepared_queries() {
         .unwrap();
     assert_eq!(value.value(0), 7);
 
+    task.abort();
+}
+
+#[tokio::test]
+async fn show_jobs_lists_persistent_jobs_through_direct_and_prepared_flight_sql() {
+    let (mut client, task) = start_server().await;
+    let mut prepared = client.prepare("SHOW JOBS".to_owned(), None).await.unwrap();
+    assert_eq!(prepared.dataset_schema().unwrap().field(0).name(), "job_id");
+    assert_eq!(
+        prepared
+            .dataset_schema()
+            .unwrap()
+            .metadata()
+            .get("vql.statement_info.kind")
+            .map(String::as_str),
+        Some("query")
+    );
+    for info in [
+        client.execute("SHOW JOBS;".to_owned(), None).await.unwrap(),
+        prepared.execute().await.unwrap(),
+    ] {
+        let ticket = info.endpoint[0].ticket.clone().unwrap();
+        let mut stream = client.do_get(ticket).await.unwrap();
+        let batches = (&mut stream).try_collect::<Vec<_>>().await.unwrap();
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+        assert_eq!(stream.schema().unwrap().field(0).name(), "job_id");
+    }
     task.abort();
 }
 

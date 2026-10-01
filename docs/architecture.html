@@ -107,17 +107,17 @@
         <text x="840" y="232" class="boundary-title">SHARED CORE LIBRARIES</text>
 
         <g><rect x="50" y="130" width="280" height="90" rx="7" class="component-bg"/><rect x="50" y="130" width="280" height="90" rx="7" class="host"/><text x="190" y="161" class="box-title">vql-cli</text><text x="190" y="182" class="box-subtitle">command-line client</text><text x="190" y="202" class="box-detail">shell / run • embedded or --endpoint</text></g>
-        <g><rect x="450" y="260" width="300" height="100" rx="7" class="component-bg"/><rect x="450" y="260" width="300" height="100" rx="7" class="runtime"/><text x="600" y="293" class="box-title">vqld</text><text x="600" y="316" class="box-subtitle">vql-server</text><text x="600" y="338" class="box-detail">Flight SQL • Sessions • persistent Query lifecycle</text></g>
+        <g><rect x="450" y="260" width="300" height="100" rx="7" class="component-bg"/><rect x="450" y="260" width="300" height="100" rx="7" class="runtime"/><text x="600" y="293" class="box-title">vqld</text><text x="600" y="316" class="box-subtitle">vql-server</text><text x="600" y="338" class="box-detail">Flight SQL • Sessions • persistent Job lifecycle</text></g>
         <g><rect x="845" y="250" width="300" height="100" rx="7" class="component-bg"/><rect x="845" y="250" width="300" height="100" rx="7" class="runtime"/><text x="995" y="281" class="box-title">vql-kernel</text><text x="995" y="304" class="box-subtitle">SQL planning + execution</text><text x="995" y="328" class="box-detail">DataFusion • streaming • media • inference</text></g>
         <g><rect x="50" y="275" width="280" height="90" rx="7" class="component-bg"/><rect x="50" y="275" width="280" height="90" rx="7" class="host"/><text x="190" y="306" class="box-title">vql-workbench</text><text x="190" y="327" class="box-subtitle">browser client</text><text x="190" y="347" class="box-detail">bounded visual SQL • public Flight SQL</text></g>
         <g><rect x="50" y="420" width="280" height="90" rx="7" class="component-bg"/><rect x="50" y="420" width="280" height="90" rx="7" class="host"/><text x="190" y="451" class="box-title">vql-python</text><text x="190" y="472" class="box-subtitle">Python binding</text><text x="190" y="492" class="box-detail">PyO3 host • direct Engine / Session</text></g>
-        <g><rect x="845" y="400" width="300" height="100" rx="7" class="component-bg"/><rect x="845" y="400" width="300" height="100" rx="7" class="state"/><text x="995" y="431" class="box-title">vql-catalog</text><text x="995" y="454" class="box-subtitle">definitions • snapshots • Query status</text><text x="995" y="478" class="box-detail">SQLite • $VQL_HOME/catalog/vql.db</text></g>
+        <g><rect x="845" y="400" width="300" height="100" rx="7" class="component-bg"/><rect x="845" y="400" width="300" height="100" rx="7" class="state"/><text x="995" y="431" class="box-title">vql-catalog</text><text x="995" y="454" class="box-subtitle">definitions • snapshots • Job status</text><text x="995" y="478" class="box-detail">SQLite • $VQL_HOME/catalog/vql.db</text></g>
 
         <text x="600" y="88" class="edge-label">local: embedded Engine / Session</text>
         <text x="360" y="165" class="edge-label">remote</text>
         <text x="389" y="310" class="edge-label">Flight SQL</text>
         <text x="797" y="275" class="edge-label">host API</text>
-        <text x="730" y="377" class="edge-label">persistent Query control</text>
+        <text x="730" y="377" class="edge-label">persistent Job control</text>
         <text x="1090" y="378" class="edge-label">definitions / snapshots</text>
         <text x="560" y="456" class="edge-label">PyO3 embedded host</text>
 
