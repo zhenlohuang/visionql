@@ -10,6 +10,10 @@ All notable changes to VisionQL are documented in this file.
 - Preserve escaped strings and quoted identifiers when splitting SQL scripts, so returned Model DDL and quoted version names can be replayed.
 - Rename persistent Catalog Queries to Jobs throughout SQL, public Arrow results (`job_id`), Catalog APIs and storage, Workbench, examples, and current documentation. The lifecycle commands are `SUBMIT JOB`, `SHOW JOBS`, `DESCRIBE JOB`, and `STOP JOB`; the previous `QUERY` commands are no longer accepted.
 
+### Fixed
+
+- Preserve the declared polygon list field in `POLYGON` and `ST_POLYGON` results, allowing spatial SQL to execute without an Arrow result-type mismatch.
+
 ## [0.2.0] - 2026-09-06
 
 VisionQL v0.2.0 adds the smallest useful single-node service for remote SQL and client-independent continuous queries while preserving the embedded v0.1 engine.

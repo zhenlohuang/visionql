@@ -24,6 +24,8 @@ chrono = "0.4.42"
 clap = { version = "4.5.48", features = ["derive"] }
 ctrlc = "3.5.0"
 datafusion = "=54.1.0"
+datafusion-doc = "=54.1.0"
+datafusion-macros = "=54.1.0"
 ffmpeg-next = "8.1.0"
 fast_image_resize = "6.1.0"
 futures = "0.3.31"

@@ -4,9 +4,101 @@ use datafusion::logical_expr::{
     ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
     TypeSignature, Volatility,
 };
+use datafusion_doc::Documentation;
+use datafusion_macros::user_doc;
 use std::hash::{Hash, Hasher};
 
 use crate::models::ExtractFieldSpec;
+
+#[user_doc(
+    doc_section(label = "Built-in AI functions"),
+    description = r#"Judge the whole input against a category list and return `ARRAY<STRUCT<label STRING, score FLOAT>>`. IMAGE execution uses the installed YOLO26n ImageNet classifier; the STRING overload is typed but returns `FEATURE_NOT_AVAILABLE`. No Catalog Model is required.
+
+All arguments except `input` must be planning-time constants. Required arguments are positional; optional arguments use `name => value`. SQL NULL input returns NULL without resolving a backend. Row failures return NULL by default or fail with `SET vql.on_error = 'fail'`. Scores are in `[0,1]` and comparable only within one call."#,
+    syntax_example = "VQL_CLASSIFY(input IMAGE | STRING, categories ARRAY<STRING> [, output_mode => 'single' | 'multi', min_score => FLOAT]) -> ARRAY<STRUCT<label STRING, score FLOAT>>",
+    argument(
+        name = "input",
+        description = "An IMAGE value. STRING execution is unavailable."
+    ),
+    argument(
+        name = "categories",
+        description = "A non-empty list of distinct category names."
+    ),
+    argument(
+        name = "output_mode",
+        description = "Optional; 'single' (default) returns the highest-scoring requested category. 'multi' returns categories at or above min_score."
+    ),
+    argument(
+        name = "min_score",
+        description = "Optional score threshold in [0,1]; defaults to 0.25."
+    ),
+    sql_example = r#"After [sample setup](installation.md#sample-data-and-models) and creating [sample_images](sql-reference.md#create-table):
+
+```sql
+SELECT uri,
+       VQL_CLASSIFY(image, ['football_helmet']) AS categories
+FROM sample_images;
+```"#,
+    related_udf(name = "vql_detect")
+)]
+struct ClassifyDocumentation;
+static CLASSIFY_DOCUMENTATION: ClassifyDocumentation = ClassifyDocumentation;
+
+#[user_doc(
+    doc_section(label = "Built-in AI functions"),
+    description = r#"Discover instances using the installed YOLO26n detector and return `ARRAY<STRUCT<label STRING, score FLOAT, locator LOCATOR>>`. Results are sorted by descending score; no detections is an empty array. `locator.box` uses pixel coordinates; a Catalog OBJECT_DETECTION Model's `box` instead uses normalized coordinates. No Catalog Model is required.
+
+All arguments except `input` must be planning-time constants. Optional arguments use `name => value`. SQL NULL input returns NULL without resolving a backend. Row failures return NULL by default or fail with `SET vql.on_error = 'fail'`. Scores are in `[0,1]` and comparable only within one call."#,
+    syntax_example = "VQL_DETECT(input IMAGE [, classes => ARRAY<STRING>, min_score => FLOAT]) -> ARRAY<STRUCT<label STRING, score FLOAT, locator LOCATOR>>",
+    argument(name = "input", description = "An IMAGE value."),
+    argument(
+        name = "classes",
+        description = "Optional class filter; omitted selects all classes. Unknown class names produce no matches."
+    ),
+    argument(
+        name = "min_score",
+        description = "Optional score threshold in [0,1]; defaults to 0.25."
+    ),
+    sql_example = r#"After [sample setup](installation.md#sample-data-and-models) and creating [sample_images](sql-reference.md#create-table):
+
+```sql
+SELECT uri,
+       VQL_DETECT(image, classes => ['person'], min_score => 0.5) AS detections
+FROM sample_images;
+```"#,
+    related_udf(name = "vql_classify"),
+    related_udf(name = "vql_extract")
+)]
+struct DetectDocumentation;
+static DETECT_DOCUMENTATION: DetectDocumentation = DetectDocumentation;
+
+#[user_doc(
+    doc_section(label = "Built-in AI functions"),
+    description = r#"Declare named fields for extraction and return `STRUCT<requested fields>`. Each scalar answer has `value STRING`, `score FLOAT`, and `locator LOCATOR`; `list = true` returns an array of answer structs. Answer components may be NULL. Both IMAGE and STRING execution currently return `FEATURE_NOT_AVAILABLE` and have no scheduled execution release. No Catalog Model is required.
+
+`fields` must be a planning-time constant and is positional. SQL NULL input returns NULL without resolving a backend. Row failures return NULL by default or fail with `SET vql.on_error = 'fail'`. Scores are in `[0,1]` and comparable only within one call. For instance detection use `VQL_DETECT`; the retired detection-shaped `VQL_EXTRACT` call returns a rewrite hint."#,
+    syntax_example = "VQL_EXTRACT(input IMAGE | STRING, fields MAP<STRING, STRUCT<question STRING, list BOOLEAN>>) -> STRUCT<requested fields>",
+    argument(
+        name = "input",
+        description = "An IMAGE or STRING value; execution for both overloads is unavailable."
+    ),
+    argument(
+        name = "fields",
+        description = "A non-empty map of distinct field names to question/list descriptors. A string descriptor is shorthand for a scalar question."
+    ),
+    sql_example = r#"With [sample_images](sql-reference.md#create-table), this demonstrates request syntax only; execution returns FEATURE_NOT_AVAILABLE:
+
+```sql
+SELECT VQL_EXTRACT(image, MAP {
+  'title': 'What is the title?',
+  'items': STRUCT('List the items' AS question, TRUE AS list)
+}) AS extracted
+FROM sample_images;
+```"#,
+    related_udf(name = "vql_detect")
+)]
+struct ExtractDocumentation;
+static EXTRACT_DOCUMENTATION: ExtractDocumentation = ExtractDocumentation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum BuiltinAiFunction {
@@ -16,6 +108,8 @@ pub(crate) enum BuiltinAiFunction {
 }
 
 impl BuiltinAiFunction {
+    pub(crate) const ALL: [Self; 3] = [Self::Classify, Self::Extract, Self::Detect];
+
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Classify => "vql_classify",
@@ -33,7 +127,7 @@ impl BuiltinAiFunction {
     }
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
-        [Self::Classify, Self::Extract, Self::Detect]
+        Self::ALL
             .into_iter()
             .find(|function| name.eq_ignore_ascii_case(function.marker_name()))
     }
@@ -110,6 +204,14 @@ impl ScalarUDFImpl for BuiltinAiMarker {
 
     fn signature(&self) -> &Signature {
         &self.signature
+    }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        match self.function {
+            BuiltinAiFunction::Classify => CLASSIFY_DOCUMENTATION.doc(),
+            BuiltinAiFunction::Extract => EXTRACT_DOCUMENTATION.doc(),
+            BuiltinAiFunction::Detect => DETECT_DOCUMENTATION.doc(),
+        }
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::common::Result<DataType> {

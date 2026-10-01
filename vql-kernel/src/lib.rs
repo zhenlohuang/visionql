@@ -1,6 +1,7 @@
 mod catalog;
 mod config;
 mod connectors;
+pub mod documentation;
 mod engine;
 mod error;
 mod functions;

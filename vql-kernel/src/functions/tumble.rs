@@ -8,7 +8,25 @@ use arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
+use datafusion_doc::Documentation;
+use datafusion_macros::user_doc;
 
+#[user_doc(
+    doc_section(label = "Streaming functions"),
+    description = "Return the start of the event-time bucket containing ts as TIMESTAMP. Timestamps use millisecond precision, with their timezone preserved. NULL arguments return NULL. See [streaming queries](sql-reference.md#tumble-and-streaming-queries) for watermark closure and continuous aggregate restrictions.",
+    syntax_example = "TUMBLE(ts TIMESTAMP, width INTERVAL) -> TIMESTAMP",
+    argument(name = "ts", description = "The event-time timestamp."),
+    argument(
+        name = "width",
+        description = "A positive bucket width containing no calendar months."
+    ),
+    sql_example = r#"```sql
+SELECT TUMBLE(
+  CAST('2026-08-23 10:00:07.800' AS TIMESTAMP),
+  INTERVAL '5' SECOND
+) AS window_start;
+```"#
+)]
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Tumble(Signature);
 
@@ -18,6 +36,9 @@ impl ScalarUDFImpl for Tumble {
     }
     fn signature(&self) -> &Signature {
         &self.0
+    }
+    fn documentation(&self) -> Option<&Documentation> {
+        self.doc()
     }
     fn return_type(&self, arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
         Ok(arg_types[0].clone())

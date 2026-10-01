@@ -11,10 +11,7 @@ use crate::catalog::{DefinitionSnapshot, TableProvider as CatalogTableProvider};
 use crate::connectors::images::ImagesTableProvider;
 use crate::connectors::rtsp::RtspTableProvider;
 use crate::connectors::videos::VideosTableProvider;
-use crate::functions::{
-    BuiltinAiFunction, VqlFunctionFactory, VqlTypePlanner, box_center_udf, builtin_ai_udf,
-    polygon_udf, python_function_udf, st_contains_udf, tumble_udf,
-};
+use crate::functions::{VqlFunctionFactory, VqlTypePlanner, builtin_udfs, python_function_udf};
 use crate::media::MediaRuntime;
 use crate::models::model_marker;
 use crate::planner::inference::VqlQueryPlanner;
@@ -90,14 +87,9 @@ fn register_functions(
     python_udf_host: Option<PythonUdfHostRef>,
     budget: Option<QueryBudget>,
 ) -> Result<()> {
-    context.register_udf(box_center_udf());
-    context.register_udf(polygon_udf("polygon"));
-    context.register_udf(polygon_udf("st_polygon"));
-    context.register_udf(st_contains_udf());
-    context.register_udf(tumble_udf());
-    context.register_udf(builtin_ai_udf(BuiltinAiFunction::Classify)?);
-    context.register_udf(builtin_ai_udf(BuiltinAiFunction::Extract)?);
-    context.register_udf(builtin_ai_udf(BuiltinAiFunction::Detect)?);
+    for function in builtin_udfs()? {
+        context.register_udf(function);
+    }
     for (_, model) in snapshot.models() {
         context.register_udf(model_marker(&model.definition)?);
     }

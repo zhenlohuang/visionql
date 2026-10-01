@@ -4935,6 +4935,8 @@ dependencies = [
  "base64",
  "chrono",
  "datafusion",
+ "datafusion-doc",
+ "datafusion-macros",
  "fast_image_resize",
  "ffmpeg-next",
  "futures",
