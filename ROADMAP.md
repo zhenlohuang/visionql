@@ -4,7 +4,7 @@ VisionQL brings one query model to images, recorded video, and live streams. Rel
 
 Status: ✅ Complete · 🚧 In progress · 📋 Planned
 
-Statuses and checkboxes track implementation and acceptance in the current source. The latest published release is v0.2.0; the v0.3 scope is complete in source and remains unreleased. See the [Changelog](./CHANGELOG.md) for released and unreleased changes and the [README](./README.md) for current setup instructions.
+Statuses and checkboxes track implementation and acceptance in the current source. The latest published release is v0.3.0. See the [Changelog](./CHANGELOG.md) for released and unreleased changes and the [README](./README.md) for current setup instructions.
 
 ## v0.1 — Embedded batch and streaming MVP ✅
 

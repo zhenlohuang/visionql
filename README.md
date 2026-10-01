@@ -5,7 +5,7 @@
       <img alt="CI" src="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml/badge.svg?branch=main">
     </a>
     <a href="CHANGELOG.md">
-      <img alt="Released v0.2.0" src="https://img.shields.io/badge/release-v0.2.0-6f42c1">
+      <img alt="Released v0.3.0" src="https://img.shields.io/badge/release-v0.3.0-6f42c1">
     </a>
     <img alt="Rust 1.88 or newer" src="https://img.shields.io/badge/Rust-1.88%2B-black?logo=rust">
     <img alt="Python 3.10 or newer" src="https://img.shields.io/badge/Python-3.10%2B-3776AB">
@@ -44,7 +44,7 @@ Use SQL to answer questions about visual data without assembling a separate deco
 
 ## Quick start
 
-These steps use the current source checkout. The release badge refers to v0.2.0; Workbench and the current `SUBMIT JOB` / `SHOW JOBS` command family are unreleased changes. See the [Roadmap](ROADMAP.md) and [Changelog](CHANGELOG.md) for release scope.
+These steps build VisionQL from source. The latest release is v0.3.0, including Workbench and the `SUBMIT JOB` / `SHOW JOBS` command family. See the [Roadmap](ROADMAP.md) and [Changelog](CHANGELOG.md) for release scope.
 
 ### 1. Build and open the shell
 

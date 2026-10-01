@@ -12,7 +12,7 @@ body:
     attributes:
       label: VisionQL version
       description: Provide a release version or commit SHA.
-      placeholder: v0.2.0 or f77a15f
+      placeholder: v0.3.0 or 0f5246f
     validations:
       required: true
   - type: dropdown

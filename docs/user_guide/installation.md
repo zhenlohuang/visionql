@@ -4,9 +4,15 @@ This guide covers the CLI, Python API, `vqld`, Docker, Workbench, and shared run
 
 ## Availability
 
-The latest published release is v0.2.0, distributed as source through the [GitHub release](https://github.com/zhenlohuang/visionql/releases/tag/v0.2.0). The Python package has not yet been published to PyPI. Build from source for the Python API and standalone `vql` CLI. Workbench is implemented in the current source checkout for the upcoming v0.3 release and is absent from the v0.2.0 release.
+The latest published release is v0.3.0, distributed as source through the [GitHub release](https://github.com/zhenlohuang/visionql/releases/tag/v0.3.0). Build from source for the Python API, standalone `vql` CLI, `vqld`, and Workbench. The Python package has not yet been published to PyPI.
 
-The commands below use the current source checkout. See the [Roadmap](../../ROADMAP.md) and [Changelog](../../CHANGELOG.md) for released and unreleased scope, including the current `SHOW JOBS` spelling.
+The commands below use the current source checkout. See the [Roadmap](../../ROADMAP.md) and [Changelog](../../CHANGELOG.md) for released and unreleased scope. Persistent Jobs use `SUBMIT JOB`, `SHOW JOBS`, `DESCRIBE JOB`, and `STOP JOB`.
+
+## Upgrade from v0.2
+
+v0.3 renames the persistent lifecycle commands and storage from Queries to Jobs. The old `SUBMIT QUERY`, `SHOW QUERIES`, `DESCRIBE QUERY`, and `STOP QUERY` commands are no longer accepted. Existing v0.2 persistent Query records are not automatically migrated or recovered as Jobs.
+
+Before upgrading, preserve the original SQL for each persistent Query, stop active Queries using the v0.2 service, shut down `vqld`, and back up `VQL_HOME`. After upgrading, resubmit the continuous writes with `SUBMIT JOB`. Each submission creates a new Job identity and pins the definitions available at submission time; the live-source recovery limitations still apply.
 
 ## Prerequisites
 

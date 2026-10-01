@@ -4886,7 +4886,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vql-catalog"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "axum",
@@ -4903,7 +4903,7 @@ dependencies = [
 
 [[package]]
 name = "vql-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -4926,7 +4926,7 @@ dependencies = [
 
 [[package]]
 name = "vql-kernel"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -4964,7 +4964,7 @@ dependencies = [
 
 [[package]]
 name = "vql-python"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "arrow-pyarrow",
@@ -4975,7 +4975,7 @@ dependencies = [
 
 [[package]]
 name = "vql-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -5005,7 +5005,7 @@ dependencies = [
 
 [[package]]
 name = "vql-testing"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "arrow-flight",
