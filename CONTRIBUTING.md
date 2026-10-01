@@ -11,7 +11,7 @@ Thank you for helping improve VisionQL. Contributions are welcome across the eng
 
 ## Development setup
 
-Install the prerequisites listed in the [README](README.md#prerequisites), then clone and build the workspace:
+Follow [Installation and configuration](docs/user_guide/installation.md) for prerequisites, source builds, Docker, CLI, Python, `vqld`, Workbench, and runtime settings. For repository development, select an isolated instance and build from the root:
 
 ```bash
 git clone https://github.com/zhenlohuang/visionql.git
@@ -51,6 +51,37 @@ python -m pytest -q vql-python/tests
 ```
 
 The default suite does not require downloaded datasets or a real model. Unit tests create isolated temporary directories and use `mock://` models.
+
+### Workbench checks
+
+Workbench is a separate Rust workspace and frontend, excluded from the root workspace. Run its gates from the repository root when changing the browser client or bridge:
+
+```bash
+cargo fmt --manifest-path vql-workbench/Cargo.toml --all -- --check
+cargo clippy --manifest-path vql-workbench/Cargo.toml --workspace --all-targets --locked -- -D warnings
+cargo test --manifest-path vql-workbench/Cargo.toml --workspace --locked
+pnpm --dir vql-workbench/frontend format:check
+pnpm --dir vql-workbench/frontend lint
+pnpm --dir vql-workbench/frontend test
+pnpm --dir vql-workbench/frontend build
+pnpm --dir vql-workbench/frontend exec playwright install chromium
+pnpm --dir vql-workbench/frontend test:e2e
+```
+
+The E2E script builds and starts the shipped `vqld`, Workbench backend, and production frontend in an isolated temporary `VQL_HOME`. To use installed Chrome, run `VQL_WORKBENCH_E2E_BROWSER=chrome pnpm --dir vql-workbench/frontend test:e2e`. See the [Workbench checks](vql-workbench/README.md#checks) for the additional real-model Python/browser acceptance scenario.
+
+### SQL reference generation
+
+The [built-in function reference](docs/user_guide/sql-functions.md) is generated from DataFusion `#[user_doc(...)]` attributes beside the owning Rust implementation. Implement `ScalarUDFImpl::documentation()` by returning `self.doc()`; AI markers select the documentation for their public function. Maintain syntax, argument defaults, result types, availability, and examples in these attributes, then regenerate the page:
+
+```bash
+cargo run -p vql-kernel --example generate_sql_reference --locked
+cargo run -p vql-kernel --example generate_sql_reference --locked -- --check
+```
+
+Session registration and documentation share `functions::builtin_udfs()`, so every registered VQL built-in must publish documentation. The exporter reads compiled `Documentation` values through `vql_kernel::documentation::builtin_functions()` and uses public AI names and syntax rather than internal planning markers or normalized signatures. It does not open a Catalog, load media, or resolve model artifacts. CI and pre-commit reject stale generated output or missing metadata.
+
+The DataFusion metadata supplies descriptions, syntax, arguments, SQL examples, and related functions; it can also be consumed by other renderers. Keep examples complete or link their setup explicitly, and mark unavailable overloads as unavailable. Do not edit the generated function page directly. Maintain types, DDL, configuration statements, streaming behavior, and Jobs in the hand-written [SQL reference](docs/user_guide/sql-reference.md); function attributes are not a grammar or a semantic inference mechanism.
 
 ### Test coverage
 
@@ -130,7 +161,12 @@ python -m pip install pre-commit
 pre-commit install
 ```
 
-The pre-commit hooks run repository hygiene, formatting, and Clippy checks. The pre-push hook runs the locked workspace test suite.
+The pre-commit hooks run repository hygiene, generated SQL-reference checks, formatting, and Clippy checks. The pre-push hook runs the locked workspace test suite. Run all local hooks explicitly with:
+
+```bash
+pre-commit run --all-files
+pre-commit run --hook-stage pre-push --all-files
+```
 
 ## Pull requests
 

@@ -62,6 +62,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Check generated SQL function reference
+        run: cargo run -p vql-kernel --example generate_sql_reference --locked -- --check
+
   coverage:
     name: Rust tests and coverage
     runs-on: ubuntu-24.04

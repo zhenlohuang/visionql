@@ -9,6 +9,8 @@ use arrow::datatypes::{DataType, Field, Fields};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
+use datafusion_doc::Documentation;
+use datafusion_macros::user_doc;
 
 use crate::types::box2d_field;
 
@@ -23,6 +25,21 @@ pub(crate) fn point_type() -> DataType {
     DataType::Struct(point_fields())
 }
 
+#[user_doc(
+    doc_section(label = "Spatial functions"),
+    description = "Return the center of a normalized BOX2D as POINT2D. NULL input returns NULL.",
+    syntax_example = "BOX_CENTER(box BOX2D) -> POINT2D",
+    alternative_syntax = "box.center",
+    argument(name = "box", description = "A normalized BOX2D value."),
+    sql_example = r#"With `sample_images` and the resolved `yolo` Model from the [SQL reference](sql-reference.md#create-model):
+
+```sql
+SELECT f.uri, BOX_CENTER(det.box) AS center
+FROM sample_images AS f,
+     UNNEST(yolo(f.image, classes => ['person'])) AS u(det);
+```"#,
+    related_udf(name = "st_contains")
+)]
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct BoxCenter(Signature);
 
@@ -32,6 +49,9 @@ impl ScalarUDFImpl for BoxCenter {
     }
     fn signature(&self) -> &Signature {
         &self.0
+    }
+    fn documentation(&self) -> Option<&Documentation> {
+        self.doc()
     }
     fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
         Ok(point_type())
@@ -103,6 +123,20 @@ pub(crate) fn polygon_type() -> DataType {
     DataType::List(Arc::new(Field::new("point", point_type(), false)))
 }
 
+#[user_doc(
+    doc_section(label = "Spatial functions"),
+    description = "Parse a closed polygon from normalized x y pairs and return POLYGON. Coordinates must be finite and within [0,1]. A polygon needs at least three edges and repeats its first point at the end. NULL input returns NULL.",
+    syntax_example = "POLYGON(text STRING) -> POLYGON",
+    alternative_syntax = "ST_POLYGON(text STRING)",
+    argument(
+        name = "text",
+        description = "Comma-separated x y coordinates, optionally wrapped in POLYGON((...))."
+    ),
+    sql_example = r#"```sql
+SELECT POLYGON('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))') AS area;
+```"#,
+    related_udf(name = "st_contains")
+)]
 #[derive(Debug)]
 struct Polygon {
     name: &'static str,
@@ -127,6 +161,9 @@ impl ScalarUDFImpl for Polygon {
     fn signature(&self) -> &Signature {
         &self.signature
     }
+    fn documentation(&self) -> Option<&Documentation> {
+        self.doc()
+    }
     fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
         Ok(polygon_type())
     }
@@ -148,7 +185,11 @@ impl ScalarUDFImpl for Polygon {
                 Box::new(Float32Builder::new()),
             ],
         );
-        let mut builder = ListBuilder::new(point_builder);
+        let mut builder = ListBuilder::new(point_builder).with_field(Arc::new(Field::new(
+            "point",
+            point_type(),
+            false,
+        )));
         for row in 0..text.len() {
             if text.is_null(row) {
                 builder.append(false);
@@ -216,6 +257,32 @@ fn parse_polygon(value: &str) -> std::result::Result<Vec<(f32, f32)>, String> {
     Ok(points)
 }
 
+#[user_doc(
+    doc_section(label = "Spatial functions"),
+    description = "Return BOOLEAN indicating whether a POLYGON contains a POINT2D. Boundary points are included. NULL arguments return NULL.",
+    syntax_example = "ST_CONTAINS(polygon POLYGON, point POINT2D) -> BOOLEAN",
+    argument(
+        name = "polygon",
+        description = "A closed polygon in normalized coordinates."
+    ),
+    argument(
+        name = "point",
+        description = "A point in the same normalized coordinate space."
+    ),
+    sql_example = r#"With `sample_images` and the resolved `yolo` Model from the [SQL reference](sql-reference.md#create-model):
+
+```sql
+SELECT f.uri, det.label
+FROM sample_images AS f,
+     UNNEST(yolo(f.image, classes => ['person'])) AS u(det)
+WHERE ST_CONTAINS(
+  POLYGON('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))'),
+  BOX_CENTER(det.box)
+);
+```"#,
+    related_udf(name = "polygon"),
+    related_udf(name = "box_center")
+)]
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct StContains(Signature);
 impl ScalarUDFImpl for StContains {
@@ -224,6 +291,9 @@ impl ScalarUDFImpl for StContains {
     }
     fn signature(&self) -> &Signature {
         &self.0
+    }
+    fn documentation(&self) -> Option<&Documentation> {
+        self.doc()
     }
     fn return_type(&self, _: &[DataType]) -> datafusion::common::Result<DataType> {
         Ok(DataType::Boolean)
@@ -319,6 +389,33 @@ fn contains(xs: &[f32], ys: &[f32], x: f32, y: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn polygon_sql_preserves_declared_list_field_and_nulls() {
+        let context = datafusion::execution::context::SessionContext::new();
+        for name in ["polygon", "st_polygon"] {
+            context.register_udf(polygon_udf(name));
+            let batches = context
+                .sql(&format!(
+                    "SELECT {name}(shape) AS area FROM \
+                     (VALUES ('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))'), (NULL)) AS input(shape)"
+                ))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let polygons = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            assert_eq!(polygons.data_type(), &polygon_type());
+            assert_eq!(polygons.value_length(0), 5);
+            assert!(polygons.is_null(1));
+        }
+    }
+
     #[test]
     fn polygon_validation_and_boundary_rule() {
         let polygon = parse_polygon("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))").unwrap();

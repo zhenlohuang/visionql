@@ -19,6 +19,8 @@ async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 datafusion.workspace = true
+datafusion-doc.workspace = true
+datafusion-macros.workspace = true
 ffmpeg-next = { workspace = true, optional = true }
 fast_image_resize.workspace = true
 futures.workspace = true
