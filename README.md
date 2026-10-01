@@ -28,6 +28,18 @@ VisionQL is a unified batch and streaming engine for querying and processing mul
 > [!IMPORTANT]
 > VisionQL v0.2.0 adds the single-node `vqld` service, Arrow Flight SQL access, and Catalog-backed persistent continuous Queries to the embedded batch and streaming engine introduced in v0.1. The focused Workbench visual SQL client remains planned for v0.3. See the [Roadmap](ROADMAP.md) for exact version boundaries and the [Changelog](CHANGELOG.md) for release notes.
 
+### Workbench preview
+
+The planned v0.3 Workbench runs VQL against a live RTSP camera through `vqld`: register the stream and a YOLO26n detector, run person detection as an attached stream, then click any returned frame to inspect its bounding box, label, and confidence.
+
+<p align="center">
+  <a href="docs/assets/workbench-rtsp-detection.mp4">
+    <img alt="VisionQL Workbench detecting people in a live RTSP stream and inspecting a frame's bounding box" src="docs/assets/workbench-rtsp-detection.gif" width="900">
+  </a>
+  <br>
+  <sub><a href="docs/assets/workbench-rtsp-detection.mp4">▶ Watch the full demo video (79 s)</a></sub>
+</p>
+
 ## Why VisionQL
 
 Physical AI systems continuously produce camera, vehicle, and robot data. VisionQL turns decoding, sampling, inference, and aggregation into a declarative query plan:
