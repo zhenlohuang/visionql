@@ -17,8 +17,8 @@ export function OverlayDialog({
   onChange: (value: OverlayConfig) => void;
 }) {
   const options = fields.map((field) => ({
-    value: field.name,
-    label: field.name,
+    value: field.key,
+    label: field.key,
   }));
   const optional = [{ value: NONE, label: "Not mapped" }, ...options];
   const set = (key: keyof OverlayConfig, selected: string) =>
@@ -55,7 +55,7 @@ export function OverlayDialog({
               options={options.filter((field) =>
                 fields.find(
                   (candidate) =>
-                    candidate.name === field.value &&
+                    candidate.key === field.value &&
                     candidate.extensionName === "vql.image",
                 ),
               )}
@@ -71,7 +71,7 @@ export function OverlayDialog({
                   field.value === NONE ||
                   fields.find(
                     (candidate) =>
-                      candidate.name === field.value &&
+                      candidate.key === field.value &&
                       candidate.extensionName === "vql.box2d",
                   ),
               )}

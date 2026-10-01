@@ -35,7 +35,7 @@ Draft tabs share one execution slot. The editor supports SQL highlighting and fo
 
 The result table exposes a transient Overlay Config that maps one `IMAGE` column to one `BOX2D` column and optional label and confidence columns. This configuration changes presentation only, remains in page memory, and is cleared with the Session.
 
-SQL query files are local browser drafts. A new file uses the first available name in `Untitle.sql`, `Untitle1.sql`, `Untitle2.sql`, and so on. A tab's rename button or a double-click opens the file-name dialog. Renaming requires a non-empty name unique among open drafts and adds `.sql` when omitted; it preserves the draft identity, SQL, active selection, results, and execution history. Draft names and SQL persist in browser storage. Existing saved names are retained on load.
+SQL query files are local browser drafts. A new file uses the first available name in `Untitle.sql`, `Untitle1.sql`, `Untitle2.sql`, and so on. A tab's rename button or a double-click opens the file-name dialog. Renaming requires a non-empty name unique among open drafts and adds `.sql` when omitted; it preserves the draft identity, SQL, active selection, results, and execution history. All open draft names and SQL persist in browser storage without truncating the tab list. Existing saved names are retained on load.
 
 Workspace groups SQL editor, History, and Jobs. Workspace → Jobs provides a searchable list with status, Show SQL, and Stop actions. It uses the existing browser Session and public SQL execution transport.
 
@@ -63,7 +63,7 @@ vql-workbench/
 
 The frontend and backend use one same-origin HTTP endpoint. The backend serves the production static assets, owns one short-lived in-memory browser Session, and connects to the configured `vqld` endpoint as an ordinary Flight SQL client. It imports neither `vql-server` nor engine crates. Its Rust Arrow and Flight dependencies stay on the same pinned Arrow release as `vqld` so schema metadata and IPC behavior are tested against one implementation baseline.
 
-The backend binds to loopback. It accepts the `vqld` endpoint, TLS inputs, and service credential when establishing a Session, keeps credential material only in backend memory, and gives the browser an opaque `HttpOnly`, `SameSite=Strict` Session cookie. Closing or expiring the Session drops prepared statements, credentials, buffered thumbnails, and active execution state.
+The backend binds to loopback. It accepts the `vqld` endpoint, TLS inputs, and service credential when establishing a Session, keeps credential material only in backend memory, and gives the browser an opaque `HttpOnly`, `SameSite=Strict` session cookie without a fixed expiry. The backend's idle timeout is authoritative; requests refresh it, and attached result streams keep their Session active so they remain cancellable regardless of elapsed connection time. Closing or expiring the Session drops prepared statements, credentials, buffered thumbnails, and active execution state.
 
 The internal browser transport is intentionally small:
 
@@ -99,6 +99,8 @@ Workbench has one explicit execution state machine: `disconnected`, `idle`, `pre
 
 The browser consumes the response body as a stream and appends complete record batches to the bounded in-memory result. Browser abort, navigation, Session expiry, and the Cancel action all trigger backend-side Flight cancellation before local state is discarded. Blob URLs are revoked when their batch, result, or Session is released.
 
+Results preserve every top-level Arrow column, including duplicate names. Each column has a unique key separate from its original schema name. Unique names retain their original keys for named-field Catalog and Jobs decoding; duplicate names use their one-based column positions, with collision checks against original names. Table headers retain the returned names, while JSON, row inspection, and overlay choices use the unique keys to distinguish same-named columns without overwriting values.
+
 ## Catalog Management
 
 The Catalog sidebar presents an expandable Catalog → Schema → Tables / Models / Functions → Object tree. It lists all namespaces represented by the public `SHOW TABLES`, `SHOW MODELS`, and `SHOW FUNCTIONS` results, and retains `vql.default` as the default namespace even when empty. Callable namespaces come from the returned `catalog` and `schema` fields. The current Table SQL surface is limited to `vql.default`, so the tree exposes the Tables category only there. The tree does not enumerate empty remote namespaces through a private API.
@@ -126,6 +128,8 @@ Prototype-only facts without public metadata, including Table health, runtime en
 Workbench consumes the bounded thumbnail representation defined by the [`vqld` Service Design](./vqld.md#image-flight-boundary). It does not request inline originals, dereference media locators, or persist query results.
 
 Thumbnail dimensions and byte bounds are service configuration, not Workbench protocol extensions. A `BOX2D` value uses the Kernel contract's normalized top-left `x`, `y`, `w`, and `h` coordinates. The overlay maps those coordinates to the displayed image content rectangle, including any letterboxing, and clips invalid drawing geometry without changing the value shown in the ordinary `BOX2D` cell.
+
+The configured box, label, and confidence apply only to the selected `IMAGE` column. Other image columns render their returned thumbnails without that overlay. Changing the mapping moves the overlay to the selected column, including when image columns share a name.
 
 An `IMAGE` cell renders only when the field carries `ARROW:extension:name=vql.image`, the encoded payload is present, and the encoding is a browser-supported image type. Missing or invalid thumbnails render a typed empty or error cell rather than a broken image. The client never renders a URI or locator as an image source.
 

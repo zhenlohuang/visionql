@@ -492,9 +492,9 @@ async fn create_session(
         .write()
         .map_err(|_| ApiProblem::backend("Session unavailable", "Session state was poisoned"))?
         .insert(id.clone(), session);
-    let max_age = state.session_idle_timeout.as_secs();
-    let cookie =
-        format!("{SESSION_COOKIE}={id}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}");
+    // Session expiry is owned by the idle reaper. A fixed cookie lifetime
+    // would disconnect active users and make long-running streams uncancellable.
+    let cookie = format!("{SESSION_COOKIE}={id}; HttpOnly; SameSite=Strict; Path=/");
     let mut response = Json(SessionResponse {
         connected: true,
         endpoint,
@@ -1004,9 +1004,12 @@ mod tests {
         let state = AppState::from_config(&config).unwrap();
         let expired = test_session(false, Instant::now() - Duration::from_secs(2));
         let attached = test_session(true, Instant::now() - Duration::from_secs(2));
+        let recently_used = test_session(false, Instant::now() - Duration::from_secs(2));
+        recently_used.touch();
         state.sessions.write().unwrap().extend([
             ("expired".to_owned(), expired),
             ("attached".to_owned(), attached),
+            ("recently-used".to_owned(), recently_used),
         ]);
 
         state.cleanup();
@@ -1014,6 +1017,7 @@ mod tests {
         let sessions = state.sessions.read().unwrap();
         assert!(!sessions.contains_key("expired"));
         assert!(sessions.contains_key("attached"));
+        assert!(sessions.contains_key("recently-used"));
     }
 
     #[test]

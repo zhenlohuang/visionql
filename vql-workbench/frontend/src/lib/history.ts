@@ -35,11 +35,11 @@ export function createDraft(drafts: Draft[] = [], sql = DEFAULT_SQL): Draft {
 export function loadDrafts(): Draft[] {
   const drafts = readJson<Draft[]>(DRAFTS_KEY);
   if (!drafts?.length) return [createDraft()];
-  return drafts.filter(isDraft).slice(0, 20);
+  return drafts.filter(isDraft);
 }
 
 export function saveDrafts(drafts: Draft[]): void {
-  localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts.slice(0, 20)));
+  localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
 }
 
 export function loadHistory(): HistoryRecord[] {

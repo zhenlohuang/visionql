@@ -2,7 +2,9 @@
 
 VisionQL Workbench is the independent browser client for one `vqld` endpoint. It provides local SQL drafts and history, bounded and attached-continuous execution, Arrow table and JSON views, and visual `IMAGE`/`BOX2D` inspection through public Flight SQL.
 
-New query files are named `Untitle.sql`, then `Untitle1.sql`, `Untitle2.sql`, and so on when a name is already in use. Double-click a file tab or click its pencil button to rename it. Names must be non-empty and unique among open drafts; `.sql` is added automatically when omitted. Draft names and SQL are saved in browser storage and survive reloads.
+New query files are named `Untitle.sql`, then `Untitle1.sql`, `Untitle2.sql`, and so on when a name is already in use. Double-click a file tab or click its pencil button to rename it. Names must be non-empty and unique among open drafts; `.sql` is added automatically when omitted. All open draft names and SQL are saved in browser storage and survive reloads.
+
+Results retain same-named columns separately. Table headers preserve the returned names; JSON, row inspection, and overlay choices distinguish duplicate names by their column positions. Overlay Config applies boxes, labels, and confidence only to its selected IMAGE column.
 
 Workspace → Jobs uses `SHOW JOBS`, `DESCRIBE JOB`, and `STOP JOB` through the same public SQL execution transport. Workspace groups SQL editor, History, and Jobs.
 
@@ -36,6 +38,8 @@ cargo run -- --static-dir ../frontend/dist
 ```
 
 Open `http://127.0.0.1:6040`. The default `vqld` endpoint is `http://127.0.0.1:6031`; it can be changed in Workbench Settings. Credentials and optional TLS CA material are submitted only when a browser Session is established and remain in backend memory.
+
+Session expiry follows the backend's idle timeout. Active requests and attached stream previews keep the Session usable, including cancellation of streams running longer than that timeout.
 
 ## Checks
 

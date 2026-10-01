@@ -28,6 +28,8 @@ export interface Draft {
 }
 
 export interface ResultField {
+  // Unique result key; duplicate names are disambiguated by column position.
+  key: string;
   name: string;
   type: string;
   extensionName?: string;

@@ -87,6 +87,75 @@ test("renders a vql.image thumbnail from shipped public protocols", async ({
   await expect(image).toHaveAttribute("src", /^blob:/);
 });
 
+test("preserves duplicate SQL columns in table, JSON, and row inspection", async ({
+  page,
+}) => {
+  await connect(page);
+  await runSql(
+    page,
+    "SELECT * FROM (SELECT 11 AS id) a CROSS JOIN (SELECT 22 AS id) b;",
+  );
+  const results = resultPane(page);
+  await expect(
+    results.getByRole("columnheader", { name: /^id \[/ }),
+  ).toHaveCount(2);
+  await expect(
+    results.getByRole("cell", { name: "11", exact: true }),
+  ).toBeVisible();
+  await expect(
+    results.getByRole("cell", { name: "22", exact: true }),
+  ).toBeVisible();
+  await results.getByRole("cell", { name: "11", exact: true }).click();
+  const inspector = page.getByRole("dialog", { name: "Row 1 inspection" });
+  await expect(inspector.locator("pre")).toContainText('"id [column 1]": "11"');
+  await expect(inspector.locator("pre")).toContainText('"id [column 2]": "22"');
+  await inspector.getByRole("button", { name: "Dismiss" }).click();
+  await results.getByRole("button", { name: "JSON", exact: true }).click();
+  await expect(results.locator("pre")).toContainText('"id [column 1]": "11"');
+  await expect(results.locator("pre")).toContainText('"id [column 2]": "22"');
+});
+
+test("restores an edited draft beyond the twentieth tab after reload", async ({
+  page,
+}) => {
+  for (let index = 0; index < 20; index += 1) {
+    await page.getByRole("button", { name: "New draft", exact: true }).click();
+  }
+  await replaceSql(page, "SELECT 21 AS saved_draft;");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Untitle20.sql", exact: true })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "SQL editor", exact: true }),
+  ).toHaveText("SELECT 21 AS saved_draft;");
+});
+
+test("keeps a recently used Session beyond its idle timeout", async ({
+  page,
+  context,
+}) => {
+  await connect(page);
+  const cookie = (await context.cookies()).find(
+    (cookie) => cookie.name === "vql_workbench_session",
+  )!;
+  expect(cookie.expires).toBe(-1);
+  expect(cookie.httpOnly).toBe(true);
+  expect(cookie.sameSite).toBe("Strict");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.waitForTimeout(2000);
+    const session = await page.evaluate(async () =>
+      (await fetch("/api/session")).json(),
+    );
+    expect(session.connected).toBe(true);
+    expect(session.sessionId).toBe(cookie.value);
+  }
+  await runSql(page, "SELECT 42 AS still_connected;");
+  await expect(
+    resultPane(page).getByRole("cell", { name: "42", exact: true }),
+  ).toBeVisible();
+});
+
 test("cancels explicit and dropped attached result streams", async ({
   page,
 }) => {
@@ -125,6 +194,10 @@ test("cancels explicit and dropped attached result streams", async ({
     const cancel = page.getByRole("button", {
       name: /Cancel active execution/,
     });
+    await expect(cancel).toBeEnabled();
+    // The test backend uses a five-second idle timeout. An attached stream
+    // must retain its cookie and remain cancellable beyond that interval.
+    await page.waitForTimeout(6000);
     await expect(cancel).toBeEnabled();
     await cancel.click();
     await expect(cancel).toBeDisabled();
@@ -178,7 +251,7 @@ test("expires an idle browser Session and asks for reconnection", async ({
   await runSql(page, "SELECT 1;");
 
   await expect(
-    resultPane(page).getByText("Workbench is disconnected"),
+    resultPane(page).getByText("Workbench Session expired"),
   ).toBeVisible();
   await expect(page.getByText("vqld: disconnected")).toBeVisible();
 });
@@ -310,14 +383,14 @@ test("reconnects after an expired Job inspection Session", async ({ page }) => {
   await page.waitForTimeout(11_000);
   await page.getByRole("button", { name: "Jobs", exact: true }).click();
   const jobs = page.getByRole("main", { name: "Persistent jobs" });
-  await expect(jobs.getByText("Workbench is disconnected")).toBeVisible();
+  await expect(jobs.getByText("Workbench Session expired")).toBeVisible();
   await expect(jobs.getByText("Connect to view persistent jobs")).toBeVisible();
   await connect(page);
   await expect(
     jobs.getByRole("button", { name: "Refresh jobs" }),
   ).toBeEnabled();
   await expect(jobs.getByText("Connected: vqld (Flight SQL)")).toBeVisible();
-  await expect(jobs.getByText("Workbench is disconnected")).not.toBeVisible();
+  await expect(jobs.getByText("Workbench Session expired")).not.toBeVisible();
 });
 
 async function connect(page: Page) {

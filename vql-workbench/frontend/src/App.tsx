@@ -1167,16 +1167,16 @@ function inferOverlay(
 ): OverlayConfig {
   if (current.imageColumn) return current;
   const image =
-    result.fields.find((field) => field.extensionName === "vql.image")?.name ??
+    result.fields.find((field) => field.extensionName === "vql.image")?.key ??
     null;
   const box =
-    result.fields.find((field) => field.extensionName === "vql.box2d")?.name ??
+    result.fields.find((field) => field.extensionName === "vql.box2d")?.key ??
     null;
   const label =
-    result.fields.find((field) => /^label$/i.test(field.name))?.name ?? null;
+    result.fields.find((field) => /^label$/i.test(field.name))?.key ?? null;
   const confidence =
     result.fields.find((field) => /^(confidence|score)$/i.test(field.name))
-      ?.name ?? null;
+      ?.key ?? null;
   return {
     imageColumn: image,
     boxColumn: box,

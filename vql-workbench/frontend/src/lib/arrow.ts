@@ -27,7 +27,7 @@ export async function consumeArrowResponse(
   };
   let nextId = 1;
   for await (const batch of reader) {
-    const rows = rowsFromBatch(batch, nextId);
+    const rows = rowsFromBatch(batch, result.fields, nextId);
     nextId += rows.length;
     result.rows = rolling
       ? [...result.rows, ...rows].slice(-ROLLING_ROW_LIMIT)
@@ -42,12 +42,32 @@ export async function consumeArrowResponse(
 }
 
 export function schemaFields(fields: Field[]): ResultField[] {
-  return fields.map((field) => ({
-    name: field.name,
+  const keys = columnKeys(fields);
+  return fields.map((field, index) => ({
+    key: keys[index],
+    name: field.name ?? "",
     type: displayType(field),
     extensionName: field.metadata?.get("ARROW:extension:name"),
     nullable: field.nullable,
   }));
+}
+
+function columnKeys(fields: Field[]): string[] {
+  const names = fields.map((field) => field.name ?? "");
+  const counts = new Map<string, number>();
+  for (const name of names) {
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  // Reserve original names so a generated duplicate key cannot hide a real
+  // column named, for example, "id [column 1]".
+  const used = new Set(names);
+  return names.map((name, index) => {
+    if (name && counts.get(name) === 1) return name;
+    let key = `${name} [column ${index + 1}]`;
+    while (used.has(key)) key += "#";
+    used.add(key);
+    return key;
+  });
 }
 
 function displayType(field: Field): string {
@@ -59,12 +79,19 @@ function displayType(field: Field): string {
     .replace(/<.*>/, (value: string) => value.toUpperCase());
 }
 
-function rowsFromBatch(batch: RecordBatch, startId: number): ResultRow[] {
+function rowsFromBatch(
+  batch: RecordBatch,
+  fields: ResultField[],
+  startId: number,
+): ResultRow[] {
   return Array.from({ length: batch.numRows }, (_, rowIndex) => {
     const values = Object.fromEntries(
       batch.schema.fields.map((field, columnIndex) => {
         const vector = batch.getChildAt(columnIndex);
-        return [field.name, vector ? readValue(vector, rowIndex, field) : null];
+        return [
+          fields[columnIndex].key,
+          vector ? readValue(vector, rowIndex, field) : null,
+        ];
       }),
     );
     return { id: startId + rowIndex, values };

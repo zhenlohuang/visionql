@@ -43,9 +43,9 @@ export function ResultsTable({
         ),
         size: 48,
       },
-      ...result.fields.map((field) => ({
-        id: field.name,
-        accessorFn: (row: ResultRow) => row.values[field.name],
+      ...result.fields.map((field, index) => ({
+        id: `column:${index}`,
+        accessorFn: (row: ResultRow) => row.values[field.key],
         header: () => <ColumnHeader field={field} overlay={overlay} />,
         cell: ({ row }: { row: { original: ResultRow } }) => (
           <ResultCell field={field} row={row.original} overlay={overlay} />
@@ -165,7 +165,7 @@ function ColumnHeader({
   overlay: OverlayConfig;
 }) {
   const mapped =
-    field.name === overlay.imageColumn && field.extensionName === "vql.image"
+    field.key === overlay.imageColumn && field.extensionName === "vql.image"
       ? overlay.boxColumn
         ? " + BOX2D"
         : ""
@@ -190,17 +190,24 @@ function ResultCell({
   row: ResultRow;
   overlay: OverlayConfig;
 }) {
-  const value = row.values[field.name];
+  const value = row.values[field.key];
   if (field.extensionName === "vql.image") {
+    const mapped = field.key === overlay.imageColumn;
     return (
       <ImagePreview
         image={asImageValue(value)}
-        box={overlay.boxColumn ? row.values[overlay.boxColumn] : undefined}
+        box={
+          mapped && overlay.boxColumn
+            ? row.values[overlay.boxColumn]
+            : undefined
+        }
         label={
-          overlay.labelColumn ? row.values[overlay.labelColumn] : undefined
+          mapped && overlay.labelColumn
+            ? row.values[overlay.labelColumn]
+            : undefined
         }
         confidence={
-          overlay.confidenceColumn
+          mapped && overlay.confidenceColumn
             ? row.values[overlay.confidenceColumn]
             : undefined
         }
@@ -214,14 +221,14 @@ function ResultCell({
       </code>
     );
   }
-  if (field.name === overlay.labelColumn && typeof value === "string") {
+  if (field.key === overlay.labelColumn && typeof value === "string") {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-raised px-2 py-1 text-[11px] font-medium text-ink">
         <span className="size-1.5 rounded-full bg-accent" /> {value}
       </span>
     );
   }
-  if (field.name === overlay.confidenceColumn && typeof value === "number") {
+  if (field.key === overlay.confidenceColumn && typeof value === "number") {
     return (
       <span className="flex min-w-28 items-center gap-2 font-mono text-[11px] text-ink">
         <span className="w-9">{decimal(value)}</span>
