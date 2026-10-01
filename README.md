@@ -26,13 +26,6 @@
 
 VisionQL is a unified batch and streaming engine for querying images, video files, and live camera streams with SQL. Register data sources and typed Models, compose inference with filters and aggregations, and return Arrow results or write continuously to Kafka. Use the embedded CLI or Python API, connect remotely through `vqld` and Arrow Flight SQL, or inspect visual results in the browser with Workbench.
 
-> [!IMPORTANT]
-> The latest published release is v0.2.0, which includes the embedded engine, single-node `vqld` service, Arrow Flight SQL, and Catalog-backed persistent Jobs. The current source also implements Workbench for the upcoming v0.3 release and uses `SHOW JOBS` for persistent Job listing. See the [Roadmap](ROADMAP.md) for release scope and the [Changelog](CHANGELOG.md) for changes since v0.2.0.
-
-### Workbench demo
-
-Workbench runs VQL against a live RTSP camera through `vqld`: register the stream and a YOLO26n detector, run person detection as an attached stream, then click a returned frame to inspect its bounding box, label, and confidence. Follow the [Workbench setup](#workbench) and [RTSP example](examples/README.md#rtsp-streaming-and-persistent-jobs) to use your own camera.
-
 <p align="center">
   <a href="docs/assets/workbench-rtsp-detection.mp4">
     <img alt="VisionQL Workbench detecting people in a live RTSP stream and inspecting a frame's bounding box" src="docs/assets/workbench-rtsp-detection.gif" width="900">
@@ -158,7 +151,7 @@ Open the [interactive architecture diagram](docs/architecture.html) or the [High
 ## Documentation
 
 | Document | Use it for |
-|---|---|
+| --- | --- |
 | [Installation and configuration](docs/user_guide/installation.md) | Source builds, Docker, CLI, Python, `vqld`, Workbench, and runtime state |
 | [SQL reference](docs/user_guide/sql-reference.md) | VQL types, provider Tables, Models, Functions, windows, and Jobs |
 | [Built-in function reference](docs/user_guide/sql-functions.md) | Generated syntax, arguments, and examples for AI, spatial, and window functions |
