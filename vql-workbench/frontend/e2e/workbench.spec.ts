@@ -30,6 +30,9 @@ test("runs keyboard queries once and preserves schema-only results", async ({
 }) => {
   await connect(page);
   await replaceSql(page, "SELECT 42 AS answer;");
+  // Direct DOM clicks do not wait for the initial Catalog reads to release
+  // the Session's shared execution slot.
+  await expect(page.getByRole("button", { name: /Run buffer/ })).toBeEnabled();
   let starts = 0;
   page.on("request", (request) => {
     if (
@@ -218,7 +221,7 @@ test("manages Jobs through public SQL and preserves editor drafts", async ({
     ).toBeVisible();
     await runSql(
       page,
-      "SUBMIT QUERY entrance_people_stream AS INSERT INTO jobs_sink SELECT frame_id FROM jobs_camera WHERE frame_id > 0;",
+      "SUBMIT JOB entrance_people_stream AS INSERT INTO jobs_sink SELECT frame_id FROM jobs_camera WHERE frame_id > 0;",
     );
     await expect(
       resultPane(page).getByRole("cell", { name: "entrance_people_stream" }),
@@ -238,21 +241,21 @@ test("manages Jobs through public SQL and preserves editor drafts", async ({
       }
     });
     await page.getByRole("button", { name: "Jobs", exact: true }).click();
-    const queries = page.getByRole("main", { name: "Persistent jobs" });
-    const query = queries.getByRole("article", {
+    const jobs = page.getByRole("main", { name: "Persistent jobs" });
+    const job = jobs.getByRole("article", {
       name: "entrance_people_stream",
     });
-    await expect(query.getByText("RUNNING", { exact: true })).toBeVisible();
-    await expect(queries.getByText("1 running · 1 total")).toBeVisible();
+    await expect(job.getByText("RUNNING", { exact: true })).toBeVisible();
+    await expect(jobs.getByText("1 running · 1 total")).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("jobs-desktop.png"),
       animations: "disabled",
     });
 
-    await queries.getByRole("searchbox").fill("missing");
-    await expect(queries.getByText("No matching jobs")).toBeVisible();
-    await queries.getByRole("button", { name: "Clear search" }).click();
-    await query.getByRole("button", { name: "Show SQL" }).click();
+    await jobs.getByRole("searchbox").fill("missing");
+    await expect(jobs.getByText("No matching jobs")).toBeVisible();
+    await jobs.getByRole("button", { name: "Clear search" }).click();
+    await job.getByRole("button", { name: "Show SQL" }).click();
     const dialog = page.getByRole("dialog", { name: "Job SQL and details" });
     await expect(dialog.getByLabel("Job SQL")).toContainText("INSERT INTO");
     await expect(
@@ -267,24 +270,22 @@ test("manages Jobs through public SQL and preserves editor drafts", async ({
     await expect(editor).toHaveText("SELECT 42 AS original_draft;");
     await page.getByRole("button", { name: "Jobs", exact: true }).click();
     await expect(
-      query.getByRole("button", { name: "Stop", exact: true }),
+      job.getByRole("button", { name: "Stop", exact: true }),
     ).toBeEnabled();
-    await query.getByRole("button", { name: "Stop", exact: true }).click();
-    await expect(query.getByText("STOPPED", { exact: true })).toBeVisible();
+    await job.getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(job.getByText("STOPPED", { exact: true })).toBeVisible();
     await expect(
-      query.getByRole("button", { name: "Stop", exact: true }),
+      job.getByRole("button", { name: "Stop", exact: true }),
     ).toBeDisabled();
-    expect(requests.some((sql) => /^STOP QUERY '/.test(sql))).toBe(true);
+    expect(requests.some((sql) => /^STOP JOB '/.test(sql))).toBe(true);
     expect(
-      requests.every((sql) =>
-        /^(SHOW JOBS|DESCRIBE QUERY|STOP QUERY)/.test(sql),
-      ),
+      requests.every((sql) => /^(SHOW JOBS|DESCRIBE JOB|STOP JOB)/.test(sql)),
     ).toBe(true);
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(query).toBeVisible();
+    await expect(job).toBeVisible();
     expect(
-      await queries.evaluate(
+      await jobs.evaluate(
         (element) => element.scrollWidth <= element.clientWidth,
       ),
     ).toBe(true);
@@ -296,33 +297,27 @@ test("manages Jobs through public SQL and preserves editor drafts", async ({
     await expect(editor).toBeVisible();
     await page.getByRole("button", { name: "Open navigation" }).click();
     await page.getByRole("button", { name: "Jobs", exact: true }).click();
-    await expect(query.getByText("STOPPED", { exact: true })).toBeVisible();
+    await expect(job.getByText("STOPPED", { exact: true })).toBeVisible();
   } finally {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve) => source.close(() => resolve()));
   }
 });
 
-test("reconnects after an expired Query inspection Session", async ({
-  page,
-}) => {
+test("reconnects after an expired Job inspection Session", async ({ page }) => {
   test.setTimeout(40_000);
   await connect(page);
   await page.waitForTimeout(11_000);
   await page.getByRole("button", { name: "Jobs", exact: true }).click();
-  const queries = page.getByRole("main", { name: "Persistent jobs" });
-  await expect(queries.getByText("Workbench is disconnected")).toBeVisible();
-  await expect(
-    queries.getByText("Connect to view persistent jobs"),
-  ).toBeVisible();
+  const jobs = page.getByRole("main", { name: "Persistent jobs" });
+  await expect(jobs.getByText("Workbench is disconnected")).toBeVisible();
+  await expect(jobs.getByText("Connect to view persistent jobs")).toBeVisible();
   await connect(page);
   await expect(
-    queries.getByRole("button", { name: "Refresh jobs" }),
+    jobs.getByRole("button", { name: "Refresh jobs" }),
   ).toBeEnabled();
-  await expect(queries.getByText("Connected: vqld (Flight SQL)")).toBeVisible();
-  await expect(
-    queries.getByText("Workbench is disconnected"),
-  ).not.toBeVisible();
+  await expect(jobs.getByText("Connected: vqld (Flight SQL)")).toBeVisible();
+  await expect(jobs.getByText("Workbench is disconnected")).not.toBeVisible();
 });
 
 async function connect(page: Page) {

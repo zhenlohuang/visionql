@@ -41,7 +41,7 @@ fn show_jobs_keeps_the_persistent_listing_schema_and_service_host_boundary() {
     assert_eq!(
         fields,
         [
-            ("query_id", DataType::Utf8, false),
+            ("job_id", DataType::Utf8, false),
             ("name", DataType::Utf8, false),
             ("state", DataType::Utf8, false),
             ("source_health", DataType::Utf8, true),
@@ -59,8 +59,74 @@ fn show_jobs_keeps_the_persistent_listing_schema_and_service_host_boundary() {
     assert_eq!(error.code, ErrorCode::InvalidArgument);
     assert_eq!(
         error.message,
-        "persistent Query statements require the vqld service host"
+        "persistent Job statements require the vqld service host"
     );
+}
+
+#[test]
+fn job_lifecycle_preparation_uses_job_identity_and_bounded_control_results() {
+    let temp = tempdir().expect("create test directory");
+    let engine =
+        Engine::new(EngineConfig::from_home(temp.path().join("vql-home"))).expect("create engine");
+    let session = engine.session().build().expect("create session");
+    session
+        .run_script(
+            "CREATE TABLE camera USING RTSP OPTIONS (
+                url = 'rtsp://127.0.0.1:1/main', fps = 1,
+                event_time = 'capture_time', watermark = '2 seconds', transport = 'tcp'
+            );
+            CREATE TABLE sink (frame_id BIGINT) USING KAFKA OPTIONS (
+                bootstrap_servers = '127.0.0.1:1', topic = 'job-contract'
+            );",
+        )
+        .expect("declare job source and sink without starting execution");
+    for (sql, command, kind, mode) in [
+        (
+            "SUBMIT JOB people AS INSERT INTO sink SELECT frame_id FROM camera",
+            PersistentCommand::Submit {
+                name: "people".to_owned(),
+                sql: "INSERT INTO sink SELECT frame_id FROM camera".to_owned(),
+            },
+            StatementKind::PersistentSubmission,
+            QueryMode::Unbounded,
+        ),
+        (
+            "DESCRIBE JOB 'job-id'",
+            PersistentCommand::Describe {
+                job_id: "job-id".to_owned(),
+            },
+            StatementKind::Query,
+            QueryMode::Bounded,
+        ),
+        (
+            "STOP JOB 'job-id'",
+            PersistentCommand::Stop {
+                job_id: "job-id".to_owned(),
+            },
+            StatementKind::Query,
+            QueryMode::Bounded,
+        ),
+    ] {
+        let prepared = session
+            .prepare(sql, "service", BTreeMap::new())
+            .expect("prepare job lifecycle command");
+        assert_eq!(prepared.persistent_command(), Some(&command));
+        let info = prepared.statement_info();
+        assert_eq!(info.kind, kind);
+        assert_eq!(info.query_mode, mode);
+        assert_eq!(info.result_mode, ResultMode::Bounded);
+        let schema = prepared.result_schema();
+        let identity = schema.field(0);
+        assert_eq!(identity.name(), "job_id");
+        assert_eq!(identity.data_type(), &DataType::Utf8);
+        assert!(!identity.is_nullable());
+        assert!(schema.field_with_name("query_id").is_err());
+        assert_eq!(
+            session.sql(sql).expect_err("requires service host").code,
+            ErrorCode::InvalidArgument
+        );
+    }
+    assert!(engine.catalog().list_jobs().unwrap().is_empty());
 }
 
 #[test]

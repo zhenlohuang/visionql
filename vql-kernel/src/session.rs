@@ -178,8 +178,8 @@ pub struct StatementInfo {
 pub enum PersistentCommand {
     Submit { name: String, sql: String },
     Show,
-    Describe { query_id: String },
-    Stop { query_id: String },
+    Describe { job_id: String },
+    Stop { job_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -417,7 +417,7 @@ impl PreparedStatement {
             )),
             PreparedOperation::Persistent(_) => Err(VqlError::new(
                 ErrorCode::InvalidArgument,
-                "persistent Query commands must be executed by a service host",
+                "persistent Job commands must be executed by a service host",
             )),
         }
     }
@@ -1126,13 +1126,13 @@ impl Session {
                         execution_profile,
                     )
                 }
-                VqlStatement::SubmitQuery { name, sql } => {
+                VqlStatement::SubmitJob { name, sql } => {
                     let handle =
                         prepared_session.insert_into_table_with_snapshot(&sql, snapshot.clone())?;
                     if !handle.is_unbounded() {
                         return Err(VqlError::new(
                             ErrorCode::InvalidSql,
-                            "SUBMIT QUERY accepts exactly one unbounded INSERT INTO <table> SELECT ...",
+                            "SUBMIT JOB accepts exactly one unbounded INSERT INTO <table> SELECT ...",
                         ));
                     }
                     let execution_profile = ExecutionProfile::from_handle(&handle);
@@ -1149,24 +1149,24 @@ impl Session {
                     )
                 }
                 VqlStatement::ShowJobs => (
-                    query_management_info(),
+                    job_management_info(),
                     show_jobs_schema(),
                     Vec::new(),
                     PreparedOperation::Persistent(PersistentCommand::Show),
                     ExecutionProfile::default(),
                 ),
-                VqlStatement::DescribeQuery { query_id } => (
-                    query_management_info(),
-                    describe_query_schema(),
+                VqlStatement::DescribeJob { job_id } => (
+                    job_management_info(),
+                    describe_job_schema(),
                     Vec::new(),
-                    PreparedOperation::Persistent(PersistentCommand::Describe { query_id }),
+                    PreparedOperation::Persistent(PersistentCommand::Describe { job_id }),
                     ExecutionProfile::default(),
                 ),
-                VqlStatement::StopQuery { query_id } => (
-                    query_management_info(),
+                VqlStatement::StopJob { job_id } => (
+                    job_management_info(),
                     persistent_submission_schema(),
                     Vec::new(),
-                    PreparedOperation::Persistent(PersistentCommand::Stop { query_id }),
+                    PreparedOperation::Persistent(PersistentCommand::Stop { job_id }),
                     ExecutionProfile::default(),
                 ),
                 statement @ (VqlStatement::Show(_)
@@ -1275,12 +1275,12 @@ impl Session {
                 .show_create(kind, &name, version.as_deref())
                 .map(Statement::Ddl),
             VqlStatement::Describe { kind, name } => self.describe(kind, &name).map(Statement::Ddl),
-            VqlStatement::SubmitQuery { .. }
+            VqlStatement::SubmitJob { .. }
             | VqlStatement::ShowJobs
-            | VqlStatement::DescribeQuery { .. }
-            | VqlStatement::StopQuery { .. } => Err(VqlError::new(
+            | VqlStatement::DescribeJob { .. }
+            | VqlStatement::StopJob { .. } => Err(VqlError::new(
                 ErrorCode::InvalidArgument,
-                "persistent Query statements require the vqld service host",
+                "persistent Job statements require the vqld service host",
             )),
             VqlStatement::Query { sql }
                 if sql.trim_start().to_ascii_uppercase().starts_with("INSERT") =>
@@ -3070,7 +3070,7 @@ fn statement_schema_with_metadata(schema: &SchemaRef, info: StatementInfo) -> Sc
     Arc::new(Schema::new_with_metadata(schema.fields().clone(), metadata))
 }
 
-fn query_management_info() -> StatementInfo {
+fn job_management_info() -> StatementInfo {
     StatementInfo {
         kind: StatementKind::Query,
         query_mode: QueryMode::Bounded,
@@ -3173,7 +3173,7 @@ fn describe_callable_schema() -> SchemaRef {
 
 fn persistent_submission_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("query_id", DataType::Utf8, false),
+        Field::new("job_id", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("state", DataType::Utf8, false),
     ]))
@@ -3189,7 +3189,7 @@ fn timestamp_field(name: &str, nullable: bool) -> Field {
 
 fn show_jobs_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("query_id", DataType::Utf8, false),
+        Field::new("job_id", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("state", DataType::Utf8, false),
         Field::new("source_health", DataType::Utf8, true),
@@ -3202,9 +3202,9 @@ fn show_jobs_schema() -> SchemaRef {
     ]))
 }
 
-fn describe_query_schema() -> SchemaRef {
+fn describe_job_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("query_id", DataType::Utf8, false),
+        Field::new("job_id", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("state", DataType::Utf8, false),
         Field::new("sql_redacted", DataType::Utf8, false),

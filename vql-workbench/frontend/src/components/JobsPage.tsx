@@ -13,21 +13,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { asProblem } from "../lib/api";
 import { cn } from "../lib/cn";
 import {
-  canStopQuery,
-  filterQueries,
-  formatQueryTime,
-  queryStatement,
-  readQueries,
-  readQueryDetails,
-  type PersistentQuery,
-  type QueryDetails,
-} from "../lib/queries";
+  canStopJob,
+  filterJobs,
+  formatJobTime,
+  jobStatement,
+  readJobs,
+  readJobDetails,
+  type PersistentJob,
+  type JobDetails,
+} from "../lib/jobs";
 import type { QueryResult, WorkbenchProblem } from "../lib/types";
 import { ProblemPanel } from "./ProblemPanel";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent } from "./ui/dialog";
 
-export function QueriesPage({
+export function JobsPage({
   connected,
   active = true,
   connectionProblem,
@@ -44,13 +44,13 @@ export function QueriesPage({
   onLoadSql: (sql: string, name: string) => void;
   busy?: boolean;
 }) {
-  const [queries, setQueries] = useState<PersistentQuery[] | null>(null);
+  const [jobs, setJobs] = useState<PersistentJob[] | null>(null);
   const [search, setSearch] = useState("");
   const [problem, setProblem] = useState<WorkbenchProblem | null>(null);
   const [operating, setOperating] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
-  const [selected, setSelected] = useState<PersistentQuery | null>(null);
-  const [details, setDetails] = useState<QueryDetails | null>(null);
+  const [selected, setSelected] = useState<PersistentJob | null>(null);
+  const [details, setDetails] = useState<JobDetails | null>(null);
   const [detailProblem, setDetailProblem] = useState<WorkbenchProblem | null>(
     null,
   );
@@ -60,12 +60,11 @@ export function QueriesPage({
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const searchRef = useRef<HTMLInputElement>(null);
-  const visibleQueries = useMemo(
-    () => filterQueries(queries ?? [], search),
-    [queries, search],
+  const visibleJobs = useMemo(
+    () => filterJobs(jobs ?? [], search),
+    [jobs, search],
   );
-  const running =
-    queries?.filter((query) => query.state === "RUNNING").length ?? 0;
+  const running = jobs?.filter((job) => job.state === "RUNNING").length ?? 0;
 
   const operate = useCallback(
     (task: (signal: AbortSignal) => Promise<void>, inDrawer = false) => {
@@ -100,7 +99,7 @@ export function QueriesPage({
     async (signal: AbortSignal) => {
       const result = await request("SHOW JOBS;", signal);
       signal.throwIfAborted();
-      setQueries(readQueries(result));
+      setJobs(readJobs(result));
       setUpdatedAt(Date.now());
     },
     [request],
@@ -108,7 +107,7 @@ export function QueriesPage({
 
   useEffect(() => {
     if (!connected) {
-      setQueries(null);
+      setJobs(null);
       setSelected(null);
       setDetails(null);
       setUpdatedAt(null);
@@ -147,25 +146,22 @@ export function QueriesPage({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const showSql = (query: PersistentQuery) => {
+  const showSql = (job: PersistentJob) => {
     if (controller.current) return;
-    setSelected(query);
+    setSelected(job);
     setDetails(null);
     setCopied(false);
     void operate(async (signal) => {
-      const result = await request(
-        queryStatement("DESCRIBE", query.queryId),
-        signal,
-      );
+      const result = await request(jobStatement("DESCRIBE", job.jobId), signal);
       signal.throwIfAborted();
-      setDetails(readQueryDetails(result));
+      setDetails(readJobDetails(result));
     }, true);
   };
 
-  const stopQuery = (query: PersistentQuery) => {
-    if (!canStopQuery(query.state)) return;
+  const stopJob = (job: PersistentJob) => {
+    if (!canStopJob(job.state)) return;
     void operate(async (signal) => {
-      await request(queryStatement("STOP", query.queryId), signal);
+      await request(jobStatement("STOP", job.jobId), signal);
       await refresh(signal);
     });
   };
@@ -206,7 +202,7 @@ export function QueriesPage({
               </p>
             </div>
             <div className="flex items-center gap-2">
-              {queries ? (
+              {jobs ? (
                 <span className="flex items-center gap-2 rounded-full border border-hairline bg-surface px-3 py-1.5 font-mono text-[11px] text-body">
                   <span
                     className={cn(
@@ -214,7 +210,7 @@ export function QueriesPage({
                       running ? "bg-success" : "bg-muted",
                     )}
                   />
-                  {running} running · {queries.length} total
+                  {running} running · {jobs.length} total
                 </span>
               ) : null}
               <Button
@@ -263,7 +259,7 @@ export function QueriesPage({
           >
             <Button onClick={onConnect}>Open Settings</Button>
           </EmptyState>
-        ) : queries == null && !problem ? (
+        ) : jobs == null && !problem ? (
           <div
             role="status"
             className="flex items-center justify-center gap-2 py-16 text-[13px] text-muted"
@@ -271,12 +267,12 @@ export function QueriesPage({
             <LoaderCircle size={17} className="animate-spin" />
             Loading jobs…
           </div>
-        ) : queries?.length === 0 ? (
+        ) : jobs?.length === 0 ? (
           <EmptyState
             title="No registered jobs"
-            description="Submit a persistent streaming write with SUBMIT QUERY in the SQL editor."
+            description="Submit a persistent streaming write with SUBMIT JOB in the SQL editor."
           />
-        ) : queries && visibleQueries.length === 0 ? (
+        ) : jobs && visibleJobs.length === 0 ? (
           <EmptyState
             title="No matching jobs"
             description="Try another name, Job ID, or status."
@@ -285,22 +281,22 @@ export function QueriesPage({
               Clear search
             </Button>
           </EmptyState>
-        ) : queries ? (
+        ) : jobs ? (
           <div
             className="overflow-hidden rounded-lg border border-hairline bg-surface"
             aria-busy={operating}
           >
-            {visibleQueries.map((query) => (
+            {visibleJobs.map((job) => (
               <article
-                key={query.queryId}
-                aria-label={query.name}
+                key={job.jobId}
+                aria-label={job.name}
                 className="row-enter flex flex-col justify-between gap-3 border-b border-hairline p-4 transition-colors last:border-0 hover:bg-canvas-soft lg:flex-row lg:items-center"
               >
                 <div className="flex min-w-0 items-start gap-3.5">
                   <span
                     className={cn(
                       "mt-2 size-2 shrink-0 rounded-full",
-                      stateColor(query.state),
+                      stateColor(job.state),
                     )}
                     aria-hidden="true"
                   />
@@ -309,33 +305,33 @@ export function QueriesPage({
                       <button
                         className="break-all text-left font-mono text-[14px] font-semibold transition-colors hover:text-accent disabled:pointer-events-none"
                         disabled={operating || busy}
-                        onClick={() => showSql(query)}
-                        aria-label={`Inspect ${query.name}`}
+                        onClick={() => showSql(job)}
+                        aria-label={`Inspect ${job.name}`}
                       >
-                        {query.name}
+                        {job.name}
                       </button>
                       <span className="break-all font-mono text-[11px] text-muted">
-                        #{query.queryId}
+                        #{job.jobId}
                       </span>
-                      <StateBadge state={query.state} />
+                      <StateBadge state={job.state} />
                     </div>
                     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] leading-5 text-muted">
-                      <span title={formatQueryTime(query.startedAt)}>
-                        {query.startedAt == null
+                      <span title={formatJobTime(job.startedAt)}>
+                        {job.startedAt == null
                           ? "Not started"
-                          : `Started ${formatQueryTime(query.startedAt)}`}
+                          : `Started ${formatJobTime(job.startedAt)}`}
                       </span>
                       <span className="text-body">
-                        Source: {query.sourceHealth ?? "—"}
+                        Source: {job.sourceHealth ?? "—"}
                       </span>
-                      <span>Restart gaps: {query.restartGapCount ?? "—"}</span>
+                      <span>Restart gaps: {job.restartGapCount ?? "—"}</span>
                       <span>
-                        Last event: {formatQueryTime(query.lastEventTime)}
+                        Last event: {formatJobTime(job.lastEventTime)}
                       </span>
                     </div>
-                    {query.errorCode || query.errorMessage ? (
+                    {job.errorCode || job.errorMessage ? (
                       <p className="mt-2 break-words font-mono text-[11px] leading-5 text-danger">
-                        {[query.errorCode, query.errorMessage]
+                        {[job.errorCode, job.errorMessage]
                           .filter(Boolean)
                           .join(" · ")}
                       </p>
@@ -347,7 +343,7 @@ export function QueriesPage({
                     size="sm"
                     className="font-mono text-[11px] shadow-none"
                     disabled={operating || busy}
-                    onClick={() => showSql(query)}
+                    onClick={() => showSql(job)}
                   >
                     <Code2 size={14} />
                     Show SQL
@@ -355,8 +351,8 @@ export function QueriesPage({
                   <Button
                     size="sm"
                     className="font-mono text-[11px] text-danger shadow-none hover:border-danger/25 hover:bg-danger/5 hover:text-danger"
-                    disabled={operating || busy || !canStopQuery(query.state)}
-                    onClick={() => stopQuery(query)}
+                    disabled={operating || busy || !canStopJob(job.state)}
+                    onClick={() => stopJob(job)}
                   >
                     <Square size={12} />
                     Stop
@@ -368,13 +364,13 @@ export function QueriesPage({
         ) : null}
         <footer className="flex flex-wrap items-center justify-between gap-3 px-1 font-mono text-[11px] text-muted">
           <span role="status">
-            {queries
-              ? `Showing ${visibleQueries.length} of ${queries.length} registered jobs`
+            {jobs
+              ? `Showing ${visibleJobs.length} of ${jobs.length} registered jobs`
               : "Registered jobs"}
           </span>
           <div className="flex flex-wrap items-center gap-4">
             {updatedAt ? (
-              <span title={formatQueryTime(updatedAt)}>
+              <span title={formatJobTime(updatedAt)}>
                 {problem ? "Last successful refresh" : "Updated"}{" "}
                 {new Date(updatedAt).toLocaleTimeString()}
               </span>
@@ -411,7 +407,7 @@ export function QueriesPage({
               {selected?.name}
             </h2>
             <p className="mt-1 break-all font-mono text-[11px] text-muted">
-              {selected?.queryId}
+              {selected?.jobId}
             </p>
           </header>
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
@@ -444,17 +440,17 @@ export function QueriesPage({
                 </section>
                 <dl className="divide-y divide-hairline font-mono text-[11px]">
                   {[
-                    ["Created", formatQueryTime(details.createdAt)],
-                    ["Started", formatQueryTime(details.startedAt)],
-                    ["Updated", formatQueryTime(details.updatedAt)],
-                    ["Last restart", formatQueryTime(details.lastRestartAt)],
+                    ["Created", formatJobTime(details.createdAt)],
+                    ["Started", formatJobTime(details.startedAt)],
+                    ["Updated", formatJobTime(details.updatedAt)],
+                    ["Last restart", formatJobTime(details.lastRestartAt)],
                     [
                       "Restart gap started",
-                      formatQueryTime(details.restartGapStartedAt),
+                      formatJobTime(details.restartGapStartedAt),
                     ],
                     [
                       "Restart gap ended",
-                      formatQueryTime(details.restartGapEndedAt),
+                      formatJobTime(details.restartGapEndedAt),
                     ],
                     [
                       "Window state reset",

@@ -57,7 +57,7 @@ import type {
 } from "./lib/types";
 import { HistoryDrawer } from "./components/HistoryDrawer";
 import { Logo } from "./components/Logo";
-import { QueriesPage } from "./components/QueriesPage";
+import { JobsPage } from "./components/JobsPage";
 import { ResultPane } from "./components/ResultPane";
 import { RenameDraftDialog } from "./components/RenameDraftDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -74,7 +74,7 @@ import { CatalogWorkspace } from "./components/CatalogWorkspace";
 import { CatalogTree } from "./components/CatalogTree";
 import { useCatalogNavigation } from "./lib/useCatalogNavigation";
 
-type WorkspacePage = "editor" | "queries" | CatalogSection;
+type WorkspacePage = "editor" | "jobs" | CatalogSection;
 
 const EMPTY_OVERLAY: OverlayConfig = {
   imageColumn: null,
@@ -592,12 +592,10 @@ export default function App() {
               loading={catalogNavigation.loading}
               busy={busy}
               problem={catalogNavigation.problem}
-              activeSection={
-                page === "editor" || page === "queries" ? null : page
-              }
+              activeSection={page === "editor" || page === "jobs" ? null : page}
               activeNamespace={catalogNamespace}
               selectedId={
-                page === "editor" || page === "queries"
+                page === "editor" || page === "jobs"
                   ? null
                   : (catalogSelection?.id ?? null)
               }
@@ -637,8 +635,8 @@ export default function App() {
               <span className="sr-only">VisionQL documentation</span>
             </a>
           </header>
-          {page === "queries" ? (
-            <QueriesPage
+          {page === "jobs" ? (
+            <JobsPage
               key={sessionVersion}
               connected={connected}
               active={!settingsOpen && !historyOpen && !catalogNavigationBusy}
@@ -652,7 +650,7 @@ export default function App() {
               }}
             />
           ) : null}
-          {page !== "editor" && page !== "queries" ? (
+          {page !== "editor" && page !== "jobs" ? (
             <CatalogWorkspace
               key={`${sessionVersion}:${page}`}
               section={page}
@@ -873,9 +871,9 @@ function Sidebar({
             <NavItem
               icon={<FileClock size={17} />}
               label="Jobs"
-              active={page === "queries"}
-              disabled={busy && page !== "queries"}
-              onClick={() => onNavigate("queries")}
+              active={page === "jobs"}
+              disabled={busy && page !== "jobs"}
+              onClick={() => onNavigate("jobs")}
             />
           </NavGroup>
           {catalogTree}

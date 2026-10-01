@@ -35,7 +35,7 @@ import { selectedOrCurrentStatement, type EditorSlice } from "../lib/sql";
 
 const visionqlDialect = SQLDialect.define({
   ...PostgreSQL.spec,
-  keywords: `${PostgreSQL.spec.keywords} model version default_version location options object_detection onnx_runtime images video rtsp kafka python tblproperties`,
+  keywords: `${PostgreSQL.spec.keywords} model version default_version location options object_detection onnx_runtime images video rtsp kafka python tblproperties submit stop job jobs`,
   types: `${PostgreSQL.spec.types} image box2d vector`,
 });
 const sqlHighlightStyle = HighlightStyle.define([

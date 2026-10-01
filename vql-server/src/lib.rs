@@ -18,7 +18,7 @@ use tracing_subscriber::EnvFilter;
 use vql_kernel::{Engine, EngineConfig};
 
 use config::ServiceConfig;
-use controller::QueryController;
+use controller::JobController;
 use flight::VqlFlightSqlService;
 use health::HealthState;
 use instance_lock::InstanceLock;
@@ -33,7 +33,7 @@ pub async fn run(config: ServiceConfig) -> Result<(), Box<dyn Error + Send + Syn
     let _instance_lock = InstanceLock::acquire(engine_config.vql_home())?;
     let engine = Engine::new(engine_config)?;
     let config = Arc::new(config);
-    let controller = Arc::new(QueryController::new(
+    let controller = Arc::new(JobController::new(
         engine.clone(),
         config.terminal_history_count,
         config.terminal_history_days,
@@ -69,7 +69,7 @@ pub async fn run(config: ServiceConfig) -> Result<(), Box<dyn Error + Send + Syn
             tokio::select! {
                 _ = interval.tick() => {
                     if let Err(error) = maintenance_controller.prune_history() {
-                        tracing::warn!(error = %error, "failed to prune terminal Query history");
+                        tracing::warn!(error = %error, "failed to prune terminal Job history");
                     }
                 }
                 changed = maintenance_shutdown.changed() => {

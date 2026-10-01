@@ -12,10 +12,10 @@ import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { QueryResult, ResultValue } from "../lib/types";
-import { QueriesPage } from "./QueriesPage";
+import { JobsPage } from "./JobsPage";
 
 const row = {
-  query_id: "query'1",
+  job_id: "job'1",
   name: "entrance_people_stream",
   state: "RUNNING",
   source_health: "reconnecting",
@@ -31,10 +31,10 @@ const result = (...rows: Record<string, ResultValue>[]): QueryResult => ({
 });
 const list = result(
   row,
-  { ...row, query_id: "query-2", name: "perimeter_scan", state: "STOPPED" },
+  { ...row, job_id: "job-2", name: "perimeter_scan", state: "STOPPED" },
   {
     ...row,
-    query_id: "query-3",
+    job_id: "job-3",
     name: "failed_write",
     state: "FAILED",
     error_code: "VQL-57001",
@@ -67,13 +67,13 @@ function mount(request = vi.fn().mockResolvedValue(list), connected = true) {
   };
   const view = render(
     <StrictMode>
-      <QueriesPage {...props} />
+      <JobsPage {...props} />
     </StrictMode>,
   );
   return { ...view, request, onLoadSql, onConnect, props };
 }
 
-describe("QueriesPage", () => {
+describe("JobsPage", () => {
   it("loads in StrictMode, searches, shows real fields, and disables terminal Stop actions", async () => {
     const { request } = mount();
     const article = await screen.findByRole("article", { name: row.name });
@@ -119,7 +119,7 @@ describe("QueriesPage", () => {
     expect(await screen.findByLabelText("Job SQL")).toHaveTextContent(
       "label = '?'",
     );
-    expect(request.mock.calls[1][0]).toBe("DESCRIBE QUERY 'query''1';");
+    expect(request.mock.calls[1][0]).toBe("DESCRIBE JOB 'job''1';");
     await userEvent.click(
       screen.getByRole("button", { name: "Load SQL as new draft" }),
     );
@@ -148,7 +148,7 @@ describe("QueriesPage", () => {
     await userEvent.click(stop);
     expect(stop).toBeDisabled();
     expect(screen.getByRole("button", { name: "Refresh jobs" })).toBeDisabled();
-    expect(request.mock.calls[1][0]).toBe("STOP QUERY 'query''1';");
+    expect(request.mock.calls[1][0]).toBe("STOP JOB 'job''1';");
     expect(request).toHaveBeenCalledTimes(2);
     await act(async () => resolveStop(result({ ...row, state: "STOPPED" })));
     await waitFor(() =>
@@ -162,9 +162,9 @@ describe("QueriesPage", () => {
     const request = vi.fn().mockResolvedValueOnce(list).mockRejectedValueOnce({
       source: "vql",
       title: "VisionQL statement failed",
-      message: "Query not found",
-      code: "VQL-42004",
-      symbol: "QUERY_NOT_FOUND",
+      message: "Job not found",
+      code: "VQL-02001",
+      symbol: "NOT_FOUND",
     });
     mount(request);
     const article = await screen.findByRole("article", { name: row.name });
@@ -172,7 +172,7 @@ describe("QueriesPage", () => {
       within(article).getByRole("button", { name: "Stop" }),
     );
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText("VQL-42004")).toBeVisible();
+    expect(within(alert).getByText("VQL-02001")).toBeVisible();
     expect(within(article).getByText("RUNNING")).toBeVisible();
     expect(request).toHaveBeenCalledTimes(2);
   });
@@ -188,7 +188,7 @@ describe("QueriesPage", () => {
       screen.getByRole("button", { name: "Open Settings" }),
     );
     expect(onConnect).toHaveBeenCalledOnce();
-    rerender(<QueriesPage {...props} connected />);
+    rerender(<JobsPage {...props} connected />);
     expect(await screen.findByText("No registered jobs")).toBeVisible();
     request.mockResolvedValueOnce(list);
     await userEvent.click(screen.getByRole("button", { name: "Refresh jobs" }));
@@ -215,7 +215,7 @@ describe("QueriesPage", () => {
     });
     expect(request).toHaveBeenCalledTimes(2);
     visibility.mockReturnValue("visible");
-    rerender(<QueriesPage {...props} active={false} />);
+    rerender(<JobsPage {...props} active={false} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
@@ -223,7 +223,7 @@ describe("QueriesPage", () => {
     request.mockImplementationOnce(
       () => new Promise<QueryResult>(() => undefined),
     );
-    rerender(<QueriesPage {...props} />);
+    rerender(<JobsPage {...props} />);
     await act(async () => undefined);
     const signal = request.mock.calls[2][1] as AbortSignal;
     unmount();

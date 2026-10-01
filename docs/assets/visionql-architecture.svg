@@ -64,7 +64,7 @@
     <rect x="450" y="260" width="300" height="100" rx="7" class="runtime"/>
     <text x="600" y="293" class="box-title">vqld</text>
     <text x="600" y="316" class="box-subtitle">vql-server</text>
-    <text x="600" y="338" class="box-detail">Flight SQL • Sessions • persistent Query lifecycle</text>
+    <text x="600" y="338" class="box-detail">Flight SQL • Sessions • persistent Job lifecycle</text>
   </g>
 
   <g>
@@ -95,7 +95,7 @@
     <rect x="845" y="400" width="300" height="100" rx="7" class="component-bg"/>
     <rect x="845" y="400" width="300" height="100" rx="7" class="state"/>
     <text x="995" y="431" class="box-title">vql-catalog</text>
-    <text x="995" y="454" class="box-subtitle">definitions • snapshots • Query status</text>
+    <text x="995" y="454" class="box-subtitle">definitions • snapshots • Job status</text>
     <text x="995" y="478" class="box-detail">SQLite • $VQL_HOME/catalog/vql.db</text>
   </g>
 
@@ -103,7 +103,7 @@
   <text x="360" y="165" class="edge-label">remote</text>
   <text x="389" y="310" class="edge-label">Flight SQL</text>
   <text x="797" y="275" class="edge-label">host API</text>
-  <text x="730" y="377" class="edge-label">persistent Query control</text>
+  <text x="730" y="377" class="edge-label">persistent Job control</text>
   <text x="1090" y="378" class="edge-label">definitions / snapshots</text>
   <text x="560" y="456" class="edge-label">PyO3 embedded host</text>
 

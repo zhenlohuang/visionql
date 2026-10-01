@@ -1,18 +1,18 @@
 # VisionQL Workbench Design
 
-Workbench is the visual SQL client for VisionQL. It shortens the loop between writing a bounded query and understanding image-based results without creating a second engine or control-plane API. Release scope and sequencing are maintained in the [Roadmap](../../ROADMAP.md).
+Workbench is the visual SQL client for VisionQL. It combines SQL authoring, Catalog and persistent Job management, and multimodal result inspection without creating a second engine or control-plane API. Release scope and sequencing are maintained in the [Roadmap](../../ROADMAP.md).
 
 ## Purpose
 
-Generic SQL clients can execute VisionQL SQL but do not naturally render `IMAGE`, `BOX2D`, or arrays of detections. Workbench centers on one visual-query workflow:
+Generic SQL clients can execute VisionQL SQL but do not naturally render `IMAGE`, `BOX2D`, or arrays of detections. Workbench centers on one connected workspace:
 
-> A data or ML engineer writes one bounded visual query and inspects image thumbnails with detection boxes in a browser.
+> A data or ML engineer discovers and manages SQL objects, writes batch or streaming queries, inspects image thumbnails with detection boxes, and manages persistent Jobs in a browser.
 
 ## Architecture Constraints
 
 Workbench is an independent client. It uses public Arrow Flight SQL, SQL, and structured errors. It never reads SQLite files, imports engine crates, or requires a Workbench-only `vqld` RPC.
 
-The reference implementation includes a small Workbench backend because the selected browser stack does not implement Flight SQL directly. The backend is a transport bridge: it owns only transport conversion, a short-lived browser Session, cancellation propagation, and bounded in-memory thumbnails. It stores no Catalog objects, Query definitions, permissions, or business data.
+The reference implementation includes a small Workbench backend because the selected browser stack does not implement Flight SQL directly. The backend is a transport bridge: it owns only transport conversion, a short-lived browser Session, cancellation propagation, and bounded in-memory thumbnails. It stores no Catalog objects, Job definitions, permissions, or business data.
 
 The backend must not:
 
@@ -22,31 +22,34 @@ The backend must not:
 - cache credentials or original media in browser storage;
 - keep an attached query alive after its browser result stream disappears.
 
-## Reference UI Mapping
+## Workspace Layout
 
-The Workbench screen follows the reference prototype's three-region structure:
+The Workbench screen provides:
 
 1. a connection strip showing the configured `vqld` endpoint and current Session state;
-2. one SQL editor with Run and Cancel actions;
-3. one result region that switches between an Arrow-backed table, an empty state, progress, and a structured error.
+2. a sidebar with Workspace navigation and a namespace-aware Catalog tree;
+3. a main workspace with local SQL draft tabs, read-only object DDL, or the Jobs page;
+4. an editor result region with typed table and JSON views, execution status, errors, and row inspection.
+
+Draft tabs share one execution slot. The editor supports SQL highlighting and formatting, full-buffer or selected/current-statement execution, public `EXPLAIN`, and exact active-execution cancellation. Bounded results accumulate to completion; explicit attached-stream execution retains the latest 500 rows. History keeps the latest 500 local execution records with load, rerun, copy, edit, and clear actions. It stores SQL and execution metadata, while results, media, credentials, and persistent Job state remain outside browser history.
 
 The result table exposes a transient Overlay Config that maps one `IMAGE` column to one `BOX2D` column and optional label and confidence columns. This configuration changes presentation only, remains in page memory, and is cleared with the Session.
 
 SQL query files are local browser drafts. A new file uses the first available name in `Untitle.sql`, `Untitle1.sql`, `Untitle2.sql`, and so on. A tab's rename button or a double-click opens the file-name dialog. Renaming requires a non-empty name unique among open drafts and adds `.sql` when omitted; it preserves the draft identity, SQL, active selection, results, and execution history. Draft names and SQL persist in browser storage. Existing saved names are retained on load.
 
-Workspace groups SQL editor, History, and Jobs. Workspace → Jobs follows the [jobs management prototype](../prototype/jobs_management/code.html): a searchable list with status, Show SQL, and Stop actions. It uses the existing browser Session and public SQL execution transport.
+Workspace groups SQL editor, History, and Jobs. Workspace → Jobs provides a searchable list with status, Show SQL, and Stop actions. It uses the existing browser Session and public SQL execution transport.
 
 ## Jobs Management
 
-The SQL editor submits persistent continuous Table writes with `SUBMIT QUERY`. The Jobs page represents the service's persistent Queries, reads `SHOW JOBS`, and selects returned Arrow fields by name. It filters names, Query IDs, state strings, and source health locally, preserves unknown state/health strings, and shows the actual `started_at`, `last_event_time`, `restart_gap_count`, `error_code`, and `error_message` values. Missing inspection values appear as unavailable. Prototype sequence numbers, watermark lag, committed-row counts, and checkpoint claims are not supported by the public Query schema.
+The SQL editor submits persistent continuous Table writes with `SUBMIT JOB`. The Jobs page represents the service's persistent Jobs, reads `SHOW JOBS`, and selects returned Arrow fields by name. It filters names, Job IDs, state strings, and source health locally, preserves unknown state/health strings, and shows the actual `started_at`, `last_event_time`, `restart_gap_count`, `error_code`, and `error_message` values. Missing inspection values appear as unavailable. Prototype sequence numbers, watermark lag, committed-row counts, and checkpoint claims are not supported by the public Job schema.
 
-The visible page refreshes every five seconds and offers manual refresh. It pauses automatic refresh while Settings, History, or a Query definition is open. Every management statement consumes its bounded Arrow result and checks terminal execution status before releasing the Session's shared execution slot. Navigation, reconnect, and editor execution are disabled during a management operation; page cleanup cancels only that transient inspection execution by its exact `execution_id`.
+The visible page refreshes every five seconds and offers manual refresh. It pauses automatic refresh while Settings, History, or a Job definition is open. Every management statement consumes its bounded Arrow result and checks terminal execution status before releasing the Session's shared execution slot. Navigation, reconnect, and editor execution are disabled during a management operation; page cleanup cancels only that transient inspection execution by its exact `execution_id`.
 
-Show SQL sends `DESCRIBE QUERY '<query_id>'` and opens a drawer with the server's immutable `sql_redacted` definition, lifecycle timestamps, restart-gap boundaries, window-state reset flag, and structured error fields. Copy SQL and Load SQL as new draft preserve the redaction, and the drawer tells the user to replace redacted literals before resubmission. Loading never executes SQL or edits the registered definition.
+Show SQL sends `DESCRIBE JOB '<job_id>'` and opens a drawer with the server's immutable `sql_redacted` definition, lifecycle timestamps, restart-gap boundaries, window-state reset flag, and structured error fields. Copy SQL and Load SQL as new draft preserve the redaction, and the drawer tells the user to replace redacted literals before resubmission. Loading never executes SQL or edits the registered definition.
 
-Stop sends `STOP QUERY '<query_id>'` only for the currently supported non-terminal `STARTING` and `RUNNING` states, then reloads `SHOW JOBS`. Terminal and unknown states disable the action. Query IDs are SQL string literals with escaped quotes; display names are never mutation identities. A failed operation preserves its structured problem and the last successfully loaded list. Session expiry clears the management data and prompts reconnection; reconnecting establishes a fresh view.
+Stop sends `STOP JOB '<job_id>'` only for the currently supported non-terminal `STARTING` and `RUNNING` states, then reloads `SHOW JOBS`. Terminal and unknown states disable the action. Job IDs are SQL string literals with escaped quotes; display names are never mutation identities. A failed operation preserves its structured problem and the last successfully loaded list. Session expiry clears the management data and prompts reconnection; reconnecting establishes a fresh view.
 
-Management reads are not local SQL-editor history entries. Persistent Query state is kept only in page memory and owned durably by `vqld` and the Catalog. Closing the browser or cancelling an inspection request does not issue `STOP QUERY`. No private lifecycle API, SQLite read, `PAUSE`, `RESUME`, or manual terminal-history deletion is introduced.
+Management reads are not local SQL-editor history entries. Persistent Job state is kept only in page memory and owned durably by `vqld` and the Catalog. Closing the browser or cancelling an inspection request does not issue `STOP JOB`. No private lifecycle API, SQLite read, `PAUSE`, `RESUME`, or manual terminal-history deletion is introduced.
 
 ## Reference Implementation
 
@@ -85,7 +88,7 @@ The frontend baseline is React + TypeScript + Vite + Tailwind CSS, with shadcn/u
 | Result model | Apache Arrow JavaScript | Incrementally reads Arrow IPC record batches from `fetch()` and preserves Arrow schema, nullability, nested values, and extension metadata |
 | Result table | TanStack Table with semantic HTML | Headless column and row state with custom cells for `IMAGE`, `BOX2D`, nested values, timestamps, and numeric values; pagination is local and never rewrites the submitted SQL |
 | Image overlay | native `<img>` plus SVG | JPEG bytes become revocable Blob URLs; an absolutely aligned SVG renders boxes and labels without rasterizing the thumbnail again |
-| Styling | Tailwind CSS through `@tailwindcss/vite` | Utility classes implement the prototype's shell, spacing, typography, status colors, and resizable editor/result split; CSS custom properties hold VisionQL-specific design tokens |
+| Styling | Tailwind CSS through `@tailwindcss/vite` | Utility classes implement the workspace shell, spacing, typography, status colors, and resizable editor/result split; CSS custom properties hold VisionQL-specific design tokens |
 | Backend | Rust, Tokio, Axum, `arrow-flight`, and Tonic | Serves the frontend and performs same-origin HTTP streaming, Flight SQL authentication and preparation, Flight-to-IPC conversion, cancellation, and structured-error preservation |
 | Client tests | Vitest and Testing Library | Covers reducers, schema-to-column mapping, scalar formatting, Blob URL cleanup, overlay geometry, and accessible interaction states |
 | End-to-end tests | Playwright | Runs the built Workbench and shipped `vqld`, then verifies the complete Workbench acceptance path through the browser |
@@ -128,7 +131,7 @@ An `IMAGE` cell renders only when the field carries `ARROW:extension:name=vql.im
 
 ## Query and Error Contract
 
-Workbench uses prepared schema metadata from `vqld` to classify statements without SQL parsing. Ordinary Run and management actions require bounded results; the attached-stream action explicitly permits an unbounded rolling preview. `SUBMIT QUERY` returns a bounded registration result while the persistent Query runs independently in `vqld`. Cancelling a browser execution targets its public `execution_id`; stopping a persistent Query uses `STOP QUERY '<query_id>'`.
+Workbench uses prepared schema metadata from `vqld` to classify statements without SQL parsing. Ordinary Run and management actions require bounded results; the attached-stream action explicitly permits an unbounded rolling preview. `SUBMIT JOB` returns a bounded registration result while the persistent Job runs independently in `vqld`. Cancelling a browser execution targets its public `execution_id`; stopping a persistent Job uses `STOP JOB '<job_id>'`.
 
 Errors use the versioned VQL representation and standard gRPC status. The UI may add local editor context, but it does not parse messages to infer codes or retryability.
 
@@ -148,7 +151,11 @@ The acceptance path demonstrates all of the following with a real visual query:
 
 Unit fixtures include scalar, null, nested, `vql.image`, and `BOX2D` Arrow columns. Browser tests cover image decode failure, multiple aspect ratios, overlay clipping, keyboard execution, cancellation during streaming, Session expiry, and Blob URL cleanup. The end-to-end acceptance test uses the built frontend, Workbench backend, and shipped `vqld`; mocks alone cannot satisfy the acceptance path.
 
-Persistent Query tests cover named-field decoding, timestamp and Int64 handling, unknown states, escaped Query IDs, searching, disabled terminal actions, serialized Stop/refresh, redacted SQL loading, structured failures, polling, and request cleanup. The browser acceptance path submits a real persistent Query through shipped `vqld`, inspects it, loads a separate draft, stops it, and rediscovers its terminal state after reload, including a narrow-screen layout check.
+Persistent Job tests cover named-field decoding, timestamp and Int64 handling, unknown states, escaped Job IDs, searching, disabled terminal actions, serialized Stop/refresh, redacted SQL loading, structured failures, polling, and request cleanup. The browser acceptance path submits a real persistent Job through shipped `vqld`, inspects it, loads a separate draft, stops it, and rediscovers its terminal state after reload, including a narrow-screen layout check.
+
+Catalog browser tests cover namespaces, object creation, formatted read-only DDL, original-SQL copying, Model versions through both object and callable entries, selection persistence, and narrow-screen version inspection. Local history and draft persistence, selected-statement execution, result JSON, and row inspection have frontend owner tests.
+
+The strict `--visual-parity` browser run uses shared real-model SQL fixtures from `vql-testing/tests/workbench/`. A current Python extension generates an oracle through `sess.sql().collect()` and exercises the notebook HTML representation; the browser runs exactly the same SQL through the built Workbench and shipped `vqld`. It compares ordered labels, confidences, and normalized boxes, then validates Arrow IMAGE/BOX2D interpretation, bounded thumbnail dimensions and aspect ratio, JSON values, and rendered overlay geometry in the table and row inspector. The original-image reference in Python and the encoded thumbnail over Flight are transport representations of the same image; encoded bytes and local buffer identities are not compared. Missing artifacts or Python dependencies fail the strict run. Commands and output locations are documented in the [Workbench README](../../vql-workbench/README.md#checks).
 
 ## References
 

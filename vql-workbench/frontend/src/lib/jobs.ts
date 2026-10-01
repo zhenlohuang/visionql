@@ -1,7 +1,7 @@
 import type { QueryResult, ResultValue } from "./types";
 
-export interface PersistentQuery {
-  queryId: string;
+export interface PersistentJob {
+  jobId: string;
   name: string;
   state: string;
   sourceHealth: string | null;
@@ -13,8 +13,8 @@ export interface PersistentQuery {
   errorMessage: string | null;
 }
 
-export interface QueryDetails {
-  queryId: string;
+export interface JobDetails {
+  jobId: string;
   name: string;
   state: string;
   sql: string;
@@ -29,13 +29,13 @@ export interface QueryDetails {
   errorMessage: string | null;
 }
 
-export function queryStatement(action: "DESCRIBE" | "STOP", queryId: string) {
-  return `${action} QUERY '${queryId.replaceAll("'", "''")}';`;
+export function jobStatement(action: "DESCRIBE" | "STOP", jobId: string) {
+  return `${action} JOB '${jobId.replaceAll("'", "''")}';`;
 }
 
-export function readQueries(result: QueryResult): PersistentQuery[] {
+export function readJobs(result: QueryResult): PersistentJob[] {
   return result.rows.map(({ values }) => ({
-    queryId: requiredString(values.query_id, "query_id"),
+    jobId: requiredString(values.job_id, "job_id"),
     name: requiredString(values.name, "name"),
     state: requiredString(values.state, "state"),
     sourceHealth: stringValue(values.source_health),
@@ -48,13 +48,13 @@ export function readQueries(result: QueryResult): PersistentQuery[] {
   }));
 }
 
-export function readQueryDetails(result: QueryResult): QueryDetails {
+export function readJobDetails(result: QueryResult): JobDetails {
   if (result.rows.length !== 1) {
-    throw new Error("DESCRIBE QUERY must return one Query definition");
+    throw new Error("DESCRIBE JOB must return one Job definition");
   }
   const { values } = result.rows[0];
   return {
-    queryId: requiredString(values.query_id, "query_id"),
+    jobId: requiredString(values.job_id, "job_id"),
     name: requiredString(values.name, "name"),
     state: requiredString(values.state, "state"),
     sql: requiredString(values.sql_redacted, "sql_redacted"),
@@ -73,27 +73,27 @@ export function readQueryDetails(result: QueryResult): QueryDetails {
   };
 }
 
-export function canStopQuery(state: string) {
+export function canStopJob(state: string) {
   return state === "STARTING" || state === "RUNNING";
 }
 
-export function filterQueries(queries: PersistentQuery[], search: string) {
+export function filterJobs(jobs: PersistentJob[], search: string) {
   const term = search.trim().toLowerCase();
-  return queries.filter((query) =>
-    [query.name, query.queryId, query.state, query.sourceHealth ?? ""].some(
-      (value) => value.toLowerCase().includes(term),
+  return jobs.filter((job) =>
+    [job.name, job.jobId, job.state, job.sourceHealth ?? ""].some((value) =>
+      value.toLowerCase().includes(term),
     ),
   );
 }
 
-export function formatQueryTime(value: number | null) {
+export function formatJobTime(value: number | null) {
   if (value == null) return "—";
   return new Date(value).toLocaleString();
 }
 
 function requiredString(value: ResultValue | undefined, field: string) {
   if (typeof value !== "string") {
-    throw new Error(`Query response is missing the '${field}' string field`);
+    throw new Error(`Job response is missing the '${field}' string field`);
   }
   return value;
 }

@@ -92,7 +92,7 @@ impl Engine {
         &self.inner.config
     }
 
-    /// Return the shared Catalog API used by service hosts for persistent Query control.
+    /// Return the shared Catalog API used by service hosts for persistent Job control.
     pub fn catalog(&self) -> Arc<CatalogStore> {
         Arc::clone(&self.inner.catalog)
     }

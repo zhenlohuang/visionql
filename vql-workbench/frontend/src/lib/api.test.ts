@@ -20,7 +20,7 @@ const status = {
 };
 function arrowResponse() {
   const ipc = tableToIPC(
-    tableFromArrays({ query_id: ["query-1"], state: ["RUNNING"] }),
+    tableFromArrays({ job_id: ["job-1"], state: ["RUNNING"] }),
     "stream",
   );
   return new Response(
@@ -41,7 +41,7 @@ describe("bounded management execution", () => {
     vi.stubGlobal("fetch", fetch);
     const result = await executeBoundedSql("SHOW JOBS;");
     expect(result.rows[0].values).toEqual({
-      query_id: "query-1",
+      job_id: "job-1",
       state: "RUNNING",
     });
     expect(fetch.mock.calls.map(([url]) => url)).toEqual([
@@ -59,9 +59,9 @@ describe("bounded management execution", () => {
     const problem = {
       source: "vql",
       title: "VisionQL statement failed",
-      code: "VQL-42004",
-      symbol: "QUERY_NOT_FOUND",
-      message: "Query not found",
+      code: "VQL-02001",
+      symbol: "NOT_FOUND",
+      message: "Job not found",
     };
     const fetch = vi
       .fn()
@@ -72,9 +72,9 @@ describe("bounded management execution", () => {
       )
       .mockResolvedValueOnce(Response.json(status));
     vi.stubGlobal("fetch", fetch);
-    await expect(
-      executeBoundedSql("DESCRIBE QUERY 'missing';"),
-    ).rejects.toEqual(problem);
+    await expect(executeBoundedSql("DESCRIBE JOB 'missing';")).rejects.toEqual(
+      problem,
+    );
     expect(fetch.mock.calls[3]).toEqual([
       "/api/executions/execution-1",
       { method: "DELETE" },

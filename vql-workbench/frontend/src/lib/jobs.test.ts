@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  canStopQuery,
-  filterQueries,
-  queryStatement,
-  readQueries,
-  readQueryDetails,
-} from "./queries";
+  canStopJob,
+  filterJobs,
+  jobStatement,
+  readJobs,
+  readJobDetails,
+} from "./jobs";
 import type { QueryResult, ResultValue } from "./types";
 
 function queryResult(...rows: Record<string, ResultValue>[]): QueryResult {
@@ -18,56 +18,54 @@ function queryResult(...rows: Record<string, ResultValue>[]): QueryResult {
   };
 }
 
-describe("persistent Query contracts", () => {
+describe("persistent Job contracts", () => {
   it("selects named fields, keeps unknown states and health, and preserves large counters", () => {
-    const [query] = readQueries(
+    const [job] = readJobs(
       queryResult({
         future_field: "ignored",
         state: "RECOVERING",
         name: "people",
-        query_id: "query-1",
+        job_id: "job-1",
         source_health: "degraded",
         started_at: 1_700_000_000_000,
         last_event_time: null,
         restart_gap_count: 9007199254740993n,
       }),
     );
-    expect(query.state).toBe("RECOVERING");
-    expect(query.sourceHealth).toBe("degraded");
-    expect(query.startedAt).toBe(1_700_000_000_000);
-    expect(query.lastEventTime).toBeNull();
-    expect(query.restartGapCount).toBe("9,007,199,254,740,993");
-    expect(canStopQuery(query.state)).toBe(false);
+    expect(job.state).toBe("RECOVERING");
+    expect(job.sourceHealth).toBe("degraded");
+    expect(job.startedAt).toBe(1_700_000_000_000);
+    expect(job.lastEventTime).toBeNull();
+    expect(job.restartGapCount).toBe("9,007,199,254,740,993");
+    expect(canStopJob(job.state)).toBe(false);
   });
 
   it("stops only supported non-terminal states and safely quotes the exact ID", () => {
-    expect(canStopQuery("STARTING")).toBe(true);
-    expect(canStopQuery("RUNNING")).toBe(true);
+    expect(canStopJob("STARTING")).toBe(true);
+    expect(canStopJob("RUNNING")).toBe(true);
     for (const state of ["STOPPED", "FAILED", "COMPLETED", "future"])
-      expect(canStopQuery(state)).toBe(false);
-    expect(queryStatement("STOP", "query'1; --")).toBe(
-      "STOP QUERY 'query''1; --';",
-    );
+      expect(canStopJob(state)).toBe(false);
+    expect(jobStatement("STOP", "job'1; --")).toBe("STOP JOB 'job''1; --';");
   });
 
   it("filters names, IDs, states, and source health without modifying SQL", () => {
-    const queries = readQueries(
+    const jobs = readJobs(
       queryResult({
-        query_id: "ABC",
+        job_id: "ABC",
         name: "People",
         state: "RUNNING",
         source_health: "reconnecting",
       }),
     );
     for (const term of ["people", " abc ", "RUNNING", "reconnecting"])
-      expect(filterQueries(queries, term)).toEqual(queries);
-    expect(filterQueries(queries, "stopped")).toEqual([]);
+      expect(filterJobs(jobs, term)).toEqual(jobs);
+    expect(filterJobs(jobs, "stopped")).toEqual([]);
   });
 
   it("preserves the redacted definition and missing inspection values", () => {
-    const details = readQueryDetails(
+    const details = readJobDetails(
       queryResult({
-        query_id: "id",
+        job_id: "id",
         name: "people",
         state: "FAILED",
         sql_redacted: "INSERT INTO sink SELECT '?'",
@@ -81,11 +79,9 @@ describe("persistent Query contracts", () => {
     expect(details.startedAt).toBeNull();
     expect(details.resetWindowState).toBe(false);
     expect(details.errorCode).toBe("VQL-57001");
-    expect(() => readQueryDetails(queryResult())).toThrow(
-      "one Query definition",
-    );
+    expect(() => readJobDetails(queryResult())).toThrow("one Job definition");
     expect(() =>
-      readQueries(queryResult({ name: "people", state: "RUNNING" })),
-    ).toThrow("query_id");
+      readJobs(queryResult({ name: "people", state: "RUNNING" })),
+    ).toThrow("job_id");
   });
 });

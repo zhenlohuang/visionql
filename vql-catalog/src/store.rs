@@ -6,10 +6,10 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 
 use crate::{
-    CatalogError, CatalogErrorCode, CatalogInfo, CreateQuery, DEFAULT_CATALOG, DEFAULT_SCHEMA,
-    DefinitionSnapshot, FunctionDef, ModelDef, ObjectKind, PersistentQuery, QueryDefinition,
-    QueryState, QueryStatus, Result, SchemaInfo, SecurableMetadata, SnapshotObject, SnapshotTable,
-    TableDef, provider_schema,
+    CatalogError, CatalogErrorCode, CatalogInfo, CreateJob, DEFAULT_CATALOG, DEFAULT_SCHEMA,
+    DefinitionSnapshot, FunctionDef, JobDefinition, JobState, JobStatus, ModelDef, ObjectKind,
+    PersistentJob, Result, SchemaInfo, SecurableMetadata, SnapshotObject, SnapshotTable, TableDef,
+    provider_schema,
 };
 
 pub trait CatalogBackend: Debug + Send + Sync {
@@ -69,16 +69,16 @@ pub trait CatalogBackend: Debug + Send + Sync {
     fn drop_object(&self, kind: ObjectKind, name: &str) -> Result<i64>;
     fn history_count(&self, kind: ObjectKind) -> Result<i64>;
 
-    fn create_query(&self, query: &CreateQuery) -> Result<PersistentQuery>;
-    fn get_query(&self, query_id: &str) -> Result<PersistentQuery>;
-    fn list_queries(&self) -> Result<Vec<PersistentQuery>>;
-    fn compare_and_swap_query_status(
+    fn create_job(&self, job: &CreateJob) -> Result<PersistentJob>;
+    fn get_job(&self, job_id: &str) -> Result<PersistentJob>;
+    fn list_jobs(&self) -> Result<Vec<PersistentJob>>;
+    fn compare_and_swap_job_status(
         &self,
-        query_id: &str,
+        job_id: &str,
         expected_status_version: i64,
-        status: &QueryStatus,
-    ) -> Result<QueryStatus>;
-    fn prune_terminal_queries(
+        status: &JobStatus,
+    ) -> Result<JobStatus>;
+    fn prune_terminal_jobs(
         &self,
         retain_count: Option<usize>,
         older_than: Option<i64>,
@@ -242,35 +242,34 @@ impl CatalogStore {
         self.backend.history_count(kind)
     }
 
-    pub fn create_query(&self, query: &CreateQuery) -> Result<PersistentQuery> {
-        self.backend.create_query(query)
+    pub fn create_job(&self, job: &CreateJob) -> Result<PersistentJob> {
+        self.backend.create_job(job)
     }
 
-    pub fn get_query(&self, query_id: &str) -> Result<PersistentQuery> {
-        self.backend.get_query(query_id)
+    pub fn get_job(&self, job_id: &str) -> Result<PersistentJob> {
+        self.backend.get_job(job_id)
     }
 
-    pub fn list_queries(&self) -> Result<Vec<PersistentQuery>> {
-        self.backend.list_queries()
+    pub fn list_jobs(&self) -> Result<Vec<PersistentJob>> {
+        self.backend.list_jobs()
     }
 
-    pub fn compare_and_swap_query_status(
+    pub fn compare_and_swap_job_status(
         &self,
-        query_id: &str,
+        job_id: &str,
         expected_status_version: i64,
-        status: &QueryStatus,
-    ) -> Result<QueryStatus> {
+        status: &JobStatus,
+    ) -> Result<JobStatus> {
         self.backend
-            .compare_and_swap_query_status(query_id, expected_status_version, status)
+            .compare_and_swap_job_status(job_id, expected_status_version, status)
     }
 
-    pub fn prune_terminal_queries(
+    pub fn prune_terminal_jobs(
         &self,
         retain_count: Option<usize>,
         older_than: Option<i64>,
     ) -> Result<usize> {
-        self.backend
-            .prune_terminal_queries(retain_count, older_than)
+        self.backend.prune_terminal_jobs(retain_count, older_than)
     }
 }
 
@@ -758,35 +757,35 @@ mod sqlite {
             SqliteCatalogBackend::history_count(self, kind)
         }
 
-        fn create_query(&self, query: &CreateQuery) -> Result<PersistentQuery> {
-            let catalog_name = normalize_name(&query.catalog_name, "catalog")?;
-            let schema_name = normalize_name(&query.schema_name, "schema")?;
-            let name = normalize_name(&query.name, "query")?;
-            if query.principal.trim().is_empty() {
+        fn create_job(&self, job: &CreateJob) -> Result<PersistentJob> {
+            let catalog_name = normalize_name(&job.catalog_name, "catalog")?;
+            let schema_name = normalize_name(&job.schema_name, "schema")?;
+            let name = normalize_name(&job.name, "job")?;
+            if job.principal.trim().is_empty() {
                 return Err(CatalogError::new(
                     CatalogErrorCode::InvalidArgument,
-                    "Query principal cannot be empty",
+                    "Job principal cannot be empty",
                 ));
             }
-            if query.normalized_sql.trim().is_empty() {
+            if job.normalized_sql.trim().is_empty() {
                 return Err(CatalogError::new(
                     CatalogErrorCode::InvalidArgument,
-                    "Query SQL cannot be empty",
+                    "Job SQL cannot be empty",
                 ));
             }
-            let mut generations = query.definition_generations.clone();
+            let mut generations = job.definition_generations.clone();
             generations.sort_unstable();
             generations.dedup();
             if generations.is_empty() {
                 return Err(CatalogError::new(
                     CatalogErrorCode::InvalidArgument,
-                    "persistent Query must pin at least one definition generation",
+                    "persistent Job must pin at least one definition generation",
                 ));
             }
 
             let now = Utc::now().timestamp_millis();
-            let query_id = uuid::Uuid::new_v4().to_string();
-            let settings = serde_json::to_string(&query.session_settings)?;
+            let job_id = uuid::Uuid::new_v4().to_string();
+            let settings = serde_json::to_string(&job.session_settings)?;
             let mut connection = self.lock()?;
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -820,83 +819,80 @@ mod sqlite {
                 }
             }
             let inserted = transaction.execute(
-                "INSERT INTO queries(
-                     query_id, catalog_name, schema_name, name, principal, normalized_sql,
+                "INSERT INTO jobs(
+                     job_id, catalog_name, schema_name, name, principal, normalized_sql,
                      sql_redacted, session_settings_json, created_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    query_id,
+                    job_id,
                     catalog_name,
                     schema_name,
                     name,
-                    query.principal.trim(),
-                    query.normalized_sql,
-                    query.sql_redacted,
+                    job.principal.trim(),
+                    job.normalized_sql,
+                    job.sql_redacted,
                     settings,
                     now
                 ],
             );
-            map_query_unique(inserted, &name)?;
+            map_job_unique(inserted, &name)?;
             for generation in &generations {
                 transaction.execute(
-                    "INSERT INTO query_dependencies(query_id, generation) VALUES (?1, ?2)",
-                    params![query_id, generation],
+                    "INSERT INTO job_dependencies(job_id, generation) VALUES (?1, ?2)",
+                    params![job_id, generation],
                 )?;
             }
-            let status = QueryStatus::starting(now);
-            insert_query_status(&transaction, &query_id, &status)?;
+            let status = JobStatus::starting(now);
+            insert_job_status(&transaction, &job_id, &status)?;
             transaction.commit()?;
             drop(connection);
-            self.get_query(&query_id)
+            self.get_job(&job_id)
         }
 
-        fn get_query(&self, query_id: &str) -> Result<PersistentQuery> {
+        fn get_job(&self, job_id: &str) -> Result<PersistentJob> {
             let connection = self.lock()?;
-            load_query(&connection, query_id)?.ok_or_else(|| not_found("query", query_id))
+            load_job(&connection, job_id)?.ok_or_else(|| not_found("job", job_id))
         }
 
-        fn list_queries(&self) -> Result<Vec<PersistentQuery>> {
+        fn list_jobs(&self) -> Result<Vec<PersistentJob>> {
             let connection = self.lock()?;
             let mut statement = connection
-                .prepare("SELECT query_id FROM queries ORDER BY created_at DESC, query_id DESC")?;
+                .prepare("SELECT job_id FROM jobs ORDER BY created_at DESC, job_id DESC")?;
             let ids = statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             ids.into_iter()
-                .map(|query_id| {
-                    load_query(&connection, &query_id)?.ok_or_else(|| {
+                .map(|job_id| {
+                    load_job(&connection, &job_id)?.ok_or_else(|| {
                         CatalogError::new(
                             CatalogErrorCode::Internal,
-                            "Query disappeared while it was being listed",
+                            "Job disappeared while it was being listed",
                         )
                     })
                 })
                 .collect()
         }
 
-        fn compare_and_swap_query_status(
+        fn compare_and_swap_job_status(
             &self,
-            query_id: &str,
+            job_id: &str,
             expected_status_version: i64,
-            status: &QueryStatus,
-        ) -> Result<QueryStatus> {
+            status: &JobStatus,
+        ) -> Result<JobStatus> {
             let mut connection = self.lock()?;
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let next_version = expected_status_version.checked_add(1).ok_or_else(|| {
-                CatalogError::new(
-                    CatalogErrorCode::Internal,
-                    "Query status version overflowed",
-                )
+                CatalogError::new(CatalogErrorCode::Internal, "Job status version overflowed")
             })?;
             let updated = transaction.execute(
-                "UPDATE query_status SET
+                "UPDATE job_status SET
                      state=?1, status_version=?2, stop_requested=?3, source_health=?4,
                      last_event_time=?5, started_at=?6, updated_at=?7, last_restart_at=?8,
                      restart_gap_count=?9, restart_gap_started_at=?10,
                      restart_gap_ended_at=?11, last_restart_reset_window_state=?12,
                      error_code=?13, error_message=?14
-                 WHERE query_id=?15 AND status_version=?16",
+                 WHERE job_id=?15 AND status_version=?16",
                 params![
                     status.state.as_str(),
                     next_version,
@@ -912,28 +908,28 @@ mod sqlite {
                     status.last_restart_reset_window_state,
                     status.error_code,
                     status.error_message,
-                    query_id,
+                    job_id,
                     expected_status_version
                 ],
             )?;
             if updated == 0 {
                 let exists = transaction.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM queries WHERE query_id=?1)",
-                    [query_id],
+                    "SELECT EXISTS(SELECT 1 FROM jobs WHERE job_id=?1)",
+                    [job_id],
                     |row| row.get::<_, bool>(0),
                 )?;
                 return Err(if exists {
                     CatalogError::new(
                         CatalogErrorCode::Conflict,
-                        format!("Query '{query_id}' status changed; retry the operation"),
+                        format!("Job '{job_id}' status changed; retry the operation"),
                     )
                 } else {
-                    not_found("query", query_id)
+                    not_found("job", job_id)
                 });
             }
             transaction.execute(
-                "UPDATE queries SET terminal=?1 WHERE query_id=?2",
-                params![status.state.is_terminal(), query_id],
+                "UPDATE jobs SET terminal=?1 WHERE job_id=?2",
+                params![status.state.is_terminal(), job_id],
             )?;
             transaction.commit()?;
             let mut persisted = status.clone();
@@ -941,7 +937,7 @@ mod sqlite {
             Ok(persisted)
         }
 
-        fn prune_terminal_queries(
+        fn prune_terminal_jobs(
             &self,
             retain_count: Option<usize>,
             older_than: Option<i64>,
@@ -953,9 +949,9 @@ mod sqlite {
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let mut statement = transaction.prepare(
-                "SELECT q.query_id, s.updated_at
-                 FROM queries q JOIN query_status s USING(query_id)
-                 WHERE q.terminal=1 ORDER BY s.updated_at DESC, q.query_id DESC",
+                "SELECT q.job_id, s.updated_at
+                 FROM jobs q JOIN job_status s USING(job_id)
+                 WHERE q.terminal=1 ORDER BY s.updated_at DESC, q.job_id DESC",
             )?;
             let terminal = statement
                 .query_map([], |row| {
@@ -970,10 +966,10 @@ mod sqlite {
                     retain_count.is_some_and(|retain| *index >= retain)
                         || older_than.is_some_and(|cutoff| *updated_at < cutoff)
                 })
-                .map(|(_, (query_id, _))| query_id)
+                .map(|(_, (job_id, _))| job_id)
                 .collect::<Vec<_>>();
-            for query_id in &ids {
-                transaction.execute("DELETE FROM queries WHERE query_id=?1", [query_id])?;
+            for job_id in &ids {
+                transaction.execute("DELETE FROM jobs WHERE job_id=?1", [job_id])?;
             }
             transaction.commit()?;
             Ok(ids.len())
@@ -1037,8 +1033,8 @@ mod sqlite {
                  FOREIGN KEY(catalog_name, schema_name) REFERENCES schemas(catalog_name, name)
                      ON UPDATE CASCADE ON DELETE CASCADE
              );
-             CREATE TABLE IF NOT EXISTS queries (
-                 query_id TEXT PRIMARY KEY,
+             CREATE TABLE IF NOT EXISTS jobs (
+                 job_id TEXT PRIMARY KEY,
                  catalog_name TEXT NOT NULL,
                  schema_name TEXT NOT NULL,
                  name TEXT NOT NULL,
@@ -1051,15 +1047,15 @@ mod sqlite {
                  FOREIGN KEY(catalog_name, schema_name) REFERENCES schemas(catalog_name, name)
                      ON UPDATE CASCADE ON DELETE RESTRICT
              );
-             CREATE UNIQUE INDEX IF NOT EXISTS queries_active_name
-                 ON queries(catalog_name, schema_name, name) WHERE terminal=0;
-             CREATE TABLE IF NOT EXISTS query_dependencies (
-                 query_id TEXT NOT NULL REFERENCES queries(query_id) ON DELETE CASCADE,
+             CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_name
+                 ON jobs(catalog_name, schema_name, name) WHERE terminal=0;
+             CREATE TABLE IF NOT EXISTS job_dependencies (
+                 job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
                  generation INTEGER NOT NULL REFERENCES object_revisions(generation) ON DELETE RESTRICT,
-                 PRIMARY KEY(query_id, generation)
+                 PRIMARY KEY(job_id, generation)
              );
-             CREATE TABLE IF NOT EXISTS query_status (
-                 query_id TEXT PRIMARY KEY REFERENCES queries(query_id) ON DELETE CASCADE,
+             CREATE TABLE IF NOT EXISTS job_status (
+                 job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
                  state TEXT NOT NULL CHECK(state IN ('STARTING', 'RUNNING', 'STOPPED', 'FAILED')),
                  status_version INTEGER NOT NULL CHECK(status_version >= 1),
                  stop_requested INTEGER NOT NULL DEFAULT 0,
@@ -1546,20 +1542,20 @@ mod sqlite {
         Ok(DefinitionSnapshot::new(tables, models, functions))
     }
 
-    fn insert_query_status(
+    fn insert_job_status(
         transaction: &Transaction<'_>,
-        query_id: &str,
-        status: &QueryStatus,
+        job_id: &str,
+        status: &JobStatus,
     ) -> Result<()> {
         transaction.execute(
-            "INSERT INTO query_status(
-                 query_id, state, status_version, stop_requested, source_health, last_event_time,
+            "INSERT INTO job_status(
+                 job_id, state, status_version, stop_requested, source_health, last_event_time,
                  started_at, updated_at, last_restart_at, restart_gap_count,
                  restart_gap_started_at, restart_gap_ended_at, last_restart_reset_window_state,
                  error_code, error_message
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
-                query_id,
+                job_id,
                 status.state.as_str(),
                 status.status_version,
                 status.stop_requested,
@@ -1579,17 +1575,17 @@ mod sqlite {
         Ok(())
     }
 
-    fn load_query(connection: &Connection, query_id: &str) -> Result<Option<PersistentQuery>> {
+    fn load_job(connection: &Connection, job_id: &str) -> Result<Option<PersistentJob>> {
         let row = connection
             .query_row(
-                "SELECT q.query_id, q.catalog_name, q.schema_name, q.name, q.principal,
+                "SELECT q.job_id, q.catalog_name, q.schema_name, q.name, q.principal,
                         q.normalized_sql, q.sql_redacted, q.session_settings_json, q.created_at,
                         s.state, s.status_version, s.stop_requested, s.source_health,
                         s.last_event_time, s.started_at, s.updated_at, s.last_restart_at,
                         s.restart_gap_count, s.restart_gap_started_at, s.restart_gap_ended_at,
                         s.last_restart_reset_window_state, s.error_code, s.error_message
-                 FROM queries q JOIN query_status s USING(query_id) WHERE q.query_id=?1",
-                [query_id],
+                 FROM jobs q JOIN job_status s USING(job_id) WHERE q.job_id=?1",
+                [job_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -1623,15 +1619,15 @@ mod sqlite {
             return Ok(None);
         };
         let mut dependencies = connection.prepare(
-            "SELECT generation FROM query_dependencies WHERE query_id=?1 ORDER BY generation",
+            "SELECT generation FROM job_dependencies WHERE job_id=?1 ORDER BY generation",
         )?;
         let generations = dependencies
-            .query_map([query_id], |row| row.get::<_, i64>(0))?
+            .query_map([job_id], |row| row.get::<_, i64>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let settings = serde_json::from_str(&row.7)?;
-        Ok(Some(PersistentQuery {
-            definition: QueryDefinition {
-                query_id: row.0,
+        Ok(Some(PersistentJob {
+            definition: JobDefinition {
+                job_id: row.0,
                 catalog_name: row.1,
                 schema_name: row.2,
                 name: row.3,
@@ -1642,8 +1638,8 @@ mod sqlite {
                 definition_generations: generations,
                 created_at: row.8,
             },
-            status: QueryStatus {
-                state: QueryState::try_from(row.9.as_str())?,
+            status: JobStatus {
+                state: JobState::try_from(row.9.as_str())?,
                 status_version: row.10,
                 stop_requested: row.11,
                 source_health: row.12,
@@ -1720,7 +1716,7 @@ mod sqlite {
         }
     }
 
-    fn map_query_unique(
+    fn map_job_unique(
         result: std::result::Result<usize, rusqlite::Error>,
         name: &str,
     ) -> Result<usize> {
@@ -1730,7 +1726,7 @@ mod sqlite {
             {
                 Err(CatalogError::new(
                     CatalogErrorCode::AlreadyExists,
-                    format!("active Query '{name}' already exists"),
+                    format!("active Job '{name}' already exists"),
                 ))
             }
             Err(error) => Err(error.into()),
@@ -2034,7 +2030,7 @@ mod sqlite {
         }
 
         #[test]
-        fn persistent_query_pins_generations_and_status_updates_use_cas() {
+        fn persistent_job_pins_generations_and_status_updates_use_cas() {
             let temp = tempdir().unwrap();
             let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
             backend.create_model(&model("detector")).unwrap();
@@ -2044,8 +2040,8 @@ mod sqlite {
                 .model("detector")
                 .unwrap()
                 .generation;
-            let query = backend
-                .create_query(&CreateQuery {
+            let job = backend
+                .create_job(&CreateJob {
                     catalog_name: DEFAULT_CATALOG.to_owned(),
                     schema_name: DEFAULT_SCHEMA.to_owned(),
                     name: "people_per_minute".to_owned(),
@@ -2058,43 +2054,48 @@ mod sqlite {
                 })
                 .unwrap();
 
-            assert_eq!(query.status.state, QueryState::Starting);
-            assert_eq!(query.definition.definition_generations, vec![generation]);
+            assert_eq!(job.status.state, JobState::Starting);
+            assert_eq!(job.definition.definition_generations, vec![generation]);
             assert!(
                 backend
                     .snapshot_at_generations(
                         DEFAULT_CATALOG,
                         DEFAULT_SCHEMA,
-                        &query.definition.definition_generations,
+                        &job.definition.definition_generations,
                     )
                     .unwrap()
                     .model("detector")
                     .is_some()
             );
 
-            let mut running = query.status.clone();
-            running.state = QueryState::Running;
+            let mut running = job.status.clone();
+            running.state = JobState::Running;
             running.started_at = Some(running.updated_at);
             let running = backend
-                .compare_and_swap_query_status(
-                    &query.definition.query_id,
-                    query.status.status_version,
+                .compare_and_swap_job_status(
+                    &job.definition.job_id,
+                    job.status.status_version,
                     &running,
                 )
                 .unwrap();
             assert_eq!(running.status_version, 2);
             let error = backend
-                .compare_and_swap_query_status(
-                    &query.definition.query_id,
-                    query.status.status_version,
+                .compare_and_swap_job_status(
+                    &job.definition.job_id,
+                    job.status.status_version,
                     &running,
                 )
                 .unwrap_err();
             assert_eq!(error.code, CatalogErrorCode::Conflict);
+            drop(backend);
+            let reopened = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
+            let persisted = reopened.get_job(&job.definition.job_id).unwrap();
+            assert_eq!(persisted.definition, job.definition);
+            assert_eq!(persisted.status, running);
         }
 
         #[test]
-        fn active_query_names_are_unique_and_terminal_history_is_prunable() {
+        fn active_job_names_are_unique_and_terminal_history_is_prunable() {
             let temp = tempdir().unwrap();
             let backend = SqliteCatalogBackend::open(&temp.path().join("catalog.db")).unwrap();
             backend.create_model(&model("detector")).unwrap();
@@ -2104,7 +2105,7 @@ mod sqlite {
                 .model("detector")
                 .unwrap()
                 .generation;
-            let create = CreateQuery {
+            let create = CreateJob {
                 catalog_name: DEFAULT_CATALOG.to_owned(),
                 schema_name: DEFAULT_SCHEMA.to_owned(),
                 name: "watch".to_owned(),
@@ -2114,24 +2115,24 @@ mod sqlite {
                 session_settings: BTreeMap::new(),
                 definition_generations: vec![generation],
             };
-            let first = backend.create_query(&create).unwrap();
+            let first = backend.create_job(&create).unwrap();
             assert_eq!(
-                backend.create_query(&create).unwrap_err().code,
+                backend.create_job(&create).unwrap_err().code,
                 CatalogErrorCode::AlreadyExists
             );
             let mut stopped = first.status.clone();
-            stopped.state = QueryState::Stopped;
+            stopped.state = JobState::Stopped;
             stopped.stop_requested = true;
             backend
-                .compare_and_swap_query_status(
-                    &first.definition.query_id,
+                .compare_and_swap_job_status(
+                    &first.definition.job_id,
                     first.status.status_version,
                     &stopped,
                 )
                 .unwrap();
-            backend.create_query(&create).unwrap();
-            assert_eq!(backend.prune_terminal_queries(Some(0), None).unwrap(), 1);
-            assert_eq!(backend.list_queries().unwrap().len(), 1);
+            backend.create_job(&create).unwrap();
+            assert_eq!(backend.prune_terminal_jobs(Some(0), None).unwrap(), 1);
+            assert_eq!(backend.list_jobs().unwrap().len(), 1);
         }
     }
 }

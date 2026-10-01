@@ -36,7 +36,7 @@ use vql_kernel::{
 };
 
 use crate::config::ServiceConfig;
-use crate::controller::QueryController;
+use crate::controller::JobController;
 use crate::image_boundary::sanitize_batch;
 
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ impl ExecutionState {
 #[derive(Debug, Clone)]
 pub struct VqlFlightSqlService {
     engine: vql_kernel::Engine,
-    controller: Arc<QueryController>,
+    controller: Arc<JobController>,
     config: Arc<ServiceConfig>,
     sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     prepared: Arc<Mutex<HashMap<String, PreparedEntry>>>,
@@ -108,7 +108,7 @@ pub struct VqlFlightSqlService {
 impl VqlFlightSqlService {
     pub fn new(
         engine: vql_kernel::Engine,
-        controller: Arc<QueryController>,
+        controller: Arc<JobController>,
         config: Arc<ServiceConfig>,
         ready: Arc<AtomicBool>,
     ) -> Self {
@@ -960,7 +960,7 @@ mod tests {
     fn expired_session_removes_prepared_and_pending_execution_state() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let controller = Arc::new(QueryController::new(engine.clone(), 100, 30));
+        let controller = Arc::new(JobController::new(engine.clone(), 100, 30));
         let config = Arc::new(ServiceConfig {
             session_idle_timeout_seconds: 1,
             ..ServiceConfig::default()
@@ -1014,7 +1014,7 @@ mod tests {
     fn active_attached_execution_keeps_its_session_alive() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let controller = Arc::new(QueryController::new(engine.clone(), 100, 30));
+        let controller = Arc::new(JobController::new(engine.clone(), 100, 30));
         let config = Arc::new(ServiceConfig {
             session_idle_timeout_seconds: 1,
             ..ServiceConfig::default()
@@ -1064,7 +1064,7 @@ mod tests {
     fn cancellation_is_recorded_while_execution_is_starting() {
         let temp = tempdir().unwrap();
         let engine = Engine::new(EngineConfig::new(temp.path().join("catalog.db"))).unwrap();
-        let controller = Arc::new(QueryController::new(engine.clone(), 100, 30));
+        let controller = Arc::new(JobController::new(engine.clone(), 100, 30));
         let service = VqlFlightSqlService::new(
             engine,
             controller,

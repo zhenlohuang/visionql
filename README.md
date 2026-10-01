@@ -27,7 +27,7 @@
 VisionQL is a unified batch and streaming engine for querying images, video files, and live camera streams with SQL. Register data sources and typed Models, compose inference with filters and aggregations, and return Arrow results or write continuously to Kafka. Use the embedded CLI or Python API, connect remotely through `vqld` and Arrow Flight SQL, or inspect visual results in the browser with Workbench.
 
 > [!IMPORTANT]
-> The latest published release is v0.2.0, which includes the embedded engine, single-node `vqld` service, Arrow Flight SQL, and Catalog-backed persistent Queries. The current source also implements Workbench for the upcoming v0.3 release and uses `SHOW JOBS` for persistent Query listing. See the [Roadmap](ROADMAP.md) for release scope and the [Changelog](CHANGELOG.md) for changes since v0.2.0.
+> The latest published release is v0.2.0, which includes the embedded engine, single-node `vqld` service, Arrow Flight SQL, and Catalog-backed persistent Jobs. The current source also implements Workbench for the upcoming v0.3 release and uses `SHOW JOBS` for persistent Job listing. See the [Roadmap](ROADMAP.md) for release scope and the [Changelog](CHANGELOG.md) for changes since v0.2.0.
 
 ### Workbench demo
 
@@ -143,9 +143,9 @@ cargo run -q -p vql-cli -- shell --endpoint http://127.0.0.1:6031
 
 The same shell front end now has two execution backends: without `--endpoint` it embeds `vql-kernel::Session`; with `--endpoint` it executes through Flight SQL against `vqld`. Loopback development needs no client environment variables. For a secured endpoint, pass `--token <token>`; if the flag is absent, the shell falls back to `VQLD_SERVICE_TOKEN`. The daemon maps that credential to its configured principal. Use `--tls-ca <ca.pem>` when the server certificate requires an additional CA. Prefer the environment fallback when the token must not appear in process arguments.
 
-Remote SQL and Workbench share the daemon's Catalog. Use `SUBMIT QUERY` to register a continuous Table write, `SHOW JOBS` to list it, and `DESCRIBE QUERY` / `STOP QUERY` to inspect or stop it. See the complete [persistent Jobs example](#persistent-jobs).
+Remote SQL and Workbench share the daemon's Catalog. Use `SUBMIT JOB` to register a continuous Table write, `SHOW JOBS` to list it, and `DESCRIBE JOB` / `STOP JOB` to inspect or stop it. See the complete [persistent Jobs example](#persistent-jobs).
 
-Loopback development accepts a Flight SQL handshake with an empty credential and maps it to the daemon's configured principal, `service` by default. Logical Sessions expire after 15 idle minutes by default. For non-loopback Flight access, configure `VQLD_SERVICE_TOKEN`, `--tls-cert`, and `--tls-key`; startup rejects an externally bound Flight listener without all three security inputs. The HTTP health and metrics listener remains loopback-only because v0.2 does not terminate TLS for that surface. Run `vqld --help` for Session and attach timeouts, result limits, Query-history retention, and listener options.
+Loopback development accepts a Flight SQL handshake with an empty credential and maps it to the daemon's configured principal, `service` by default. Logical Sessions expire after 15 idle minutes by default. For non-loopback Flight access, configure `VQLD_SERVICE_TOKEN`, `--tls-cert`, and `--tls-key`; startup rejects an externally bound Flight listener without all three security inputs. The HTTP health and metrics listener remains loopback-only because v0.2 does not terminate TLS for that surface. Run `vqld --help` for Session and attach timeouts, result limits, Job-history retention, and listener options.
 
 ## Workbench
 
@@ -165,9 +165,9 @@ Open [http://127.0.0.1:6040](http://127.0.0.1:6040), then use **Settings** to co
 - **SQL workspace.** Create and rename draft tabs, format SQL, run the buffer or selected/current statement, and inspect `EXPLAIN`. Drafts and up to 500 execution-history records survive browser reloads; query results and media stay in memory.
 - **Visual results.** View typed Arrow results as a table or JSON, inspect IMAGE thumbnails and BOX2D overlays with labels and confidence, and export a crop from the returned thumbnail. **Run as attached stream** previews a continuous query in a rolling buffer of the latest 500 rows; **Cancel active execution** stops that attached execution.
 - **Catalog.** Browse Catalog → Schema → Tables / Models / Functions across namespaces. Selecting an object opens formatted, read-only `SHOW CREATE` DDL. The Model version inspector shows the displayed version and default marker and lets you load an exact version. Create, resolve, alter, or drop objects through SQL drafts in the editor.
-- **Jobs.** List and search persistent Queries, inspect their status and redacted SQL, load a separate draft, and stop active Jobs. The visible list refreshes every five seconds. Loading a draft leaves the registered definition unchanged; replace redacted literals before resubmitting it.
+- **Jobs.** List and search persistent Jobs, inspect their status and redacted SQL, load a separate draft, and stop active Jobs. The visible list refreshes every five seconds. Loading a draft leaves the registered definition unchanged; replace redacted literals before resubmitting it.
 
-Editor execution and management reads share one active execution per browser Session. Closing Workbench or cancelling an attached preview leaves persistent Jobs running in `vqld`; stopping a Job explicitly sends `STOP QUERY`.
+Editor execution and management reads share one active execution per browser Session. Closing Workbench or cancelling an attached preview leaves persistent Jobs running in `vqld`; stopping a Job explicitly sends `STOP JOB`.
 
 See the [Workbench README](vql-workbench/README.md) for connection options and development checks.
 
@@ -307,7 +307,7 @@ Kafka output is a writable table declared with `CREATE TABLE ... USING KAFKA`. A
 
 ### Persistent Jobs
 
-A persistent Query is a continuous `INSERT INTO ... SELECT` owned by `vqld`. Start the local Kafka broker from the repository root:
+A persistent Job is a continuous `INSERT INTO ... SELECT` owned by `vqld`. Start the local Kafka broker from the repository root:
 
 ```bash
 docker compose up -d kafka
@@ -323,7 +323,7 @@ OPTIONS (
   topic = 'visionql-camera-counts'
 );
 
-SUBMIT QUERY entrance_frames AS
+SUBMIT JOB entrance_frames AS
 INSERT INTO camera_counts
 SELECT TUMBLE(ts, INTERVAL '10' SECOND) AS window_start,
        COUNT(*) AS frames
@@ -333,16 +333,16 @@ GROUP BY 1;
 SHOW JOBS;
 ```
 
-Copy the returned `query_id` and use it to inspect or stop that Query:
+Copy the returned `job_id` and use it to inspect or stop that Job:
 
 ```sql
-DESCRIBE QUERY '<query_id>';
-STOP QUERY '<query_id>';
+DESCRIBE JOB '<job_id>';
+STOP JOB '<job_id>';
 ```
 
-In Workbench, **Workspace → Jobs** provides the same inspection and Stop actions. The Job continues after the submitting client disconnects. After daemon restart, active RTSP Queries resume from the live position with fresh in-memory window state and an explicit restart gap. Query definitions are immutable; loading one into the editor creates a new draft, and submitting it creates a new Query.
+In Workbench, **Workspace → Jobs** provides the same inspection and Stop actions. The Job continues after the submitting client disconnects. After daemon restart, active RTSP Jobs resume from the live position with fresh in-memory window state and an explicit restart gap. Job definitions are immutable; loading one into the editor creates a new draft, and submitting it creates a new Job.
 
-The current source uses `SHOW JOBS`; the published v0.2.0 release uses `SHOW QUERIES`. The listing's Arrow fields and the other Query lifecycle commands are unchanged.
+The current source uses `SUBMIT JOB`, `SHOW JOBS`, `DESCRIBE JOB`, and `STOP JOB`, with `job_id` in their Arrow results.
 
 ## Python API
 
@@ -438,11 +438,11 @@ CLI output uses that form. Python raises `visionql.VisionQLError`, a `RuntimeErr
 
 At component level, `vql-cli` either connects to `vqld` over Flight SQL or embeds `vql-kernel`
 directly. `vql-python` is a second embedded host through PyO3. `vqld` delegates SQL planning and
-execution to `vql-kernel`, while retaining ownership of service Sessions and persistent Query
+execution to `vql-kernel`, while retaining ownership of service Sessions and persistent Job
 lifecycle.
 
 `vql-kernel` resolves definitions and immutable snapshots through `vql-catalog`. Both the kernel and
-`vqld` use the Catalog-owned Query contract; `vql-catalog` persists definitions and Query status in
+`vqld` use the Catalog-owned Job contract; `vql-catalog` persists definitions and Job status in
 `$VQL_HOME/catalog/vql.db`, so there is no separate service database.
 
 `vql-workbench` is an independent browser client. It connects only through `vqld`'s public Flight
@@ -463,9 +463,9 @@ designs below for normative contracts.
 | [Product requirements](docs/prd.md) | Product value, public semantics, and version scope |
 | [High-level design](docs/high_level_design.md) | System boundaries, data paths, invariants, and dependency direction |
 | [Kernel design](docs/design/kernel.md) | Planning, streaming, media, inference, resources, and security |
-| [Catalog design](docs/design/catalog.md) | Namespaces, definition and persistent Query objects, snapshots, providers, backends, and UC API |
-| [`vqld` service design](docs/design/vqld.md) | v0.2 Flight SQL host, Catalog-backed persistent Queries, and honest restart-from-live behavior |
-| [Workbench design](docs/design/workbench.md) | v0.3 browser SQL client, visual results, Catalog management, and persistent Query management |
+| [Catalog design](docs/design/catalog.md) | Namespaces, definition and persistent Job objects, snapshots, providers, backends, and UC API |
+| [`vqld` service design](docs/design/vqld.md) | v0.2 Flight SQL host, Catalog-backed persistent Jobs, and honest restart-from-live behavior |
+| [Workbench design](docs/design/workbench.md) | v0.3 browser SQL client, visual results, Catalog management, and persistent Job management |
 | [Error code design](docs/design/error_codes.md) | Stable identifiers, symbols, host representation, and extension rules |
 | [CLI design](docs/design/cli.md) | Shell, script execution, rendering, and signal behavior |
 | [Python binding design](docs/design/python_binding.md) | PyO3 API, PyArrow results, and Python UDFs |

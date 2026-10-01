@@ -22,6 +22,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+if [[ "${1:-}" == "--visual-parity" ]]; then
+  shift
+  VQL_HOME="$runtime_root/python-home" \
+    "${VQL_WORKBENCH_E2E_PYTHON:-python3}" \
+    "$repo_root/vql-testing/tests/workbench/python_reference.py" "$runtime_root"
+  export VQL_WORKBENCH_E2E_PARITY_REFERENCE="$runtime_root/visual-reference.json"
+fi
+
 free_port() {
   node -e 'const net = require("node:net"); const server = net.createServer(); server.listen(0, "127.0.0.1", () => { console.log(server.address().port); server.close(); });'
 }

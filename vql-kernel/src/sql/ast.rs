@@ -99,16 +99,16 @@ pub(crate) enum VqlStatement {
         kind: ShowKind,
         name: String,
     },
-    SubmitQuery {
+    SubmitJob {
         name: String,
         sql: String,
     },
     ShowJobs,
-    DescribeQuery {
-        query_id: String,
+    DescribeJob {
+        job_id: String,
     },
-    StopQuery {
-        query_id: String,
+    StopJob {
+        job_id: String,
     },
     Query {
         sql: String,
