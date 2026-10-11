@@ -1,4 +1,5 @@
 <div align="center">
+  <img alt="VisionQL" src="docs/assets/visionql-logo.png" width="112" height="112">
   <h1>VisionQL — A Data Engine for Physical AI</h1>
   <p>
     <a href="https://github.com/zhenlohuang/visionql/actions/workflows/ci.yml">
